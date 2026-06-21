@@ -100,8 +100,7 @@ export default function DashboardPage({ onNavigate, onFieldClick, onFieldHighlig
       {/* Верхняя фиксированная часть */}
       <div className="p-4 lg:p-6 pb-0 space-y-4">
         <div>
-          <h2 className="text-xl font-bold text-agro-text">Главная</h2>
-          <p className="text-sm text-agro-muted mt-1">
+          <p className="text-sm text-agro-muted">
             Бухоро Агрокластер
             {lastUpdated && ` · Данные от ${lastUpdated}`}
           </p>

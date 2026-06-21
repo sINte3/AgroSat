@@ -44,7 +44,7 @@ export default function AlertsPage({ onFieldClick, onFieldHighlight }) {
 
   if (error) {
     return (
-      <div className="p-6 h-full flex flex-col">
+      <div className="p-6 pt-16 h-full flex flex-col">
         <div className="text-center py-12">
           <p className="text-agro-danger mb-4">{error}</p>
           <button onClick={loadAlerts} className="btn-primary">Повторить</button>
@@ -54,7 +54,7 @@ export default function AlertsPage({ onFieldClick, onFieldHighlight }) {
   }
 
   return (
-    <div className="p-6 h-full flex flex-col">
+    <div className="p-6 pt-16 h-full flex flex-col">
       {/* Заголовок */}
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-3">
