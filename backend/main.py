@@ -63,6 +63,9 @@ app = FastAPI(
     lifespan=lifespan,
     docs_url="/api/docs",
     redoc_url="/api/redoc",
+    swagger_ui_parameters={
+        "persistAuthorization": settings.environment != "production"
+    },
 )
 
 # CORS — разрешаем фронтенд

@@ -6,11 +6,14 @@ AI агрономические рекомендации через Claude API.
 """
 
 import logging
-from fastapi import APIRouter, Depends, HTTPException
+from datetime import date
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from database import get_db
 from config import settings
+from models.monitoring import User
+from api.auth import get_current_active_user
 import anthropic
 
 logger = logging.getLogger(__name__)
@@ -18,7 +21,11 @@ router = APIRouter(prefix="/api/ai", tags=["ai"])
 
 
 @router.post("/recommend")
-def get_ai_recommendation(payload: dict, db: Session = Depends(get_db)):
+def get_ai_recommendation(
+    payload: dict,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
     """
     Generate AI agronomic recommendation for a specific alert + field.
 
@@ -26,39 +33,88 @@ def get_ai_recommendation(payload: dict, db: Session = Depends(get_db)):
         alert_id: int
         field_id: int
     """
-    alert_id = payload.get("alert_id")
-    field_id = payload.get("field_id")
+    try:
+        alert_id = int(payload.get("alert_id"))
+        field_id = int(payload.get("field_id"))
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="alert_id and field_id must be integer",
+        )
 
-    if not alert_id or not field_id:
-        raise HTTPException(status_code=400, detail="alert_id and field_id required")
+    if alert_id <= 0 or field_id <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="alert_id and field_id must be positive",
+        )
 
-    # --- Load field data ---
-    field_row = db.execute(text("""
+    role = str(current_user.role or "").lower()
+
+    if role == "viewer":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Пользователям с правами гостя запрещено генерировать ИИ-рекомендации",
+        )
+
+    if role not in {"admin", "manager", "agronomist"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Недостаточно прав для генерации ИИ-рекомендации",
+        )
+
+    # --- Load field + alert + crop + enterprise in one joined query ---
+    context_row = db.execute(text("""
         SELECT
-            f.name, f.code, f.area_ha, f.irrigation_type,
-            f.centroid_lat, f.centroid_lon,
-            ct.name_ru as crop_name,
-            e.name as enterprise_name
-        FROM fields f
-        LEFT JOIN crop_seasons cs ON cs.field_id = f.id AND cs.season_year = 2026
+            f.id AS field_id,
+            f.enterprise_id,
+            f.name,
+            f.code,
+            f.area_ha,
+            f.irrigation_type,
+            f.centroid_lat,
+            f.centroid_lon,
+            ct.name_ru AS crop_name,
+            e.name AS enterprise_name,
+            a.id AS alert_id,
+            a.alert_type,
+            a.severity,
+            a.title,
+            a.description,
+            a.recommendation,
+            a.triggered_value,
+            a.threshold_value
+        FROM alerts a
+        JOIN fields f ON f.id = a.field_id
+        JOIN enterprises e ON e.id = f.enterprise_id
+        LEFT JOIN crop_seasons cs ON cs.field_id = f.id AND cs.season_year = :year
         LEFT JOIN crop_types ct ON ct.id = cs.crop_type_id
-        LEFT JOIN enterprises e ON e.id = f.enterprise_id
-        WHERE f.id = :fid
-    """), {"fid": field_id}).fetchone()
+        WHERE a.id = :aid
+          AND f.id = :fid
+        LIMIT 1
+    """), {
+        "aid": alert_id,
+        "fid": field_id,
+        "year": date.today().year,
+    }).fetchone()
 
-    if not field_row:
-        raise HTTPException(status_code=404, detail="Field not found")
+    if not context_row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Field or alert not found",
+        )
 
-    # --- Load alert data ---
-    alert_row = db.execute(text("""
-        SELECT alert_type, severity, title, description, recommendation,
-               triggered_value, threshold_value
-        FROM alerts
-        WHERE id = :aid
-    """), {"aid": alert_id}).fetchone()
+    if role == "agronomist":
+        if current_user.enterprise_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="У пользователя-агронома не указано предприятие",
+            )
 
-    if not alert_row:
-        raise HTTPException(status_code=404, detail="Alert not found")
+        if context_row.enterprise_id != current_user.enterprise_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Агроном может запрашивать ИИ-рекомендации только для полей своего предприятия",
+            )
 
     # --- Load NDVI history (last 10 records) ---
     ndvi_rows = db.execute(text("""
@@ -79,9 +135,9 @@ def get_ai_recommendation(payload: dict, db: Session = Depends(get_db)):
     weather_summary = "Данные о погоде недоступны"
     try:
         import httpx
-        if field_row.centroid_lat and field_row.centroid_lon:
-            lat = field_row.centroid_lat
-            lon = field_row.centroid_lon
+        if context_row.centroid_lat and context_row.centroid_lon:
+            lat = context_row.centroid_lat
+            lon = context_row.centroid_lon
             url = (
                 f"https://api.open-meteo.com/v1/forecast"
                 f"?latitude={lat}&longitude={lon}"
@@ -108,28 +164,28 @@ def get_ai_recommendation(payload: dict, db: Session = Depends(get_db)):
         "flood": "затопление",
     }
     irrigation = irrigation_map.get(
-        str(field_row.irrigation_type).lower(),
-        field_row.irrigation_type or "не указано"
+        str(context_row.irrigation_type).lower(),
+        context_row.irrigation_type or "не указано"
     )
 
     prompt = f"""Ты — опытный агроном-консультант для Бухарской области Узбекистана.
 Проанализируй ситуацию на поле и дай конкретные практические рекомендации.
 
 ## Данные поля
-- Предприятие: {field_row.enterprise_name}
-- Поле: {field_row.name} (код: {field_row.code})
-- Площадь: {field_row.area_ha:.1f} га
-- Культура: {field_row.crop_name or 'не указана'}
+- Предприятие: {context_row.enterprise_name}
+- Поле: {context_row.name} (код: {context_row.code})
+- Площадь: {context_row.area_ha:.1f} га
+- Культура: {context_row.crop_name or 'не указана'}
 - Тип орошения: {irrigation}
 
 ## Алерт (проблема)
-- Тип: {alert_row.alert_type}
-- Критичность: {alert_row.severity}
-- Заголовок: {alert_row.title}
-- Описание: {alert_row.description}
-- Базовая рекомендация системы: {alert_row.recommendation or 'нет'}
-- Значение NDVI при алерте: {alert_row.triggered_value}
-- Пороговое значение: {alert_row.threshold_value}
+- Тип: {context_row.alert_type}
+- Критичность: {context_row.severity}
+- Заголовок: {context_row.title}
+- Описание: {context_row.description}
+- Базовая рекомендация системы: {context_row.recommendation or 'нет'}
+- Значение NDVI при алерте: {context_row.triggered_value}
+- Пороговое значение: {context_row.threshold_value}
 
 ## История NDVI (последние 10 измерений, новые сначала)
 {chr(10).join(ndvi_history) if ndvi_history else 'Нет данных'}
@@ -186,7 +242,7 @@ def get_ai_recommendation(payload: dict, db: Session = Depends(get_db)):
     return {
         "alert_id": alert_id,
         "field_id": field_id,
-        "field_name": field_row.name,
+        "field_name": context_row.name,
         "recommendation": recommendation,
         "model": "claude-sonnet-4-6",
     }
