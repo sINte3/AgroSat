@@ -10,20 +10,53 @@ API для генерации PDF отчётов.
 import logging
 import io
 import urllib.parse
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from database import get_db
 from services.pdf_report import generate_enterprise_pdf
+from models.monitoring import User
+from api.auth import get_current_active_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/reports", tags=["reports"])
 
 
 @router.get("/enterprise/{enterprise_id}/pdf")
-def download_enterprise_pdf(enterprise_id: int, db: Session = Depends(get_db)):
-    """Сгенерировать и вернуть PDF отчёт по предприятию."""
+def download_enterprise_pdf(
+    enterprise_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Сгенерировать и вернуть PDF отчёт по предприятию с проверкой прав доступа."""
+
+    if enterprise_id <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="enterprise_id must be positive",
+        )
+
+    role = str(current_user.role or "").lower()
+
+    if role not in {"admin", "manager", "agronomist", "viewer"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Недостаточно прав для скачивания PDF-отчёта",
+        )
+
+    if role in {"agronomist", "viewer"}:
+        if current_user.enterprise_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="У пользователя не указано предприятие",
+            )
+
+        if current_user.enterprise_id != enterprise_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Вы можете скачивать отчёты только для своего предприятия",
+            )
 
     ent_row = db.execute(text("""
         SELECT id, name, code, region FROM enterprises WHERE id = :eid
