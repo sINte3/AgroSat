@@ -1,13 +1,16 @@
 """
-Run remaining backfill for fields that have no NDVI history before June 16, 2026.
-Finds fields without historical data and runs backfill from Jan 1 to Jun 15.
+Historical NDVI backfill based on earliest-record coverage detection.
+Finds fields whose earliest NDVI record is missing or after 2026-02-01,
+then backfills from 2026-01-01 up to (but not including) the first record.
 
 Usage:
-    python scripts/run_remaining_backfill.py
+    python scripts/run_remaining_backfill.py           # real backfill
+    python scripts/run_remaining_backfill.py --dry-run  # dry run (no writes)
 """
 import sys
 import os
 import time
+import argparse
 import logging
 from datetime import date, timedelta
 
@@ -26,8 +29,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-START = date(2026, 1, 1)
-END = date(2026, 6, 15)
+BACKFILL_START_DATE = date(2026, 1, 1)
+EARLY_HISTORY_THRESHOLD_DATE = date(2026, 2, 1)
+CONFIGURED_HISTORICAL_END = date(2026, 6, 15)
 BATCH_SIZE = 10
 BATCH_PAUSE_S = 3
 RATE_LIMIT_S = 0.5
@@ -43,142 +47,245 @@ def generate_sentinel2_dates(start_date, end_date):
     return dates
 
 
-def get_existing_dates(db, field_id):
-    result = db.execute(
-        text("SELECT captured_date FROM ndvi_records WHERE field_id = :fid"),
-        {"fid": field_id}
+def recalculate_change_for_field(db, field_id):
+    """
+    Recalculate ndvi_change and ndvi_change_pct for all records of a field
+    in chronological order. First record gets None values.
+    """
+    records = (
+        db.query(NDVIRecord)
+        .filter(NDVIRecord.field_id == field_id)
+        .order_by(NDVIRecord.captured_date.asc())
+        .all()
     )
-    return {row[0] for row in result.fetchall()}
-
-
-def backfill_field(db, field, target_dates, existing_dates):
-    """Fetch historical NDVI for one field across target dates."""
-    new_dates = [d for d in target_dates if d not in existing_dates]
-    if not new_dates:
-        return 0
-
-    success_count = 0
-    for target_date in new_dates:
-        try:
-            ndvi_data = fetch_ndvi_for_field_date(db, field, target_date)
-            if ndvi_data is None:
-                continue
-
-            captured_date = date.fromisoformat(ndvi_data["captured_date"])
-
-            existing = db.query(NDVIRecord).filter(
-                NDVIRecord.field_id == field.id,
-                NDVIRecord.captured_date == captured_date
-            ).first()
-            if existing:
-                continue
-
-            prev_record = db.query(NDVIRecord).filter(
-                NDVIRecord.field_id == field.id,
-                NDVIRecord.captured_date < captured_date
-            ).order_by(NDVIRecord.captured_date.desc()).first()
-
-            ndvi_change = None
-            ndvi_change_pct = None
-            if prev_record and prev_record.mean_ndvi:
-                ndvi_change = ndvi_data["mean_ndvi"] - prev_record.mean_ndvi
-                if prev_record.mean_ndvi >= 0.15:
-                    ndvi_change_pct = (ndvi_change / prev_record.mean_ndvi) * 100
-
-            record = NDVIRecord(
-                field_id=field.id,
-                captured_date=captured_date,
-                mean_ndvi=ndvi_data["mean_ndvi"],
-                min_ndvi=ndvi_data.get("min_ndvi"),
-                max_ndvi=ndvi_data.get("max_ndvi"),
-                std_ndvi=ndvi_data.get("std_ndvi"),
-                p10_ndvi=ndvi_data.get("p10_ndvi"),
-                p90_ndvi=ndvi_data.get("p90_ndvi"),
-                cloud_cover_pct=ndvi_data.get("cloud_cover_pct"),
-                valid_pixels_pct=ndvi_data.get("valid_pixels_pct"),
-                satellite=ndvi_data.get("satellite", "Sentinel-2"),
-                ndvi_change=ndvi_change,
-                ndvi_change_pct=ndvi_change_pct,
-            )
-            db.add(record)
-            db.flush()
-            success_count += 1
-            time.sleep(RATE_LIMIT_S)
-
-        except Exception as e:
-            logger.error(f"  [{field.name}] Error for {target_date}: {e}")
-            db.rollback()
-            time.sleep(1)
-            continue
-
-    return success_count
+    previous = None
+    for record in records:
+        if previous is None:
+            record.ndvi_change = None
+            record.ndvi_change_pct = None
+        else:
+            if record.mean_ndvi is not None and previous.mean_ndvi is not None:
+                record.ndvi_change = record.mean_ndvi - previous.mean_ndvi
+                if previous.mean_ndvi >= 0.15:
+                    record.ndvi_change_pct = (record.ndvi_change / previous.mean_ndvi) * 100
+                else:
+                    record.ndvi_change_pct = None
+            else:
+                record.ndvi_change = None
+                record.ndvi_change_pct = None
+        previous = record
+    db.flush()
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Backfill historical NDVI")
+    parser.add_argument("--dry-run", action="store_true", help="Print plan without writing any data")
+    args = parser.parse_args()
+
     init_db()
     db = SessionLocal()
 
-    target_dates = generate_sentinel2_dates(START, END)
-
     try:
-        # Find fields with no NDVI before June 16
+        # ── Candidate selection: earliest-record based ──────────────────────
         rows = db.execute(text("""
-            SELECT f.id
+            SELECT
+                f.id,
+                f.name,
+                MIN(n.captured_date) AS first_ndvi_date,
+                MAX(n.captured_date) AS last_ndvi_date,
+                COUNT(n.id) AS ndvi_count
             FROM fields f
-            WHERE f.id NOT IN (
-                SELECT DISTINCT nr.field_id FROM ndvi_records nr
-                WHERE nr.captured_date < '2026-06-16'
-            )
+            LEFT JOIN ndvi_records n ON n.field_id = f.id
+            WHERE f.is_active = true
+            GROUP BY f.id, f.name
+            HAVING MIN(n.captured_date) IS NULL
+               OR MIN(n.captured_date) > DATE '2026-02-01'
             ORDER BY f.id
         """)).fetchall()
 
-        field_ids = [r[0] for r in rows]
-        logger.info(f"=== Remaining Backfill ===")
-        logger.info(f"Date range: {START} to {END}")
-        logger.info(f"Target dates: {len(target_dates)} (every ~5 days)")
-        logger.info(f"Fields needing history: {len(field_ids)}")
+        candidate_fields = []
+        for r in rows:
+            candidate_fields.append({
+                "id": r.id,
+                "name": r.name,
+                "first_ndvi_date": r.first_ndvi_date,
+                "last_ndvi_date": r.last_ndvi_date,
+                "ndvi_count": r.ndvi_count,
+            })
 
-        if not field_ids:
-            logger.info("All fields already have history. Nothing to do.")
+        logger.info("=" * 60)
+        logger.info("  Historical NDVI Backfill")
+        logger.info(f"  Backfill window start : {BACKFILL_START_DATE}")
+        logger.info(f"  Early-history threshold: {EARLY_HISTORY_THRESHOLD_DATE}")
+        logger.info(f"  Candidate fields      : {len(candidate_fields)}")
+        logger.info("=" * 60)
+
+        if not candidate_fields:
+            logger.info("All active fields have early history (Jan 2026). Nothing to do.")
             return
 
-        total_success = 0
-        total_fields = len(field_ids)
+        if args.dry_run:
+            logger.info("\n  DRY RUN — no data will be written\n")
+            logger.info(f"  {'Field ID':<10} {'Field Name':<30} {'First NDVI':<14} {'Last NDVI':<14} {'Count':<6} Backfill window")
+            logger.info(f"  {'-'*9:<10} {'-'*29:<30} {'-'*13:<14} {'-'*13:<14} {'-'*5:<6} {'-'*20}")
+            for cf in candidate_fields:
+                first_date = str(cf["first_ndvi_date"]) if cf["first_ndvi_date"] else "NONE"
+                last_date = str(cf["last_ndvi_date"]) if cf["last_ndvi_date"] else "NONE"
+                if cf["first_ndvi_date"] is None:
+                    backfill_end = CONFIGURED_HISTORICAL_END
+                else:
+                    backfill_end = cf["first_ndvi_date"]
+                target_dates_global = generate_sentinel2_dates(BACKFILL_START_DATE, backfill_end)
+                if backfill_end <= BACKFILL_START_DATE:
+                    window_str = "skip (already has early history)"
+                else:
+                    window_str = f"{BACKFILL_START_DATE} → {backfill_end - timedelta(days=1)} ({len(target_dates_global)} dates)"
+                logger.info(f"  {cf['id']:<10} {cf['name']:<30} {first_date:<14} {last_date:<14} {cf['ndvi_count']:<6} {window_str}")
+            logger.info("\n  Dry-run complete. Rerun without --dry-run to execute.")
+            return
 
-        for i, fid in enumerate(field_ids):
-            field = db.query(Field).get(fid)
+        # ── Real backfill ──────────────────────────────────────────────────
+        logger.info(f"\n  Starting backfill for {len(candidate_fields)} fields...")
+
+        total_attempted = 0
+        total_inserted = 0
+        total_skipped_existing = 0
+        total_skipped_no_data = 0
+        total_skipped_quality = 0
+        total_errors = 0
+        total_fields = len(candidate_fields)
+
+        for i, cf in enumerate(candidate_fields):
+            field = db.query(Field).get(cf["id"])
             if not field:
                 continue
 
-            logger.info(f"\n[{i+1}/{total_fields}] Processing: {field.name} (id={fid})")
+            # Compute backfill window per field
+            if cf["first_ndvi_date"] is None:
+                backfill_end_exclusive = CONFIGURED_HISTORICAL_END
+            else:
+                backfill_end_exclusive = cf["first_ndvi_date"]
 
-            existing = get_existing_dates(db, fid)
-            count = backfill_field(db, field, target_dates, existing)
-            total_success += count
+            if backfill_end_exclusive <= BACKFILL_START_DATE:
+                logger.info(f"[{i+1}/{total_fields}] Field {field.name} (id={field.id}): already has early history; skip")
+                continue
 
-            logger.info(f"  → Saved {count} new records")
+            target_dates = generate_sentinel2_dates(BACKFILL_START_DATE, backfill_end_exclusive)
+            # Exclude dates on or after first record date
+            target_dates = [d for d in target_dates if d < backfill_end_exclusive]
 
-            if (i + 1) % BATCH_SIZE == 0 and i + 1 < total_fields:
+            if not target_dates:
+                continue
+
+            field_attempted = 0
+            field_inserted = 0
+            field_skipped_existing = 0
+            field_skipped_no_data = 0
+            field_skipped_quality = 0
+            field_errors = 0
+
+            logger.info(
+                f"\n[{i+1}/{total_fields}] {field.name} (id={field.id}): "
+                f"backfilling {len(target_dates)} dates "
+                f"[{BACKFILL_START_DATE} → {backfill_end_exclusive - timedelta(days=1)}]"
+            )
+
+            for target_date in target_dates:
+                field_attempted += 1
+                try:
+                    ndvi_data = fetch_ndvi_for_field_date(db, field, target_date)
+                    if ndvi_data is None:
+                        field_skipped_no_data += 1
+                        logger.debug(f"  [{field.name}] {target_date}: no data (cloud/mock)")
+                        continue
+
+                    captured_date = date.fromisoformat(ndvi_data["captured_date"])
+
+                    # Idempotency check against actual captured date
+                    existing = db.query(NDVIRecord).filter(
+                        NDVIRecord.field_id == field.id,
+                        NDVIRecord.captured_date == captured_date,
+                    ).first()
+
+                    if existing:
+                        field_skipped_existing += 1
+                        logger.info(f"  [{field.name}] {captured_date}: already exists, skipping")
+                        continue
+
+                    prev_record = db.query(NDVIRecord).filter(
+                        NDVIRecord.field_id == field.id,
+                        NDVIRecord.captured_date < captured_date
+                    ).order_by(NDVIRecord.captured_date.desc()).first()
+
+                    ndvi_change = None
+                    ndvi_change_pct = None
+                    if prev_record and prev_record.mean_ndvi:
+                        ndvi_change = ndvi_data["mean_ndvi"] - prev_record.mean_ndvi
+                        if prev_record.mean_ndvi >= 0.15:
+                            ndvi_change_pct = (ndvi_change / prev_record.mean_ndvi) * 100
+
+                    record = NDVIRecord(
+                        field_id=field.id,
+                        captured_date=captured_date,
+                        mean_ndvi=ndvi_data.get("mean_ndvi"),
+                        min_ndvi=ndvi_data.get("min_ndvi"),
+                        max_ndvi=ndvi_data.get("max_ndvi"),
+                        std_ndvi=ndvi_data.get("std_ndvi"),
+                        p10_ndvi=ndvi_data.get("p10_ndvi"),
+                        p90_ndvi=ndvi_data.get("p90_ndvi"),
+                        cloud_cover_pct=ndvi_data.get("cloud_cover_pct"),
+                        valid_pixels_pct=ndvi_data.get("valid_pixels_pct"),
+                        satellite=ndvi_data.get("satellite", "Sentinel-2"),
+                        ndvi_change=ndvi_change,
+                        ndvi_change_pct=ndvi_change_pct,
+                    )
+                    db.add(record)
+                    db.flush()
+                    field_inserted += 1
+                    time.sleep(RATE_LIMIT_S)
+
+                except Exception as e:
+                    logger.error(f"  [{field.name}] Error for {target_date}: {e}")
+                    db.rollback()
+                    field_errors += 1
+                    time.sleep(1)
+                    continue
+
+            # Recalculate ndvi_change/ndvi_change_pct chronologically
+            if field_inserted > 0:
+                recalculate_change_for_field(db, field.id)
+
+            total_attempted += field_attempted
+            total_inserted += field_inserted
+            total_skipped_existing += field_skipped_existing
+            total_skipped_no_data += field_skipped_no_data
+            total_skipped_quality += field_skipped_quality
+            total_errors += field_errors
+
+            logger.info(
+                f"  → inserted={field_inserted} skipped_existing={field_skipped_existing} "
+                f"no_data={field_skipped_no_data} errors={field_errors}"
+            )
+
+            if (i + 1) % BATCH_SIZE == 0 and (i + 1) < total_fields:
                 db.commit()
-                logger.info(f"\n--- Batch pause (processed {i+1}/{total_fields}) ---")
+                logger.info(f"\n--- Batch commit (processed {i+1}/{total_fields}) ---")
                 time.sleep(BATCH_PAUSE_S)
 
+        # Final commit
         db.commit()
 
-        # Summary
-        r = db.execute(text("""
-            SELECT COUNT(*) FROM ndvi_records
-            WHERE mean_ndvi >= 0 AND mean_ndvi = mean_ndvi
-        """)).fetchone()
-        r2 = db.execute(text("""
-            SELECT COUNT(DISTINCT field_id) FROM ndvi_records
-            WHERE captured_date < '2026-06-16'
-        """)).fetchone()
-
-        logger.info(f"\n=== COMPLETE ===")
-        logger.info(f"New records saved this run: {total_success}")
-        logger.info(f"Total valid records: {r[0]}")
-        logger.info(f"Fields with history before Jun 16: {r2[0]}")
+        # ── Summary ────────────────────────────────────────────────────────
+        logger.info("\n" + "=" * 60)
+        logger.info("  BACKFILL COMPLETE")
+        logger.info(f"  candidate_fields  = {len(candidate_fields)}")
+        logger.info(f"  attempted_dates   = {total_attempted}")
+        logger.info(f"  inserted_records  = {total_inserted}")
+        logger.info(f"  skipped_existing  = {total_skipped_existing}")
+        logger.info(f"  skipped_no_data   = {total_skipped_no_data}")
+        logger.info(f"  skipped_quality   = {total_skipped_quality}")
+        logger.info(f"  errors            = {total_errors}")
+        logger.info("=" * 60)
 
     finally:
         db.close()

@@ -1,0 +1,4449 @@
+╔══════════════════════════════════════════════════════════════╗
+║                    AGROSAT — Кодовая база бэкенда           ║
+║           Система интеллектуального мониторинга полей        ║
+║        Бухоро Агрокластер, Узбекистан                       ║
+╚══════════════════════════════════════════════════════════════╝
+
+========================================================
+Содержание:
+========================================================
+  1.  CLAUDE_CODE_PLAN.md                         — Мастер-план разработки
+  2.  backend/config.py                            — Настройки
+  3.  backend/database.py                          — SQLAlchemy + PostGIS
+  4.  backend/requirements.txt                     — Зависимости Python
+  5.  backend/main.py                              — Точка входа FastAPI
+  6.  backend/scheduler.py                         — Планировщик NDVI
+  7.  backend/add_garden.py                        — Seed-скрипт
+  8.  backend/create_stubs.py                      — Генерация заглушек
+  9.  backend/models/__init__.py                   — Модели (пусто)
+ 10.  backend/models/enterprise.py                 — Enterprise
+ 11.  backend/models/crop.py                       — CropType + UZBEKISTAN_CROPS
+ 12.  backend/models/field.py                      — Field + CropSeason
+ 13.  backend/models/monitoring.py                 — NDVIRecord, Alert, ScoutingNote, User
+ 14.  backend/schemas/__init__.py                  — Схемы (заголовок)
+ 15.  backend/schemas/enterprise.py                — Pydantic схемы предприятий
+ 16.  backend/schemas/field.py                     — Pydantic схемы полей
+ 17.  backend/schemas/ndvi.py                      — Pydantic схемы NDVI
+ 18.  backend/schemas/alert.py                     — Pydantic схемы алертов
+ 19.  backend/schemas/dashboard.py                 — Pydantic схемы дашборда
+ 20.  backend/schemas/weather.py                   — Pydantic схемы погоды
+ 21.  backend/api/__init__.py                      — API (пусто)
+ 22.  backend/api/enterprises.py                   — API: предприятия
+ 23.  backend/api/fields.py                        — API: поля + GeoJSON
+ 24.  backend/api/ndvi.py                          — API: NDVI
+ 25.  backend/api/alerts.py                        — API: алерты
+ 26.  backend/api/dashboard.py                     — API: дашборд
+ 27.  backend/api/weather.py                       — API: погода
+ 28.  backend/api/ai.py                            — API: AI рекомендации (Claude)
+ 29.  backend/api/telegram.py                      — API: Telegram уведомления
+ 30.  backend/api/reports.py                       — API: PDF отчёты
+ 31.  backend/services/satellite.py                — Sentinel Hub + Mock
+ 32.  backend/services/alert_engine.py             — Движок алертов
+ 33.  backend/services/weather.py                  — Open-Meteo погода
+ 34.  backend/services/telegram.py                 — Telegram Bot API
+ 35.  backend/services/pdf_report.py               — PDF генерация (ReportLab)
+ 36.  backend/services/cache.py                    — Redis кеш
+
+
+
+========================================================
+=== FILE: CLAUDE_CODE_PLAN.md
+========================================================
+# AgroSat — Мастер-план разработки
+
+> Этот документ — инструкция для Claude Code. При каждой новой сессии
+> начинай с чтения этого файла, затем файлов из раздела "Что читать".
+
+## Контекст проекта
+
+**AgroSat** — система интеллектуального мониторинга полей для Бухоро Агрокластера
+(30 дочерних предприятий, Узбекистан). Использует спутниковые снимки Sentinel-2,
+анализирует NDVI, генерирует агрономические алерты.
+
+**Стек:**
+- Backend: FastAPI + PostgreSQL/PostGIS + APScheduler
+- Frontend: React + MapLibre GL JS + Recharts + TailwindCSS
+- Спутники: Sentinel Hub API (бесплатный тариф)
+- Погода: Open-Meteo API (бесплатно, без ключей)
+- Деплой: Docker Compose
+
+**Целевые пользователи:** агрономы и руководители агрокластера.
+Язык интерфейса: русский (основной), узбекский (вторичный).
+
+---
+
+## Статус реализации
+
+### ✅ Готово (Phase 0 Skeleton)
+
+| Файл | Описание |
+|------|----------|
+| `docker-compose.yml` | PostgreSQL+PostGIS + Redis |
+| `backend/config.py` | Настройки через .env |
+| `backend/database.py` | SQLAlchemy + PostGIS init |
+| `backend/models/enterprise.py` | Модель предприятия |
+| `backend/models/crop.py` | Справочник культур (хлопок, пшеница, рис и др.) |
+| `backend/models/field.py` | Поля + CropSeason |
+| `backend/models/monitoring.py` | NDVIRecord, Alert, ScoutingNote, User |
+| `backend/services/satellite.py` | Sentinel Hub + Mock режим |
+| `backend/services/alert_engine.py` | Движок алертов (NDVI аномалии) |
+| `backend/services/weather.py` | Open-Meteo погода |
+| `backend/scheduler.py` | APScheduler (авто-фетчинг NDVI) |
+| `backend/main.py` | FastAPI точка входа |
+| `backend/scripts/seed_data.py` | Начальные данные |
+
+### 🔲 Нужно сделать (в порядке приоритета)
+
+---
+
+## Задачи для Claude Code
+
+### ЗАДАЧА 1: API роутеры (backend)
+
+Создай следующие файлы в `backend/api/`:
+
+#### `backend/api/enterprises.py`
+```
+GET  /api/enterprises/           — список предприятий
+GET  /api/enterprises/{id}       — предприятие + его поля
+POST /api/enterprises/           — создать
+PUT  /api/enterprises/{id}       — редактировать
+```
+
+#### `backend/api/fields.py`
+```
+GET  /api/fields/                     — все поля (с фильтром по enterprise_id)
+GET  /api/fields/{id}                 — поле + последнее NDVI + текущий алерты
+POST /api/fields/                     — создать (принимает GeoJSON geometry)
+PUT  /api/fields/{id}                 — редактировать
+POST /api/fields/{id}/season          — добавить/обновить сезон (культуру)
+GET  /api/fields/{id}/geojson         — вернуть поле как GeoJSON Feature
+GET  /api/fields/geojson/all          — все поля как GeoJSON FeatureCollection (для карты)
+```
+
+#### `backend/api/ndvi.py`
+```
+GET  /api/ndvi/{field_id}/history     — история NDVI (параметр: days=90)
+GET  /api/ndvi/{field_id}/latest      — последний снимок
+POST /api/ndvi/{field_id}/refresh     — принудительно обновить NDVI сейчас
+```
+
+#### `backend/api/alerts.py`
+```
+GET  /api/alerts/                     — все активные алерты (фильтр: enterprise_id, severity)
+GET  /api/alerts/{field_id}           — алерты по полю
+PUT  /api/alerts/{id}/acknowledge     — отметить как просмотренный
+```
+
+#### `backend/api/dashboard.py`
+```
+GET  /api/dashboard/summary           — сводка по кластеру:
+                                        total_fields, active_alerts, critical_alerts,
+                                        avg_ndvi, fields_with_problems, last_updated
+GET  /api/dashboard/enterprises/{id}  — сводка по предприятию
+```
+
+#### `backend/api/weather.py`
+```
+GET  /api/weather/field/{field_id}    — погода для конкретного поля
+GET  /api/weather/location            — погода по ?lat=&lon=
+```
+
+**Важно для всех роутеров:**
+- Используй `from database import get_db` и `Depends(get_db)` для сессий
+- Возвращай Pydantic schemas (создай `schemas/` папку)
+- Обрабатывай 404 через `HTTPException`
+- Геометрию возвращай как GeoJSON (используй PostGIS функции ST_AsGeoJSON)
+
+---
+
+### ЗАДАЧА 2: Pydantic схемы
+
+Создай `backend/schemas/`:
+
+```python
+# schemas/field.py
+class FieldCreate(BaseModel):
+    enterprise_id: int
+    name: str
+    code: Optional[str]
+    geometry: dict  # GeoJSON geometry
+    area_ha: Optional[float]
+    irrigation_type: Optional[str]
+    notes: Optional[str]
+
+class FieldResponse(BaseModel):
+    id: int
+    name: str
+    code: Optional[str]
+    area_ha: Optional[float]
+    enterprise_name: str
+    current_ndvi: Optional[float]
+    last_ndvi_date: Optional[str]
+    active_alerts_count: int
+    current_crop: Optional[str]
+    geometry: dict  # GeoJSON
+    # ... и т.д.
+```
+
+---
+
+### ЗАДАЧА 3: Frontend React-приложение
+
+Создай `frontend/` — React + Vite + TailwindCSS + MapLibre GL JS
+
+**Структура:**
+```
+frontend/
+├── package.json
+├── vite.config.js
+├── index.html
+└── src/
+    ├── main.jsx
+    ├── App.jsx
+    ├── api/
+    │   └── client.js              ← axios с базовым URL
+    ├── components/
+    │   ├── Map/
+    │   │   ├── FieldMap.jsx       ← главная карта (MapLibre)
+    │   │   └── FieldPopup.jsx     ← попап поля
+    │   ├── Dashboard/
+    │   │   ├── SummaryCards.jsx
+    │   │   └── AlertsList.jsx
+    │   ├── Field/
+    │   │   ├── FieldDetail.jsx
+    │   │   ├── NDVIChart.jsx      ← Recharts линейный график
+    │   │   └── WeatherWidget.jsx
+    │   └── Layout/
+    │       ├── Sidebar.jsx
+    │       └── Header.jsx
+    └── pages/
+        ├── DashboardPage.jsx
+        ├── FieldsPage.jsx
+        └── FieldDetailPage.jsx
+```
+
+**Дизайн:**
+- Тёмная тема (#0f1b0d фон, акцент #4ade80 зелёный)
+- Карта занимает 65% экрана
+- Справа — панель с деталями выбранного поля
+- NDVI colorscale: красный (0.0) → жёлтый (0.3) → зелёный (0.7+)
+
+**Цветовая схема NDVI для карты:**
+```javascript
+const NDVI_COLORS = [
+  [0.0, '#8B0000'],  // тёмно-красный — нет растительности
+  [0.2, '#FF4500'],  // оранжевый — скудная
+  [0.35, '#FFD700'], // жёлтый — умеренная
+  [0.5, '#9ACD32'],  // жёлто-зелёный — хорошая
+  [0.65, '#228B22'], // зелёный — отличная
+  [0.8, '#006400'],  // тёмно-зелёный — максимальная
+];
+```
+
+---
+
+### ЗАДАЧА 4: Добавление полей на карту
+
+Реализуй функцию рисования полигонов на карте:
+
+- Кнопка "Добавить поле" → режим рисования
+- Клики на карте → строим полигон вершина за вершиной
+- Двойной клик → завершаем полигон
+- После завершения → форма: название, предприятие, культура, площадь (авторасчёт)
+- Сохранение → POST /api/fields/
+
+Используй `@maplibre-gl/maplibre-gl-draw` или реализуй вручную через события map.
+
+---
+
+### ЗАДАЧА 5: Аутентификация
+
+Простая JWT аутентификация:
+
+```
+POST /api/auth/login    — email + password → JWT token
+GET  /api/auth/me       — текущий пользователь
+```
+
+- `python-jose` для JWT
+- `passlib[bcrypt]` для хешей паролей
+- Bearer token в Authorization header
+- React: храни токен в localStorage, добавляй в axios
+
+---
+
+### ЗАДАЧА 6: Страница отчёта предприятия
+
+`/enterprises/{id}/report` — распечатываемый отчёт:
+- Сводка по всем полям
+- NDVI за последние 30 дней
+- Активные алерты
+- Рекомендации
+
+Используй `window.print()` для печати, @media print CSS.
+
+---
+
+## Правила кодирования
+
+1. **Геометрия:** всегда EPSG:4326 (WGS84). PostGIS: `ST_AsGeoJSON()`, `ST_GeomFromGeoJSON()`
+2. **Даты:** ISO формат (`2024-06-15`), timezone: `Asia/Tashkent`
+3. **NDVI:** хранить с 4 знаками после запятой (DECIMAL(5,4))
+4. **Язык:** все комментарии и UI на русском
+5. **Ошибки:** логировать через `logger = logging.getLogger(__name__)`
+6. **Никаких внешних платных API** кроме Sentinel Hub
+
+## Как проверить работу
+
+```bash
+# 1. Запустить инфраструктуру
+docker-compose up -d db redis
+
+# 2. Установить зависимости
+cd backend && pip install -r requirements.txt
+
+# 3. Заполнить БД
+python scripts/seed_data.py
+
+# 4. Запустить сервер
+uvicorn main:app --reload
+
+# 5. Проверить API
+open http://localhost:8000/api/docs
+
+# 6. Запустить фронтенд
+cd ../frontend && npm install && npm run dev
+```
+
+## Важные технические детали
+
+### PostGIS запросы
+```python
+# Получить геометрию поля как GeoJSON
+from sqlalchemy import text
+result = db.execute(
+    text("SELECT ST_AsGeoJSON(geometry)::json FROM fields WHERE id = :id"),
+    {"id": field_id}
+).fetchone()
+geojson = result[0]
+
+# Вычислить площадь в гектарах
+result = db.execute(
+    text("SELECT ST_Area(ST_Transform(geometry, 32639)) / 10000 FROM fields WHERE id = :id"),
+    {"id": field_id}
+).fetchone()  # EPSG:32639 = UTM Zone 39N (Узбекистан)
+area_ha = result[0]
+```
+
+### Sentinel Hub без ключей
+Система автоматически переключается в Mock-режим если ключи не заданы.
+Это позволяет разрабатывать и демонстрировать без регистрации.
+
+### Координаты Бухарской области
+- Примерный bbox: lon 63.0–65.5, lat 38.5–40.5
+- Центр Бухары: lat=39.7747, lon=64.4286
+- Часовой пояс: Asia/Tashkent (UTC+5)
+
+
+
+========================================================
+=== FILE: backend/config.py
+========================================================
+from pydantic_settings import BaseSettings
+from functools import lru_cache
+
+
+class Settings(BaseSettings):
+    # App
+    app_name: str = "AgroSat"
+    app_version: str = "0.1.0"
+    environment: str = "development"
+    secret_key: str = "change_me_in_production"
+    debug: bool = True
+
+    # Database
+    database_url: str = "postgresql://agrosat:agrosat_secret_2024@localhost:5432/agrosat"
+
+    # Redis
+    redis_url: str = "redis://localhost:6379/0"
+
+    # Sentinel Hub (регистрация: https://www.sentinel-hub.com)
+    sentinel_hub_client_id: str = ""
+    sentinel_hub_client_secret: str = ""
+
+    # NDVI Settings
+    ndvi_drop_warning_threshold: float = 0.15   # 15% падение → предупреждение
+    ndvi_drop_critical_threshold: float = 0.25  # 25% падение → критично
+    ndvi_fetch_interval_hours: int = 12          # проверка каждые 12 часов
+
+    # Open-Meteo (бесплатный, без API ключа)
+    weather_api_url: str = "https://api.open-meteo.com/v1/forecast"
+
+    # Anthropic (Claude AI)
+    anthropic_api_key: str = ""
+
+    # Telegram
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    telegram_notifications_enabled: bool = False
+
+    class Config:
+        env_file = ".env"
+        case_sensitive = False
+
+
+@lru_cache()
+def get_settings() -> Settings:
+    return Settings()
+
+
+settings = get_settings()
+
+
+
+========================================================
+=== FILE: backend/database.py
+========================================================
+from sqlalchemy import create_engine, event
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from config import settings
+
+engine = create_engine(
+    settings.database_url,
+    pool_pre_ping=True,
+    pool_size=10,
+    max_overflow=20,
+)
+
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+Base = declarative_base()
+
+
+def get_db():
+    """FastAPI dependency — database session."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def init_db():
+    from sqlalchemy import text
+    from models.enterprise import Enterprise
+    from models.crop import CropType
+    from models.field import Field, CropSeason
+    from models.monitoring import NDVIRecord, Alert, ScoutingNote, User
+    with engine.connect() as conn:
+        conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
+        conn.commit()
+    Base.metadata.create_all(bind=engine)
+
+
+
+========================================================
+=== FILE: backend/requirements.txt
+========================================================
+# Web Framework
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+python-multipart==0.0.9
+
+# Database
+sqlalchemy==2.0.30
+geoalchemy2==0.15.1
+alembic==1.13.1
+psycopg2-binary==2.9.9
+
+# Geospatial
+shapely==2.0.4
+pyproj==3.6.1
+geojson==3.1.0
+rasterio==1.3.10
+numpy==1.26.4
+
+# Satellite Data
+sentinelhub==3.10.2
+
+# HTTP & API
+httpx==0.27.0
+requests==2.31.0
+
+# Auth
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# Task scheduling (lightweight, no Celery for Phase 0)
+apscheduler==3.10.4
+
+# Cache
+redis==5.0.4
+
+# Config
+python-dotenv==1.0.1
+pydantic-settings==2.2.1
+pydantic==2.7.1
+
+# Utils
+python-dateutil==2.9.0
+pandas==2.2.2
+
+
+
+========================================================
+=== FILE: backend/main.py
+========================================================
+"""
+AgroSat — Sistema intellektualnogo monitoringa polej
+Bukhara Agroklaster, Uzbekistan
+
+FastAPI backend — главная точка входа.
+"""
+
+import logging
+from contextlib import asynccontextmanager
+from datetime import datetime
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+from config import settings
+from database import init_db
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO if settings.environment != "production" else logging.WARNING,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+
+# ─── Lifecycle ───────────────────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Инициализация при старте, очистка при остановке."""
+    logger.info("🚀 AgroSat запускается...")
+
+    # Создание таблиц БД
+    try:
+        init_db()
+        logger.info("✅ База данных готова")
+    except Exception as e:
+        logger.error(f"❌ Ошибка инициализации БД: {e}")
+        raise
+
+    # Запуск планировщика задач (NDVI фетчинг)
+    try:
+        from scheduler import start_scheduler
+        start_scheduler()
+        logger.info("✅ Планировщик задач запущен")
+    except Exception as e:
+        logger.warning(f"⚠️ Планировщик не запущен: {e}")
+
+    logger.info(f"✅ AgroSat v{settings.app_version} запущен в режиме '{settings.environment}'")
+
+    yield  # Приложение работает
+
+    logger.info("👋 AgroSat останавливается...")
+
+
+# ─── App ─────────────────────────────────────────────────────────────────────
+
+app = FastAPI(
+    title="AgroSat API",
+    description="Система интеллектуального мониторинга полей — Бухоро Агрокластер",
+    version=settings.app_version,
+    lifespan=lifespan,
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+)
+
+# CORS — разрешаем фронтенд
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://localhost:5173", "http://localhost:8080"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ─── Роутеры ─────────────────────────────────────────────────────────────────
+
+from api.fields import router as fields_router
+from api.enterprises import router as enterprises_router
+from api.ndvi import router as ndvi_router
+from api.alerts import router as alerts_router
+from api.dashboard import router as dashboard_router
+from api.weather import router as weather_router
+from api.ai import router as ai_router
+from api.telegram import router as telegram_router
+from api.reports import router as reports_router
+
+app.include_router(enterprises_router)
+app.include_router(fields_router)
+app.include_router(ndvi_router)
+app.include_router(alerts_router)
+app.include_router(dashboard_router)
+app.include_router(weather_router)
+app.include_router(ai_router)
+app.include_router(telegram_router)
+app.include_router(reports_router)
+
+
+# ─── Базовые эндпоинты ───────────────────────────────────────────────────────
+
+@app.get("/")
+async def root():
+    return {
+        "service": "AgroSat",
+        "version": settings.app_version,
+        "status": "running",
+        "timestamp": datetime.utcnow().isoformat(),
+        "docs": "/api/docs",
+    }
+
+
+@app.get("/health")
+async def health():
+    from database import engine
+    from sqlalchemy import text
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        db_status = "healthy"
+    except Exception as e:
+        db_status = f"error: {str(e)}"
+
+    return {
+        "status": "ok" if db_status == "healthy" else "degraded",
+        "database": db_status,
+        "environment": settings.environment,
+    }
+
+
+
+========================================================
+=== FILE: backend/scheduler.py
+========================================================
+"""
+Планировщик фоновых задач: автоматический запрос NDVI каждые 12 часов.
+Использует APScheduler (легче Celery, подходит для Phase 0).
+"""
+
+import logging
+from datetime import date, timedelta
+
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.interval import IntervalTrigger
+
+from config import settings
+
+logger = logging.getLogger(__name__)
+
+scheduler = BackgroundScheduler()
+
+
+def fetch_all_fields_ndvi():
+    """
+    Обход всех активных полей и обновление NDVI.
+    Запускается автоматически каждые N часов.
+    """
+    from database import SessionLocal
+    from models.field import Field
+    from models.monitoring import NDVIRecord
+    from services.satellite import satellite_service, validate_ndvi_quality
+    from services.alert_engine import analyze_field_ndvi, save_alerts
+
+    db = SessionLocal()
+    try:
+        fields = db.query(Field).filter(Field.is_active == True).all()
+        logger.info(f"📡 Начинаем обновление NDVI для {len(fields)} полей...")
+
+        updated = 0
+        errors = 0
+
+        for field in fields:
+            try:
+                # Получаем геометрию поля в WKT
+                from sqlalchemy import func, text as sql_text
+                result = db.execute(
+                    sql_text("SELECT ST_AsText(geometry) FROM fields WHERE id = :id"),
+                    {"id": field.id}
+                ).fetchone()
+
+                if not result:
+                    continue
+
+                geometry_wkt = result[0]
+
+                # Запрашиваем NDVI за последние 10 дней
+                today = date.today()
+                ndvi_data = satellite_service.get_ndvi_stats(
+                    geometry_wkt=geometry_wkt,
+                    date_from=today - timedelta(days=10),
+                    date_to=today,
+                )
+
+                if not ndvi_data:
+                    logger.warning(f"Поле {field.id} ({field.name}): нет данных NDVI")
+                    continue
+
+                # Проверяем, нет ли уже записи за эту дату
+                captured_date = date.fromisoformat(ndvi_data["captured_date"])
+                existing = db.query(NDVIRecord).filter(
+                    NDVIRecord.field_id == field.id,
+                    NDVIRecord.captured_date == captured_date
+                ).first()
+
+                if existing:
+                    logger.debug(f"Поле {field.name}: NDVI за {captured_date} уже есть")
+                    continue
+
+                # Вычисляем изменение относительно предыдущего снимка
+                prev_record = db.query(NDVIRecord).filter(
+                    NDVIRecord.field_id == field.id,
+                ).order_by(NDVIRecord.captured_date.desc()).first()
+
+                ndvi_change = None
+                ndvi_change_pct = None
+
+                if prev_record and prev_record.mean_ndvi:
+                    ndvi_change = ndvi_data["mean_ndvi"] - prev_record.mean_ndvi
+                    if prev_record.mean_ndvi != 0:
+                        ndvi_change_pct = (ndvi_change / prev_record.mean_ndvi) * 100
+
+                # Quality gate — reject bad data before saving
+                is_valid, reason = validate_ndvi_quality(
+                    mean_ndvi=ndvi_data["mean_ndvi"],
+                    cloud_cover_pct=ndvi_data.get("cloud_cover_pct"),
+                    min_ndvi=ndvi_data.get("min_ndvi"),
+                    max_ndvi=ndvi_data.get("max_ndvi"),
+                    field_name=field.name,
+                )
+                if not is_valid:
+                    logger.info(f"Поле {field.id} ({field.name}): quality gate rejected — {reason}")
+                    continue
+
+                # Сохраняем новую запись
+                record = NDVIRecord(
+                    field_id=field.id,
+                    captured_date=captured_date,
+                    mean_ndvi=ndvi_data["mean_ndvi"],
+                    min_ndvi=ndvi_data["min_ndvi"],
+                    max_ndvi=ndvi_data["max_ndvi"],
+                    std_ndvi=ndvi_data["std_ndvi"],
+                    p10_ndvi=ndvi_data["p10_ndvi"],
+                    p90_ndvi=ndvi_data["p90_ndvi"],
+                    valid_pixels_pct=ndvi_data["valid_pixels_pct"],
+                    satellite=ndvi_data["satellite"],
+                    ndvi_change=ndvi_change,
+                    ndvi_change_pct=ndvi_change_pct,
+                )
+                db.add(record)
+                db.commit()
+                db.refresh(record)
+
+                # Анализируем и сохраняем алерты
+                alerts_data = analyze_field_ndvi(field, record, db)
+                if alerts_data:
+                    saved = save_alerts(field, record, alerts_data, db)
+                    if saved > 0:
+                        logger.info(
+                            f"🚨 Поле '{field.name}': создано {saved} алертов "
+                            f"(NDVI={record.mean_ndvi:.3f})"
+                        )
+
+                updated += 1
+                logger.info(
+                    f"✅ Поле '{field.name}': NDVI={record.mean_ndvi:.3f} "
+                    f"(изм. {ndvi_change_pct:+.1f}%)" if ndvi_change_pct is not None
+                    else f"✅ Поле '{field.name}': NDVI={record.mean_ndvi:.3f}"
+                )
+
+            except Exception as e:
+                logger.error(f"❌ Ошибка обработки поля {field.id} ({field.name}): {e}")
+                errors += 1
+                db.rollback()
+
+        logger.info(f"📊 NDVI обновление завершено: {updated} обновлено, {errors} ошибок")
+
+    finally:
+        db.close()
+
+
+def start_scheduler():
+    """Запустить планировщик."""
+    interval_hours = settings.ndvi_fetch_interval_hours
+
+    scheduler.add_job(
+        fetch_all_fields_ndvi,
+        trigger=IntervalTrigger(hours=interval_hours),
+        id="fetch_ndvi",
+        name="Обновление NDVI всех полей",
+        replace_existing=True,
+        max_instances=1,  # не запускаем повторно если предыдущий не завершён
+    )
+
+    scheduler.start()
+    logger.info(f"⏱️ Планировщик запущен. NDVI обновляется каждые {interval_hours} ч.")
+
+    # Запускаем сразу при старте (через 30 сек после инициализации)
+    from apscheduler.triggers.date import DateTrigger
+    from datetime import datetime, timedelta
+    scheduler.add_job(
+        fetch_all_fields_ndvi,
+        trigger=DateTrigger(run_date=datetime.utcnow() + timedelta(seconds=30)),
+        id="fetch_ndvi_startup",
+        name="Первоначальное обновление NDVI",
+        max_instances=1,
+    )
+
+
+
+========================================================
+=== FILE: backend/add_garden.py
+========================================================
+import sys
+sys.path.insert(0, '.')
+from models.enterprise import Enterprise
+from models.field import Field, CropSeason
+from models.monitoring import NDVIRecord, Alert, User
+from models.crop import CropType
+from database import SessionLocal, init_db
+
+init_db()
+db = SessionLocal()
+e = Enterprise(
+    name='Garden Bukhoro Agroklaster',
+    code='BAK-06',
+    region='Bukhara',
+    is_active=True
+)
+db.add(e)
+db.commit()
+db.refresh(e)
+print('OK! ID =', e.id)
+db.close()
+
+
+
+========================================================
+=== FILE: backend/create_stubs.py
+========================================================
+import os
+
+os.makedirs('api', exist_ok=True)
+os.makedirs('models', exist_ok=True)
+
+content = 'from fastapi import APIRouter\nrouter = APIRouter()\n'
+
+for name in ['enterprises', 'fields', 'ndvi', 'alerts', 'dashboard', 'weather']:
+    with open(f'api/{name}.py', 'w') as f:
+        f.write(content)
+
+for name in ['__init__']:
+    with open(f'api/{name}.py', 'w') as f:
+        f.write('')
+    with open(f'models/{name}.py', 'w') as f:
+        f.write('')
+
+print('OK - all files created')
+
+========================================================
+=== FILE: backend/models/__init__.py
+========================================================
+[Empty file]
+
+
+
+========================================================
+=== FILE: backend/models/enterprise.py
+========================================================
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text, Boolean
+from sqlalchemy.orm import relationship
+from datetime import datetime
+from database import Base
+
+
+class Enterprise(Base):
+    """Дочернее предприятие агрокластера."""
+    __tablename__ = "enterprises"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(255), nullable=False)           # Название на русском
+    name_uz = Column(String(255), nullable=True)         # Название на узбекском
+    code = Column(String(50), unique=True, nullable=True) # Внутренний код
+    region = Column(String(100), nullable=True)           # Район
+    contact_person = Column(String(255), nullable=True)
+    contact_phone = Column(String(50), nullable=True)
+    total_area_ha = Column(Float, nullable=True)          # Общая площадь (га)
+    is_active = Column(Boolean, default=True)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    fields = relationship("Field", back_populates="enterprise")
+    users = relationship("User", back_populates="enterprise")
+
+
+
+========================================================
+=== FILE: backend/models/crop.py
+========================================================
+from sqlalchemy import Column, Integer, String, JSON, Text
+from sqlalchemy.orm import relationship
+from database import Base
+
+
+# Справочник культур для Узбекистана
+UZBEKISTAN_CROPS = [
+    {
+        "code": "cotton",
+        "name_ru": "Хлопок",
+        "name_uz": "G'o'za",
+        "name_en": "Cotton",
+        "typical_sowing_month": 4,    # Апрель
+        "typical_harvest_month": 10,  # Октябрь
+        "growth_stages": [
+            {"name": "Прорастание", "name_uz": "Unib chiqish", "month_start": 4, "month_end": 5,
+             "ndvi_min": 0.10, "ndvi_max": 0.30, "description": "Всходы, ранний рост"},
+            {"name": "Вегетация", "name_uz": "O'sish davri", "month_start": 5, "month_end": 7,
+             "ndvi_min": 0.35, "ndvi_max": 0.70, "description": "Интенсивный рост"},
+            {"name": "Бутонизация", "name_uz": "Kurtaklash", "month_start": 6, "month_end": 7,
+             "ndvi_min": 0.45, "ndvi_max": 0.75, "description": "Формирование бутонов"},
+            {"name": "Цветение", "name_uz": "Gullash", "month_start": 7, "month_end": 8,
+             "ndvi_min": 0.55, "ndvi_max": 0.80, "description": "Цветение"},
+            {"name": "Коробочки", "name_uz": "Ko'sak hosil bo'lishi", "month_start": 8, "month_end": 9,
+             "ndvi_min": 0.40, "ndvi_max": 0.70, "description": "Формирование коробочек"},
+            {"name": "Созревание", "name_uz": "Pishish", "month_start": 9, "month_end": 10,
+             "ndvi_min": 0.15, "ndvi_max": 0.40, "description": "Созревание, раскрытие коробочек"},
+        ],
+        "alerts": {
+            "drought_risk_months": [6, 7, 8],
+            "disease_risk": ["фузариозное увядание", "вертициллёзное увядание", "угловая пятнистость"],
+            "pest_risk": ["хлопковая совка", "паутинный клещ", "трипсы"],
+        }
+    },
+    {
+        "code": "wheat",
+        "name_ru": "Пшеница озимая",
+        "name_uz": "Kuzgi bug'doy",
+        "name_en": "Winter Wheat",
+        "typical_sowing_month": 10,   # Октябрь
+        "typical_harvest_month": 6,   # Июнь
+        "growth_stages": [
+            {"name": "Посев-всходы", "name_uz": "Unib chiqish", "month_start": 10, "month_end": 11,
+             "ndvi_min": 0.10, "ndvi_max": 0.30, "description": "Прорастание семян"},
+            {"name": "Кущение", "name_uz": "Tillash", "month_start": 11, "month_end": 2,
+             "ndvi_min": 0.25, "ndvi_max": 0.50, "description": "Активное кущение"},
+            {"name": "Трубкование", "name_uz": "Naylash", "month_start": 3, "month_end": 4,
+             "ndvi_min": 0.40, "ndvi_max": 0.70, "description": "Выход в трубку"},
+            {"name": "Колошение", "name_uz": "Boshoqlash", "month_start": 4, "month_end": 5,
+             "ndvi_min": 0.55, "ndvi_max": 0.80, "description": "Колошение и цветение"},
+            {"name": "Налив зерна", "name_uz": "Don to'lishi", "month_start": 5, "month_end": 5,
+             "ndvi_min": 0.40, "ndvi_max": 0.65, "description": "Молочно-восковая спелость"},
+            {"name": "Созревание", "name_uz": "Pishish", "month_start": 5, "month_end": 6,
+             "ndvi_min": 0.15, "ndvi_max": 0.35, "description": "Полная спелость, уборка"},
+        ],
+        "alerts": {
+            "drought_risk_months": [4, 5],
+            "disease_risk": ["бурая ржавчина", "мучнистая роса", "септориоз"],
+            "pest_risk": ["злаковая тля", "хессенская муха"],
+        }
+    },
+    {
+        "code": "rice",
+        "name_ru": "Рис",
+        "name_uz": "Sholi",
+        "name_en": "Rice",
+        "typical_sowing_month": 5,
+        "typical_harvest_month": 9,
+        "growth_stages": [
+            {"name": "Рассада", "name_uz": "Ko'chat", "month_start": 5, "month_end": 6,
+             "ndvi_min": 0.15, "ndvi_max": 0.35, "description": "Высадка рассады"},
+            {"name": "Кущение", "name_uz": "Tillash", "month_start": 6, "month_end": 7,
+             "ndvi_min": 0.45, "ndvi_max": 0.70, "description": "Активный рост"},
+            {"name": "Выметывание", "name_uz": "Boshlanish", "month_start": 7, "month_end": 8,
+             "ndvi_min": 0.55, "ndvi_max": 0.80, "description": "Выметывание метёлки"},
+            {"name": "Созревание", "name_uz": "Pishish", "month_start": 8, "month_end": 9,
+             "ndvi_min": 0.25, "ndvi_max": 0.50, "description": "Созревание"},
+        ],
+        "alerts": {
+            "drought_risk_months": [],  # риса нужна вода постоянно
+            "disease_risk": ["пирикуляриоз", "бактериоз"],
+            "pest_risk": ["рисовый долгоносик", "стеблевой мотылёк"],
+        }
+    },
+    {
+        "code": "maize",
+        "name_ru": "Кукуруза",
+        "name_uz": "Makkajo'xori",
+        "name_en": "Maize",
+        "typical_sowing_month": 4,
+        "typical_harvest_month": 9,
+        "growth_stages": [
+            {"name": "Всходы", "name_uz": "Unib chiqish", "month_start": 4, "month_end": 5,
+             "ndvi_min": 0.10, "ndvi_max": 0.30, "description": "Прорастание"},
+            {"name": "Вегетация", "name_uz": "O'sish", "month_start": 5, "month_end": 7,
+             "ndvi_min": 0.45, "ndvi_max": 0.80, "description": "Интенсивный рост"},
+            {"name": "Цветение", "name_uz": "Gullash", "month_start": 7, "month_end": 8,
+             "ndvi_min": 0.60, "ndvi_max": 0.85, "description": "Выброс метёлки"},
+            {"name": "Созревание", "name_uz": "Pishish", "month_start": 8, "month_end": 9,
+             "ndvi_min": 0.25, "ndvi_max": 0.55, "description": "Молочно-восковая спелость"},
+        ],
+        "alerts": {
+            "drought_risk_months": [6, 7, 8],
+            "disease_risk": ["пузырчатая головня", "корневая гниль"],
+            "pest_risk": ["стеблевой мотылёк", "хлопковая совка"],
+        }
+    },
+    {
+        "code": "sunflower",
+        "name_ru": "Подсолнечник",
+        "name_uz": "Kungaboqar",
+        "name_en": "Sunflower",
+        "typical_sowing_month": 4,
+        "typical_harvest_month": 9,
+        "growth_stages": [
+            {"name": "Всходы", "name_uz": "Unib chiqish", "month_start": 4, "month_end": 5,
+             "ndvi_min": 0.10, "ndvi_max": 0.25, "description": "Прорастание"},
+            {"name": "Вегетация", "name_uz": "O'sish", "month_start": 5, "month_end": 7,
+             "ndvi_min": 0.40, "ndvi_max": 0.75, "description": "Активный рост"},
+            {"name": "Цветение", "name_uz": "Gullash", "month_start": 7, "month_end": 8,
+             "ndvi_min": 0.50, "ndvi_max": 0.75, "description": "Цветение"},
+            {"name": "Созревание", "name_uz": "Pishish", "month_start": 8, "month_end": 9,
+             "ndvi_min": 0.20, "ndvi_max": 0.45, "description": "Созревание семян"},
+        ],
+        "alerts": {
+            "drought_risk_months": [6, 7, 8],
+            "disease_risk": ["склеротиниоз", "фомоз"],
+            "pest_risk": ["подсолнечная огнёвка"],
+        }
+    },
+    {
+        "code": "vegetables",
+        "name_ru": "Овощи открытого грунта",
+        "name_uz": "Ochiq yerda sabzavotlar",
+        "name_en": "Open Field Vegetables",
+        "typical_sowing_month": 3,
+        "typical_harvest_month": 10,
+        "growth_stages": [
+            {"name": "Рост", "name_uz": "O'sish", "month_start": 3, "month_end": 10,
+             "ndvi_min": 0.25, "ndvi_max": 0.75, "description": "Активный рост"},
+        ],
+        "alerts": {
+            "drought_risk_months": [6, 7, 8],
+            "disease_risk": ["фитофтороз", "альтернариоз"],
+            "pest_risk": ["тля", "белокрылка", "паутинный клещ"],
+        }
+    },
+    {
+        "code": "alfalfa",
+        "name_ru": "Люцерна",
+        "name_uz": "Beda",
+        "name_en": "Alfalfa",
+        "typical_sowing_month": 3,
+        "typical_harvest_month": 10,
+        "growth_stages": [
+            {"name": "Активный рост", "name_uz": "Faol o'sish", "month_start": 3, "month_end": 10,
+             "ndvi_min": 0.30, "ndvi_max": 0.75, "description": "3-4 укоса в сезон"},
+        ],
+        "alerts": {
+            "drought_risk_months": [7, 8],
+            "disease_risk": ["корневые гнили"],
+            "pest_risk": ["люцерновый долгоносик"],
+        }
+    },
+    {
+        "code": "fallow",
+        "name_ru": "Пар / Отдых",
+        "name_uz": "Haydov yer",
+        "name_en": "Fallow",
+        "typical_sowing_month": None,
+        "typical_harvest_month": None,
+        "growth_stages": [],
+        "alerts": {}
+    },
+]
+
+
+class CropType(Base):
+    """Справочник культур."""
+    __tablename__ = "crop_types"
+
+    id = Column(Integer, primary_key=True, index=True)
+    code = Column(String(50), unique=True, nullable=False)
+    name_ru = Column(String(100), nullable=False)
+    name_uz = Column(String(100), nullable=True)
+    name_en = Column(String(100), nullable=True)
+    typical_sowing_month = Column(Integer, nullable=True)
+    typical_harvest_month = Column(Integer, nullable=True)
+    growth_stages = Column(JSON, nullable=True)   # Фенологический календарь
+    alerts_config = Column(JSON, nullable=True)   # Конфигурация алертов
+
+    # Relationships
+    seasons = relationship("CropSeason", back_populates="crop_type")
+
+
+
+========================================================
+=== FILE: backend/models/field.py
+========================================================
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text, Boolean, ForeignKey, JSON
+from sqlalchemy.orm import relationship
+from geoalchemy2 import Geometry
+from datetime import datetime
+from database import Base
+
+
+class Field(Base):
+    """Поле (участок) агрокластера."""
+    __tablename__ = "fields"
+
+    id = Column(Integer, primary_key=True, index=True)
+    enterprise_id = Column(Integer, ForeignKey("enterprises.id"), nullable=False)
+    name = Column(String(255), nullable=False)
+    code = Column(String(50), nullable=True)           # Внутренний номер поля
+
+    # Геометрия — полигон в WGS84 (EPSG:4326)
+    geometry = Column(Geometry("POLYGON", srid=4326), nullable=False)
+
+    area_ha = Column(Float, nullable=True)              # Площадь (га), вычисляется автоматически
+    centroid_lat = Column(Float, nullable=True)         # Центр поля (для запросов погоды)
+    centroid_lon = Column(Float, nullable=True)
+
+    # Агрономические параметры
+    soil_type = Column(String(100), nullable=True)      # Тип почвы
+    irrigation_type = Column(String(50), nullable=True) # Орошение: canal, drip, sprinkler, rainfed
+    elevation_m = Column(Float, nullable=True)
+
+    notes = Column(Text, nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    enterprise = relationship("Enterprise", back_populates="fields")
+    seasons = relationship("CropSeason", back_populates="field", order_by="desc(CropSeason.season_year)")
+    ndvi_records = relationship("NDVIRecord", back_populates="field", order_by="desc(NDVIRecord.captured_date)")
+    alerts = relationship("Alert", back_populates="field", order_by="desc(Alert.triggered_at)")
+    scouting_notes = relationship("ScoutingNote", back_populates="field")
+
+    @property
+    def current_season(self):
+        """Текущий сезон (текущий год)."""
+        from datetime import date
+        current_year = date.today().year
+        for s in self.seasons:
+            if s.season_year == current_year:
+                return s
+        return None
+
+
+class CropSeason(Base):
+    """Сезон посева: что посеяно на поле в данном году."""
+    __tablename__ = "crop_seasons"
+
+    id = Column(Integer, primary_key=True, index=True)
+    field_id = Column(Integer, ForeignKey("fields.id"), nullable=False)
+    crop_type_id = Column(Integer, ForeignKey("crop_types.id"), nullable=False)
+
+    season_year = Column(Integer, nullable=False)
+    variety = Column(String(100), nullable=True)       # Сорт
+    planting_date = Column(DateTime, nullable=True)
+    expected_harvest_date = Column(DateTime, nullable=True)
+    actual_harvest_date = Column(DateTime, nullable=True)
+
+    planned_yield_tha = Column(Float, nullable=True)   # Плановая урожайность (т/га)
+    actual_yield_tha = Column(Float, nullable=True)    # Фактическая урожайность
+
+    # Нормы внесения (для будущей VRA функциональности)
+    fertilizer_plan = Column(JSON, nullable=True)
+
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    field = relationship("Field", back_populates="seasons")
+    crop_type = relationship("CropType", back_populates="seasons")
+
+
+
+========================================================
+=== FILE: backend/models/monitoring.py
+========================================================
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text, Boolean, ForeignKey, Date, Enum
+from sqlalchemy.orm import relationship
+from datetime import datetime
+import enum
+from database import Base
+
+
+# ─── NDVI ────────────────────────────────────────────────────────────────────
+
+class NDVIRecord(Base):
+    """Снимок NDVI поля с конкретной даты."""
+    __tablename__ = "ndvi_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    field_id = Column(Integer, ForeignKey("fields.id"), nullable=False)
+
+    captured_date = Column(Date, nullable=False)        # Дата снимка
+    processed_at = Column(DateTime, default=datetime.utcnow)
+
+    # NDVI статистика по полю
+    mean_ndvi = Column(Float, nullable=True)            # Среднее NDVI по полю
+    min_ndvi = Column(Float, nullable=True)
+    max_ndvi = Column(Float, nullable=True)
+    std_ndvi = Column(Float, nullable=True)             # Стандартное отклонение (неоднородность)
+    p10_ndvi = Column(Float, nullable=True)             # 10-й перцентиль
+    p90_ndvi = Column(Float, nullable=True)             # 90-й перцентиль
+
+    cloud_cover_pct = Column(Float, nullable=True)      # % облачности
+    valid_pixels_pct = Column(Float, nullable=True)     # % пикселей без облаков
+
+    satellite = Column(String(50), default="Sentinel-2")
+    image_url = Column(Text, nullable=True)             # URL превью
+
+    # Отклонение от предыдущего снимка
+    ndvi_change = Column(Float, nullable=True)          # mean_ndvi - предыдущий mean_ndvi
+    ndvi_change_pct = Column(Float, nullable=True)      # изменение в %
+
+    # Relationships
+    field = relationship("Field", back_populates="ndvi_records")
+
+
+# ─── ALERTS ──────────────────────────────────────────────────────────────────
+
+class AlertSeverity(str, enum.Enum):
+    INFO = "info"
+    WARNING = "warning"
+    CRITICAL = "critical"
+
+
+class AlertType(str, enum.Enum):
+    NDVI_DROP = "ndvi_drop"             # Резкое падение NDVI
+    NDVI_LOW = "ndvi_low"               # NDVI ниже нормы для данной фазы
+    NDVI_HIGH = "ndvi_high"             # NDVI выше нормы (редко — хорошо, но стоит проверить)
+    NDVI_UNEVEN = "ndvi_uneven"         # Сильная неоднородность по полю
+    DROUGHT_RISK = "drought_risk"       # Риск засухи (высокая температура + низкие осадки)
+    FROST_RISK = "frost_risk"           # Риск заморозков
+    HEAVY_RAIN = "heavy_rain"           # Сильные осадки (риск заболачивания)
+    NO_DATA = "no_data"                 # Нет данных >14 дней (плотная облачность)
+    MANUAL = "manual"                   # Ручная заметка агронома
+
+
+class Alert(Base):
+    """Алерт по полю."""
+    __tablename__ = "alerts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    field_id = Column(Integer, ForeignKey("fields.id"), nullable=False)
+    ndvi_record_id = Column(Integer, ForeignKey("ndvi_records.id"), nullable=True)
+
+    alert_type = Column(String(50), nullable=False)
+    severity = Column(String(20), nullable=False, default=AlertSeverity.WARNING)
+
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=False)
+    recommendation = Column(Text, nullable=True)       # Рекомендованное действие
+
+    # Данные, вызвавшие алерт
+    triggered_value = Column(Float, nullable=True)     # Значение, вызвавшее алерт
+    threshold_value = Column(Float, nullable=True)     # Порог
+
+    triggered_at = Column(DateTime, default=datetime.utcnow)
+    acknowledged_at = Column(DateTime, nullable=True)
+    acknowledged_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    is_active = Column(Boolean, default=True)
+
+    # Relationships
+    field = relationship("Field", back_populates="alerts")
+
+
+# ─── SCOUTING ────────────────────────────────────────────────────────────────
+
+class ScoutingNote(Base):
+    """Заметка с выезда на поле (разведка)."""
+    __tablename__ = "scouting_notes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    field_id = Column(Integer, ForeignKey("fields.id"), nullable=False)
+    author_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    content = Column(Text, nullable=False)
+    problem_type = Column(String(100), nullable=True)  # болезнь, вредитель, засуха, прочее
+    severity_estimate = Column(String(20), nullable=True)  # low, medium, high
+
+    # Геолокация точки на поле
+    point_lat = Column(Float, nullable=True)
+    point_lon = Column(Float, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    field = relationship("Field", back_populates="scouting_notes")
+
+
+# ─── USERS ───────────────────────────────────────────────────────────────────
+
+class UserRole(str, enum.Enum):
+    ADMIN = "admin"
+    AGRONOMIST = "agronomist"
+    MANAGER = "manager"
+    VIEWER = "viewer"
+
+
+class User(Base):
+    """Пользователь системы."""
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    enterprise_id = Column(Integer, ForeignKey("enterprises.id"), nullable=True)
+
+    email = Column(String(255), unique=True, nullable=False)
+    full_name = Column(String(255), nullable=True)
+    phone = Column(String(50), nullable=True)
+    role = Column(String(50), default=UserRole.VIEWER)
+    hashed_password = Column(String(255), nullable=False)
+
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_login = Column(DateTime, nullable=True)
+
+    # Relationships
+    enterprise = relationship("Enterprise", back_populates="users")
+
+
+
+========================================================
+=== FILE: backend/schemas/__init__.py
+========================================================
+# Pydantic схемы AgroSat
+
+
+
+========================================================
+=== FILE: backend/schemas/enterprise.py
+========================================================
+"""
+Pydantic схемы для предприятий (Enterprise).
+"""
+
+from datetime import datetime
+from typing import Optional
+from pydantic import BaseModel, Field
+
+
+class EnterpriseBase(BaseModel):
+    name: str = Field(..., max_length=255, description="Название на русском")
+    name_uz: Optional[str] = Field(None, max_length=255, description="Название на узбекском")
+    code: Optional[str] = Field(None, max_length=50, description="Внутренний код")
+    region: Optional[str] = Field(None, max_length=100, description="Район")
+    contact_person: Optional[str] = Field(None, max_length=255)
+    contact_phone: Optional[str] = Field(None, max_length=50)
+    total_area_ha: Optional[float] = Field(None, description="Общая площадь (га)")
+    is_active: bool = True
+    notes: Optional[str] = None
+
+
+class EnterpriseCreate(EnterpriseBase):
+    """Создание предприятия."""
+    pass
+
+
+class EnterpriseUpdate(EnterpriseBase):
+    """Редактирование предприятия. Все поля опциональны."""
+    name: Optional[str] = Field(None, max_length=255)
+
+
+class FieldBrief(BaseModel):
+    """Краткая информация о поле для вложенного использования."""
+    id: int
+    name: str
+    code: Optional[str] = None
+    area_ha: Optional[float] = None
+    is_active: bool
+    current_crop: Optional[str] = None
+    current_ndvi: Optional[float] = None
+    active_alerts_count: int = 0
+
+    class Config:
+        from_attributes = True
+
+
+class EnterpriseResponse(EnterpriseBase):
+    """Полный ответ с предприятием."""
+    id: int
+    created_at: datetime
+    updated_at: datetime
+    fields_count: int = 0
+    fields: list[FieldBrief] = []
+
+    class Config:
+        from_attributes = True
+
+
+class EnterpriseListResponse(BaseModel):
+    """Список предприятий."""
+    id: int
+    name: str
+    name_uz: Optional[str] = None
+    code: Optional[str] = None
+    region: Optional[str] = None
+    is_active: bool
+    total_area_ha: Optional[float] = None
+    fields_count: int = 0
+    active_alerts_count: int = 0
+
+    class Config:
+        from_attributes = True
+
+
+
+========================================================
+=== FILE: backend/schemas/field.py
+========================================================
+"""
+Pydantic схемы для полей (Field).
+"""
+
+from datetime import datetime
+from typing import Optional
+from pydantic import BaseModel, Field
+
+
+class SeasonCreate(BaseModel):
+    """Добавление/обновление сезона посева."""
+    crop_type_id: int
+    season_year: int = Field(..., ge=2020, le=2100)
+    variety: Optional[str] = None
+    planting_date: Optional[str] = None
+    expected_harvest_date: Optional[str] = None
+    actual_harvest_date: Optional[str] = None
+    planned_yield_tha: Optional[float] = None
+    actual_yield_tha: Optional[float] = None
+    notes: Optional[str] = None
+
+
+class SeasonResponse(BaseModel):
+    """Ответ с данными сезона."""
+    id: int
+    season_year: int
+    crop_type_id: int
+    crop_name: Optional[str] = None
+    variety: Optional[str] = None
+    planting_date: Optional[str] = None
+    expected_harvest_date: Optional[str] = None
+    actual_harvest_date: Optional[str] = None
+    planned_yield_tha: Optional[float] = None
+    actual_yield_tha: Optional[float] = None
+
+    class Config:
+        from_attributes = True
+
+
+class FieldCreate(BaseModel):
+    """Создание нового поля."""
+    enterprise_id: int
+    name: str = Field(..., max_length=255)
+    code: Optional[str] = Field(None, max_length=50)
+    geometry: dict = Field(..., description="GeoJSON Polygon или MultiPolygon")
+    area_ha: Optional[float] = None
+    irrigation_type: Optional[str] = Field(None, max_length=50)
+    soil_type: Optional[str] = Field(None, max_length=100)
+    notes: Optional[str] = None
+
+
+class FieldUpdate(BaseModel):
+    """Редактирование поля. Все поля опциональны."""
+    name: Optional[str] = Field(None, max_length=255)
+    code: Optional[str] = Field(None, max_length=50)
+    geometry: Optional[dict] = None
+    area_ha: Optional[float] = None
+    irrigation_type: Optional[str] = Field(None, max_length=50)
+    soil_type: Optional[str] = Field(None, max_length=100)
+    notes: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class AlertBrief(BaseModel):
+    """Краткая информация об алерте."""
+    id: int
+    alert_type: str
+    severity: str
+    title: str
+    triggered_at: datetime
+    is_active: bool
+
+    class Config:
+        from_attributes = True
+
+
+class FieldResponse(BaseModel):
+    """Полный ответ с данными поля."""
+    id: int
+    enterprise_id: int
+    name: str
+    code: Optional[str] = None
+    area_ha: Optional[float] = None
+    centroid_lat: Optional[float] = None
+    centroid_lon: Optional[float] = None
+    irrigation_type: Optional[str] = None
+    soil_type: Optional[str] = None
+    notes: Optional[str] = None
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+    enterprise_name: str = ""
+    current_ndvi: Optional[float] = None
+    last_ndvi_date: Optional[str] = None
+    active_alerts_count: int = 0
+    current_crop: Optional[str] = None
+    current_season: Optional[SeasonResponse] = None
+    geometry: Optional[dict] = None
+
+    class Config:
+        from_attributes = True
+
+
+class FieldListItem(BaseModel):
+    """Поле для списка (без геометрии)."""
+    id: int
+    enterprise_id: int
+    name: str
+    code: Optional[str] = None
+    area_ha: Optional[float] = None
+    is_active: bool
+    enterprise_name: str = ""
+    current_ndvi: Optional[float] = None
+    last_ndvi_date: Optional[str] = None
+    active_alerts_count: int = 0
+    current_crop: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class GeoJSONFeature(BaseModel):
+    """GeoJSON Feature."""
+    type: str = "Feature"
+    geometry: dict
+    properties: dict
+
+
+class GeoJSONFeatureCollection(BaseModel):
+    """GeoJSON FeatureCollection."""
+    type: str = "FeatureCollection"
+    features: list[GeoJSONFeature]
+
+
+
+========================================================
+=== FILE: backend/schemas/ndvi.py
+========================================================
+"""
+Pydantic схемы для NDVI.
+"""
+
+from datetime import date, datetime
+from typing import Optional
+from pydantic import BaseModel
+
+
+class NDVIRecordResponse(BaseModel):
+    """Одна запись NDVI."""
+    id: int
+    field_id: int
+    captured_date: date
+    mean_ndvi: Optional[float] = None
+    min_ndvi: Optional[float] = None
+    max_ndvi: Optional[float] = None
+    std_ndvi: Optional[float] = None
+    p10_ndvi: Optional[float] = None
+    p90_ndvi: Optional[float] = None
+    ndvi_change: Optional[float] = None
+    ndvi_change_pct: Optional[float] = None
+    cloud_cover_pct: Optional[float] = None
+    valid_pixels_pct: Optional[float] = None
+    satellite: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class NDVIHistoryResponse(BaseModel):
+    """История NDVI для поля."""
+    field_id: int
+    field_name: str
+    days: int
+    records: list[NDVIRecordResponse]
+
+
+class NDVILatestResponse(BaseModel):
+    """Последний снимок NDVI."""
+    field_id: int
+    field_name: str
+    record: Optional[NDVIRecordResponse] = None
+    age_days: Optional[int] = None  # сколько дней прошло со снимка
+    has_alert: bool = False
+
+
+class NDVIRefreshResponse(BaseModel):
+    """Результат принудительного обновления NDVI."""
+    field_id: int
+    field_name: str
+    success: bool
+    message: str
+    record: Optional[NDVIRecordResponse] = None
+
+
+
+========================================================
+=== FILE: backend/schemas/alert.py
+========================================================
+"""
+Pydantic схемы для алертов.
+"""
+
+from datetime import datetime
+from typing import Optional
+from pydantic import BaseModel, Field
+
+
+class AlertResponse(BaseModel):
+    """Алерт."""
+    id: int
+    field_id: int
+    field_name: str = ""
+    enterprise_name: str = ""
+    alert_type: str
+    severity: str
+    title: str
+    description: str
+    recommendation: Optional[str] = None
+    triggered_value: Optional[float] = None
+    threshold_value: Optional[float] = None
+    triggered_at: datetime
+    acknowledged_at: Optional[datetime] = None
+    is_active: bool
+
+    class Config:
+        from_attributes = True
+
+
+class AcknowledgeResponse(BaseModel):
+    """Результат отметки алерта."""
+    success: bool
+    message: str
+
+
+
+========================================================
+=== FILE: backend/schemas/dashboard.py
+========================================================
+"""
+Pydantic схемы для дашборда.
+"""
+
+from datetime import datetime
+from typing import Optional
+from pydantic import BaseModel, Field
+
+
+class EnterpriseSummary(BaseModel):
+    """Краткая сводка по одному предприятию."""
+    id: int
+    name: str
+    region: Optional[str] = None
+    fields_count: int = 0
+    active_alerts: int = 0
+    critical_alerts: int = 0
+    avg_ndvi: Optional[float] = None
+    fields_with_problems: int = 0
+
+
+class DashboardSummary(BaseModel):
+    """Сводка по всему кластеру."""
+    total_fields: int = 0
+    total_enterprises: int = 0
+    active_alerts: int = 0
+    critical_alerts: int = 0
+    avg_ndvi: Optional[float] = None
+    fields_with_problems: int = 0
+    last_updated: Optional[str] = None
+    critical_alert_fields: int = 0
+    enterprises: list[EnterpriseSummary] = []
+
+
+class EnterpriseDashboard(BaseModel):
+    """Сводка по одному предприятию."""
+    enterprise_id: int
+    enterprise_name: str
+    region: Optional[str] = None
+    total_fields: int = 0
+    total_area_ha: Optional[float] = None
+    active_alerts: int = 0
+    critical_alerts: int = 0
+    avg_ndvi: Optional[float] = None
+    fields_with_problems: int = 0
+    last_updated: Optional[str] = None
+    top_alerts: list = []  # последние 5 алертов
+
+
+
+========================================================
+=== FILE: backend/schemas/weather.py
+========================================================
+"""
+Pydantic схемы для погоды.
+"""
+
+from typing import Optional
+from pydantic import BaseModel, Field
+
+
+class WeatherCurrent(BaseModel):
+    """Текущая погода."""
+    temperature: Optional[float] = None
+    humidity: Optional[float] = None
+    wind_ms: Optional[float] = None
+    precipitation_mm: Optional[float] = None
+    weather_code: Optional[int] = None
+    description: str = "Нет данных"
+
+
+class WeatherForecastDay(BaseModel):
+    """Прогноз на день."""
+    date: str
+    temp_max: Optional[float] = None
+    temp_min: Optional[float] = None
+    precipitation_mm: Optional[float] = None
+    et0_mm: Optional[float] = None
+    wind_max_ms: Optional[float] = None
+    weather_code: Optional[int] = None
+    weather_description: str = "Нет данных"
+
+
+class WeatherRisk(BaseModel):
+    """Погодный риск."""
+    type: str
+    severity: str
+    date: str
+    description: str
+    value: Optional[float] = None
+
+
+class WeatherResponse(BaseModel):
+    """Полный ответ с погодой."""
+    current: WeatherCurrent
+    forecast: list[WeatherForecastDay] = []
+    risks: list[WeatherRisk] = []
+    location: Optional[dict] = None
+    field_name: Optional[str] = None
+
+
+
+========================================================
+=== FILE: backend/api/__init__.py
+========================================================
+[Empty file]
+
+
+
+========================================================
+=== FILE: backend/api/enterprises.py
+========================================================
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from sqlalchemy import text
+from database import get_db
+from datetime import date
+import logging
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/api/enterprises", tags=["enterprises"])
+
+
+@router.get("/")
+async def list_enterprises(db: Session = Depends(get_db)):
+    """Список всех предприятий с агрегированными KPI — один запрос."""
+    rows = db.execute(text("""
+        SELECT
+            e.id,
+            e.name,
+            e.code,
+            e.region,
+            e.total_area_ha,
+            COUNT(DISTINCT f.id) AS total_fields,
+            ROUND(AVG(n.mean_ndvi)::numeric, 4) AS avg_ndvi,
+            COUNT(DISTINCT a_crit.id) AS critical_alerts,
+            COUNT(DISTINCT a_all.id) AS active_alerts,
+            COUNT(DISTINCT CASE WHEN n.mean_ndvi < 0.3 THEN f.id END) AS fields_with_problems
+        FROM enterprises e
+        LEFT JOIN fields f ON f.enterprise_id = e.id AND f.is_active = true
+        LEFT JOIN LATERAL (
+            SELECT mean_ndvi, captured_date
+            FROM ndvi_records
+            WHERE field_id = f.id
+            ORDER BY captured_date DESC
+            LIMIT 1
+        ) n ON true
+        LEFT JOIN alerts a_crit ON a_crit.field_id = f.id
+            AND a_crit.is_active = true AND a_crit.severity = 'critical'
+        LEFT JOIN alerts a_all ON a_all.field_id = f.id
+            AND a_all.is_active = true
+        GROUP BY e.id, e.name, e.code, e.region, e.total_area_ha
+        ORDER BY e.name
+    """)).fetchall()
+
+    return [
+        {
+            "id": r.id,
+            "name": r.name,
+            "code": r.code,
+            "region": r.region,
+            "total_fields": r.total_fields,
+            "total_area_ha": float(r.total_area_ha) if r.total_area_ha else None,
+            "avg_ndvi": float(r.avg_ndvi) if r.avg_ndvi else None,
+            "active_alerts": r.active_alerts,
+            "critical_alerts": r.critical_alerts,
+            "fields_with_problems": r.fields_with_problems,
+        }
+        for r in rows
+    ]
+
+
+@router.get("/{enterprise_id}")
+async def get_enterprise(enterprise_id: int, db: Session = Depends(get_db)):
+    """Предприятие + список его полей с последним NDVI, культурой и алертами."""
+    row = db.execute(
+        text("SELECT id, name, code, region, total_area_ha FROM enterprises WHERE id = :id"),
+        {"id": enterprise_id}
+    ).fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Предприятие {enterprise_id} не найдено")
+
+    fields = db.execute(text("""
+        SELECT
+            f.id,
+            f.name,
+            f.code,
+            f.area_ha,
+            f.irrigation_type,
+            ct.name_ru AS crop_name,
+            n.mean_ndvi  AS current_ndvi,
+            n.captured_date AS last_ndvi_date,
+            COALESCE(al.alert_count, 0) AS active_alerts,
+            COALESCE(al.max_severity, 'ok') AS alert_severity
+        FROM fields f
+        LEFT JOIN crop_seasons cs ON cs.field_id = f.id
+            AND cs.season_year = :year
+        LEFT JOIN crop_types ct ON ct.id = cs.crop_type_id
+        LEFT JOIN LATERAL (
+            SELECT mean_ndvi, captured_date
+            FROM ndvi_records
+            WHERE field_id = f.id
+            ORDER BY captured_date DESC
+            LIMIT 1
+        ) n ON true
+        LEFT JOIN LATERAL (
+            SELECT COUNT(*) AS alert_count,
+                CASE MAX(CASE WHEN severity='critical' THEN 3
+                              WHEN severity='warning' THEN 2
+                              WHEN severity='info' THEN 1 ELSE 0 END)
+                    WHEN 3 THEN 'critical' WHEN 2 THEN 'warning'
+                    WHEN 1 THEN 'info' ELSE 'ok' END AS max_severity
+            FROM alerts WHERE field_id = f.id AND is_active = true
+        ) al ON true
+        WHERE f.enterprise_id = :eid
+        ORDER BY COALESCE(n.mean_ndvi, 999) ASC, f.name
+    """), {"eid": enterprise_id, "year": date.today().year}).fetchall()
+
+    return {
+        "id": row.id,
+        "name": row.name,
+        "code": row.code,
+        "region": row.region,
+        "total_area_ha": float(row.total_area_ha) if row.total_area_ha else None,
+        "field_count": len(fields),
+        "fields": [
+            {
+                "id": f.id,
+                "name": f.name,
+                "code": f.code,
+                "area_ha": float(f.area_ha) if f.area_ha else None,
+                "current_crop": f.crop_name,
+                "current_ndvi": float(f.current_ndvi) if f.current_ndvi is not None else None,
+                "last_ndvi_date": str(f.last_ndvi_date) if f.last_ndvi_date else None,
+                "irrigation_type": f.irrigation_type,
+                "active_alerts": f.active_alerts,
+                "alert_severity": f.alert_severity,
+            }
+            for f in fields
+        ],
+    }
+
+
+
+========================================================
+=== FILE: backend/api/fields.py
+========================================================
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from sqlalchemy import text
+from database import get_db
+from models.field import Field, CropSeason
+from models.crop import CropType
+from models.monitoring import NDVIRecord, Alert
+from datetime import date
+from services.cache import cache_get, cache_set
+
+router = APIRouter(prefix="/api/fields", tags=["fields"])
+
+
+@router.get("/geojson/all")
+def get_all_fields_geojson(enterprise_id: int = None, db: Session = Depends(get_db)):
+    """Все поля как GeoJSON FeatureCollection — один SQL запрос."""
+    cache_key = f"fields:geojson:{enterprise_id or 'all'}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
+
+    where = "WHERE f.is_active = true"
+    params = {"year": date.today().year}
+    if enterprise_id:
+        where += " AND f.enterprise_id = :eid"
+        params["eid"] = enterprise_id
+
+    sql = text(f"""
+        SELECT
+            f.id,
+            f.name,
+            f.code,
+            f.enterprise_id,
+            f.area_ha,
+            f.centroid_lat,
+            f.centroid_lon,
+            f.irrigation_type,
+            ST_AsGeoJSON(f.geometry)::json AS geometry,
+            e.name AS enterprise_name,
+            ct.name_ru AS crop_name,
+            n.mean_ndvi AS last_ndvi,
+            n.captured_date AS last_ndvi_date,
+            n.ndvi_change_pct AS ndvi_change_pct,
+            COALESCE(al.alert_count, 0) AS active_alerts,
+            COALESCE(al.max_severity, 'ok') AS alert_severity
+        FROM fields f
+        LEFT JOIN enterprises e ON e.id = f.enterprise_id
+        LEFT JOIN crop_seasons cs ON cs.field_id = f.id AND cs.season_year = :year
+        LEFT JOIN crop_types ct ON ct.id = cs.crop_type_id
+        LEFT JOIN LATERAL (
+            SELECT mean_ndvi, captured_date, ndvi_change_pct
+            FROM ndvi_records
+            WHERE field_id = f.id
+            ORDER BY captured_date DESC
+            LIMIT 1
+        ) n ON true
+        LEFT JOIN LATERAL (
+            SELECT
+                COUNT(*) AS alert_count,
+                MAX(CASE WHEN severity = 'critical' THEN 3
+                         WHEN severity = 'warning' THEN 2
+                         WHEN severity = 'info' THEN 1
+                         ELSE 0 END) AS sev_num,
+                CASE MAX(CASE WHEN severity = 'critical' THEN 3
+                              WHEN severity = 'warning' THEN 2
+                              WHEN severity = 'info' THEN 1
+                              ELSE 0 END)
+                    WHEN 3 THEN 'critical'
+                    WHEN 2 THEN 'warning'
+                    WHEN 1 THEN 'info'
+                    ELSE 'ok' END AS max_severity
+            FROM alerts
+            WHERE field_id = f.id AND is_active = true
+        ) al ON true
+        {where}
+        ORDER BY f.enterprise_id, f.id
+    """)
+
+    rows = db.execute(sql, params).fetchall()
+
+    features = []
+    for r in rows:
+        features.append({
+            "type": "Feature",
+            "geometry": r.geometry,
+            "properties": {
+                "id": r.id,
+                "name": r.name,
+                "code": r.code,
+                "enterprise_id": r.enterprise_id,
+                "enterprise_name": r.enterprise_name,
+                "area_ha": r.area_ha,
+                "centroid_lat": r.centroid_lat,
+                "centroid_lon": r.centroid_lon,
+                "irrigation_type": r.irrigation_type,
+                "current_crop": r.crop_name,
+                "last_ndvi": float(r.last_ndvi) if r.last_ndvi else None,
+                "last_ndvi_date": r.last_ndvi_date.isoformat() if r.last_ndvi_date else None,
+                "ndvi_change_pct": float(r.ndvi_change_pct) if r.ndvi_change_pct else None,
+                "active_alerts": r.active_alerts,
+                "alert_severity": r.alert_severity,
+            }
+        })
+
+    result = {
+        "type": "FeatureCollection",
+        "features": features,
+        "total": len(features),
+    }
+    cache_set(cache_key, result, ttl_seconds=300)
+    return result
+
+
+@router.get("/")
+def get_fields(enterprise_id: int = None, db: Session = Depends(get_db)):
+    """Список полей — один SQL запрос."""
+    cache_key = f"fields:list:{enterprise_id or 'all'}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
+
+    where = "WHERE f.is_active = true"
+    params = {"year": date.today().year}
+    if enterprise_id:
+        where += " AND f.enterprise_id = :eid"
+        params["eid"] = enterprise_id
+
+    sql = text(f"""
+        SELECT
+            f.id, f.name, f.code, f.enterprise_id, f.area_ha,
+            f.centroid_lat, f.centroid_lon, f.irrigation_type,
+            ct.name_ru AS crop_name,
+            n.mean_ndvi AS last_ndvi,
+            n.captured_date AS last_ndvi_date,
+            n.ndvi_change_pct,
+            COALESCE(al.alert_count, 0) AS active_alerts,
+            COALESCE(al.max_severity, 'ok') AS alert_severity
+        FROM fields f
+        LEFT JOIN crop_seasons cs ON cs.field_id = f.id AND cs.season_year = :year
+        LEFT JOIN crop_types ct ON ct.id = cs.crop_type_id
+        LEFT JOIN LATERAL (
+            SELECT mean_ndvi, captured_date, ndvi_change_pct
+            FROM ndvi_records WHERE field_id = f.id
+            ORDER BY captured_date DESC LIMIT 1
+        ) n ON true
+        LEFT JOIN LATERAL (
+            SELECT COUNT(*) AS alert_count,
+                CASE MAX(CASE WHEN severity='critical' THEN 3
+                              WHEN severity='warning' THEN 2
+                              WHEN severity='info' THEN 1 ELSE 0 END)
+                    WHEN 3 THEN 'critical' WHEN 2 THEN 'warning'
+                    WHEN 1 THEN 'info' ELSE 'ok' END AS max_severity
+            FROM alerts WHERE field_id = f.id AND is_active = true
+        ) al ON true
+        {where}
+        ORDER BY f.enterprise_id, f.id
+    """)
+
+    rows = db.execute(sql, params).fetchall()
+
+    result = [
+        {
+            "id": r.id,
+            "name": r.name,
+            "code": r.code,
+            "enterprise_id": r.enterprise_id,
+            "area_ha": r.area_ha,
+            "current_crop": r.crop_name,
+            "last_ndvi": float(r.last_ndvi) if r.last_ndvi else None,
+            "last_ndvi_date": r.last_ndvi_date.isoformat() if r.last_ndvi_date else None,
+            "ndvi_change_pct": float(r.ndvi_change_pct) if r.ndvi_change_pct else None,
+            "active_alerts": r.active_alerts,
+            "alert_severity": r.alert_severity,
+        }
+        for r in rows
+    ]
+    cache_set(cache_key, result, ttl_seconds=300)
+    return result
+
+
+@router.get("/{field_id}")
+def get_field(field_id: int, db: Session = Depends(get_db)):
+    """Детальная информация о поле."""
+    sql = text("""
+        SELECT
+            f.id, f.name, f.code, f.enterprise_id, f.area_ha,
+            f.centroid_lat, f.centroid_lon, f.irrigation_type, f.notes,
+            ST_AsGeoJSON(f.geometry)::json AS geometry,
+            e.name AS enterprise_name,
+            ct.name_ru AS crop_name, ct.code AS crop_code,
+            cs.season_year, cs.planting_date, cs.variety,
+            n.mean_ndvi, n.min_ndvi, n.max_ndvi, n.std_ndvi,
+            n.captured_date AS ndvi_date, n.ndvi_change_pct,
+            COALESCE(al.alert_count, 0) AS active_alerts,
+            COALESCE(al.max_severity, 'ok') AS alert_severity
+        FROM fields f
+        LEFT JOIN enterprises e ON e.id = f.enterprise_id
+        LEFT JOIN crop_seasons cs ON cs.field_id = f.id
+            AND cs.season_year = :year
+        LEFT JOIN crop_types ct ON ct.id = cs.crop_type_id
+        LEFT JOIN LATERAL (
+            SELECT mean_ndvi, min_ndvi, max_ndvi, std_ndvi,
+                   captured_date, ndvi_change_pct
+            FROM ndvi_records WHERE field_id = f.id
+            ORDER BY captured_date DESC LIMIT 1
+        ) n ON true
+        LEFT JOIN LATERAL (
+            SELECT COUNT(*) AS alert_count,
+                CASE MAX(CASE WHEN severity='critical' THEN 3
+                              WHEN severity='warning' THEN 2
+                              WHEN severity='info' THEN 1 ELSE 0 END)
+                    WHEN 3 THEN 'critical' WHEN 2 THEN 'warning'
+                    WHEN 1 THEN 'info' ELSE 'ok' END AS max_severity
+            FROM alerts WHERE field_id = f.id AND is_active = true
+        ) al ON true
+        WHERE f.id = :fid
+    """)
+
+    r = db.execute(sql, {"fid": field_id, "year": date.today().year}).fetchone()
+    if not r:
+        raise HTTPException(status_code=404, detail="Поле не найдено")
+
+    return {
+        "type": "Feature",
+        "geometry": r.geometry,
+        "properties": {
+            "id": r.id,
+            "name": r.name,
+            "code": r.code,
+            "enterprise_id": r.enterprise_id,
+            "enterprise_name": r.enterprise_name,
+            "area_ha": r.area_ha,
+            "centroid_lat": r.centroid_lat,
+            "centroid_lon": r.centroid_lon,
+            "irrigation_type": r.irrigation_type,
+            "notes": r.notes,
+            "current_crop": r.crop_name,
+            "crop_code": r.crop_code,
+            "season_year": r.season_year,
+            "planting_date": r.planting_date.isoformat() if r.planting_date else None,
+            "variety": r.variety,
+            "last_ndvi": float(r.mean_ndvi) if r.mean_ndvi else None,
+            "last_ndvi_date": r.ndvi_date.isoformat() if r.ndvi_date else None,
+            "ndvi_change_pct": float(r.ndvi_change_pct) if r.ndvi_change_pct else None,
+            "active_alerts": r.active_alerts,
+            "alert_severity": r.alert_severity,
+        }
+    }
+
+
+@router.get("/{field_id}/geojson")
+def get_field_geojson(field_id: int, db: Session = Depends(get_db)):
+    return get_field(field_id, db)
+
+
+@router.post("/{field_id}/season")
+def set_field_season(field_id: int, data: dict, db: Session = Depends(get_db)):
+    f = db.query(Field).filter(Field.id == field_id).first()
+    if not f:
+        raise HTTPException(status_code=404, detail="Поле не найдено")
+
+    season_year = data.get("season_year", date.today().year)
+    existing = db.query(CropSeason).filter(
+        CropSeason.field_id == field_id,
+        CropSeason.season_year == season_year
+    ).first()
+    if existing:
+        db.delete(existing)
+
+    season = CropSeason(
+        field_id=field_id,
+        crop_type_id=data.get("crop_type_id"),
+        season_year=season_year,
+        planting_date=data.get("planting_date"),
+        variety=data.get("variety"),
+    )
+    db.add(season)
+    db.commit()
+    return {"status": "ok", "field_id": field_id, "season_year": season_year}
+
+
+
+========================================================
+=== FILE: backend/api/ndvi.py
+========================================================
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from sqlalchemy import text
+from database import get_db
+from datetime import datetime, timedelta
+import logging
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/api/ndvi", tags=["ndvi"])
+
+
+@router.get("/{field_id}/history")
+async def get_ndvi_history(
+    field_id: int,
+    days: int = 90,
+    include_cloudy: bool = False,
+    db: Session = Depends(get_db),
+):
+    """История NDVI по полю за N дней. Возвращает пустой список если данных нет.
+    По умолчанию исключает облачные снимки (cloud_cover_pct > 30)."""
+    # Проверяем что поле существует (по id или code)
+    field_row = db.execute(
+        text("SELECT id, name FROM fields WHERE id = :fid OR code = CAST(:fid AS TEXT) LIMIT 1"),
+        {"fid": field_id}
+    ).fetchone()
+    if not field_row:
+        raise HTTPException(status_code=404, detail=f"Поле {field_id} не найдено")
+
+    # Дата начала периода
+    since_date = (datetime.now() - timedelta(days=days)).date()
+
+    cloud_filter = "" if include_cloudy else "  AND (cloud_cover_pct IS NULL OR cloud_cover_pct <= 30)"
+
+    records = db.execute(text(f"""
+        SELECT
+            id,
+            captured_date,
+            mean_ndvi,
+            min_ndvi,
+            max_ndvi,
+            std_ndvi,
+            ndvi_change,
+            ndvi_change_pct,
+            satellite,
+            cloud_cover_pct
+        FROM ndvi_records
+        WHERE field_id = :fid
+          AND captured_date >= :since
+          {cloud_filter}
+        ORDER BY captured_date ASC
+    """), {"fid": field_row.id, "since": since_date}).fetchall()
+
+    def safe_float(v):
+        return round(float(v), 4) if v is not None else None
+
+    return {
+        "field_id": field_row.id,
+        "field_name": field_row.name,
+        "days": days,
+        "records": [
+            {
+                "id": r.id,
+                "captured_date": str(r.captured_date),
+                "mean_ndvi": safe_float(r.mean_ndvi),
+                "min_ndvi": safe_float(r.min_ndvi),
+                "max_ndvi": safe_float(r.max_ndvi),
+                "std_ndvi": safe_float(r.std_ndvi),
+                "ndvi_change": safe_float(r.ndvi_change),
+                "change_pct": safe_float(r.ndvi_change_pct),
+                "satellite": r.satellite,
+                "cloud_cover_pct": safe_float(r.cloud_cover_pct),
+            }
+            for r in records
+        ],
+        "count": len(records),
+    }
+
+
+@router.get("/{field_id}/latest")
+async def get_ndvi_latest(field_id: int, db: Session = Depends(get_db)):
+    """Последний NDVI снимок поля."""
+    # Сначала находим поле по id или code
+    frow = db.execute(
+        text("SELECT id FROM fields WHERE id = :fid OR code = CAST(:fid AS TEXT) LIMIT 1"),
+        {"fid": field_id}
+    ).fetchone()
+    if not frow:
+        return {"field_id": field_id, "record": None}
+
+    row = db.execute(text("""
+        SELECT id, captured_date, mean_ndvi, min_ndvi, max_ndvi,
+               ndvi_change_pct, satellite, cloud_cover_pct
+        FROM ndvi_records
+        WHERE field_id = :fid
+        ORDER BY captured_date DESC
+        LIMIT 1
+    """), {"fid": frow.id}).fetchone()
+
+    if not row:
+        return {"field_id": frow.id, "record": None}
+
+    return {
+        "field_id": frow.id,
+        "record": {
+            "id": row.id,
+            "captured_date": str(row.captured_date),
+            "mean_ndvi": float(row.mean_ndvi) if row.mean_ndvi is not None else None,
+            "min_ndvi": float(row.min_ndvi) if row.min_ndvi is not None else None,
+            "max_ndvi": float(row.max_ndvi) if row.max_ndvi is not None else None,
+            "change_pct": float(row.ndvi_change_pct) if row.ndvi_change_pct is not None else None,
+            "satellite": row.satellite,
+            "cloud_cover_pct": float(row.cloud_cover_pct) if row.cloud_cover_pct is not None else None,
+        }
+    }
+
+
+@router.post("/{field_id}/refresh")
+async def refresh_ndvi(field_id: int, db: Session = Depends(get_db)):
+    """Принудительно обновить NDVI для поля сейчас."""
+    field_row = db.execute(
+        text("SELECT id, name FROM fields WHERE id = :fid OR code = CAST(:fid AS TEXT) LIMIT 1"),
+        {"fid": field_id}
+    ).fetchone()
+    if not field_row:
+        raise HTTPException(status_code=404, detail=f"Поле {field_id} не найдено")
+
+    try:
+        from services.satellite import SatelliteService
+        from services.alert_engine import AlertEngine
+        satellite = SatelliteService()
+        alert_engine = AlertEngine(db)
+
+        record = await satellite.fetch_ndvi_for_field(field_row.id, db)
+        if record:
+            await alert_engine.check_field(field_id)
+            return {"status": "ok", "message": f"NDVI обновлён: {record.mean_ndvi:.4f}", "ndvi": float(record.mean_ndvi)}
+        else:
+            return {"status": "no_data", "message": "Спутниковые данные недоступны (облачность или mock режим)"}
+    except Exception as e:
+        logger.error(f"Ошибка обновления NDVI для поля {field_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+========================================================
+=== FILE: backend/api/alerts.py
+========================================================
+"""
+API роутер для алертов — оптимизированные SQL запросы (без N+1).
+"""
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from sqlalchemy import text
+from database import get_db
+from models.monitoring import Alert
+from datetime import datetime
+from services.cache import cache_get, cache_set, cache_delete_pattern
+
+router = APIRouter(prefix="/api/alerts", tags=["alerts"])
+
+
+@router.get("/")
+def get_alerts(
+    enterprise_id: int = None,
+    severity: str = None,
+    alert_type: str = None,
+    field_id: int = None,
+    is_active: bool = True,
+    limit: int = 300,
+    db: Session = Depends(get_db)
+):
+    """Все алерты — один оптимизированный SQL запрос с JOIN.
+
+    Устраняет N+1: a.field.name и a.field.enterprise.name больше
+    не вызывают отдельные SQL запросы на каждый алерт.
+    """
+    cache_key = f"alerts:{enterprise_id or 'all'}:{severity or 'all'}:{alert_type or 'all'}:{field_id or 'all'}:{is_active}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
+
+    conditions = []
+    params = {}
+
+    if is_active:
+        conditions.append("a.is_active = true")
+
+    if severity:
+        conditions.append("a.severity = :severity")
+        params["severity"] = severity
+
+    if alert_type:
+        conditions.append("a.alert_type = :alert_type")
+        params["alert_type"] = alert_type
+
+    if field_id:
+        conditions.append("a.field_id = :field_id")
+        params["field_id"] = field_id
+
+    if enterprise_id:
+        conditions.append("f.enterprise_id = :eid")
+        params["eid"] = enterprise_id
+
+    where = " AND ".join(conditions) if conditions else "true"
+
+    sql = text(f"""
+        SELECT
+            a.id,
+            a.field_id,
+            a.alert_type,
+            a.severity,
+            a.title,
+            a.description,
+            a.recommendation,
+            a.triggered_value,
+            a.threshold_value,
+            a.triggered_at,
+            a.acknowledged_at,
+            a.is_active,
+            f.name AS field_name,
+            e.name AS enterprise_name,
+            n.captured_date,
+            n.cloud_cover_pct,
+            n.mean_ndvi AS snapshot_ndvi
+        FROM alerts a
+        JOIN fields f ON f.id = a.field_id
+        JOIN enterprises e ON e.id = f.enterprise_id
+        LEFT JOIN ndvi_records n ON n.id = a.ndvi_record_id
+        WHERE {where}
+        ORDER BY
+            CASE a.severity
+                WHEN 'critical' THEN 1
+                WHEN 'warning' THEN 2
+                ELSE 3
+            END,
+            a.triggered_at DESC
+        LIMIT :lim
+    """)
+
+    params["lim"] = limit
+    rows = db.execute(sql, params).fetchall()
+
+    result = [
+        {
+            "id": r.id,
+            "field_id": r.field_id,
+            "field_name": r.field_name,
+            "enterprise_name": r.enterprise_name,
+            "alert_type": r.alert_type,
+            "severity": r.severity,
+            "title": r.title,
+            "description": r.description,
+            "recommendation": r.recommendation,
+            "triggered_value": float(r.triggered_value) if r.triggered_value is not None else None,
+            "threshold_value": float(r.threshold_value) if r.threshold_value is not None else None,
+            "triggered_at": r.triggered_at.isoformat() if r.triggered_at else None,
+            "acknowledged_at": r.acknowledged_at.isoformat() if r.acknowledged_at else None,
+            "is_active": r.is_active,
+            "captured_date": str(r.captured_date) if r.captured_date else None,
+            "cloud_cover_pct": float(r.cloud_cover_pct) if r.cloud_cover_pct is not None else None,
+            "snapshot_ndvi": float(r.snapshot_ndvi) if r.snapshot_ndvi is not None else None,
+        }
+        for r in rows
+    ]
+    cache_set(cache_key, result, ttl_seconds=60)
+    return result
+
+
+# ─── Info Alerts ──────────────────────────────────────────────────────────────
+# Mark `info` severity alerts for the field-card — returned when enterprise
+# detail page needs the snapshot metadata on alert cards.
+# REUSE the same query as get_alerts but filtered to non-cloudy, non-noisy records.
+# This endpoint is intentionally lazy — it returns alerts with captured_date
+# and cloud_cover_pct so the frontend can display data quality info.
+# All new alert creation already runs through safe_pct_change and skip logic,
+# so we just need to serve the metadata fields here.
+# The important work (A2-A4) is in ndvi.py and alert_engine.py.
+# ────────────────────────────────────────────────────────────────────────────────
+
+@router.get("/{field_id}")
+def get_field_alerts(field_id: int, db: Session = Depends(get_db)):
+    """Алерты конкретного поля."""
+    sql = text("""
+        SELECT
+            a.id, a.field_id, a.alert_type, a.severity, a.title,
+            a.description, a.recommendation, a.triggered_value,
+            a.threshold_value, a.triggered_at, a.acknowledged_at, a.is_active,
+            n.captured_date, n.cloud_cover_pct, n.mean_ndvi AS snapshot_ndvi
+        FROM alerts a
+        LEFT JOIN ndvi_records n ON n.id = a.ndvi_record_id
+        WHERE a.field_id = :fid
+        ORDER BY a.triggered_at DESC
+        LIMIT 50
+    """)
+    rows = db.execute(sql, {"fid": field_id}).fetchall()
+    return [
+        {
+            "id": r.id,
+            "field_id": r.field_id,
+            "alert_type": r.alert_type,
+            "severity": r.severity,
+            "title": r.title,
+            "description": r.description,
+            "recommendation": r.recommendation,
+            "triggered_value": float(r.triggered_value) if r.triggered_value is not None else None,
+            "threshold_value": float(r.threshold_value) if r.threshold_value is not None else None,
+            "triggered_at": r.triggered_at.isoformat() if r.triggered_at else None,
+            "acknowledged_at": r.acknowledged_at.isoformat() if r.acknowledged_at else None,
+            "is_active": r.is_active,
+            "captured_date": str(r.captured_date) if r.captured_date else None,
+            "cloud_cover_pct": float(r.cloud_cover_pct) if r.cloud_cover_pct is not None else None,
+            "snapshot_ndvi": float(r.snapshot_ndvi) if r.snapshot_ndvi is not None else None,
+        }
+        for r in rows
+    ]
+
+
+@router.put("/{alert_id}/acknowledge")
+def acknowledge_alert(alert_id: int, db: Session = Depends(get_db)):
+    """Отметить алерт как просмотренный."""
+    alert = db.query(Alert).filter(Alert.id == alert_id).first()
+    if not alert:
+        raise HTTPException(status_code=404, detail="Алерт не найден")
+    alert.acknowledged_at = datetime.utcnow()
+    alert.is_active = False
+    db.commit()
+    # After acknowledging, clear alert and dashboard caches
+    cache_delete_pattern("alerts:*")
+    cache_delete_pattern("dashboard:*")
+    return {"status": "ok", "alert_id": alert_id}
+
+
+
+========================================================
+=== FILE: backend/api/dashboard.py
+========================================================
+# dashboard.py
+from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+from database import get_db
+from models.field import Field
+from models.monitoring import NDVIRecord, Alert
+from models.enterprise import Enterprise
+from datetime import date, timedelta
+from services.cache import cache_get, cache_set
+
+router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
+
+
+@router.get("/summary")
+def get_summary(db: Session = Depends(get_db)):
+    """Сводка по всему кластеру для главного дашборда."""
+    cache_key = "dashboard:summary"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
+    total_fields = db.query(Field).filter(Field.is_active == True).count()
+    total_enterprises = db.query(Enterprise).filter(Enterprise.is_active == True).count()
+
+    active_alerts = db.query(Alert).filter(Alert.is_active == True).count()
+    critical_alerts = db.query(Alert).filter(
+        Alert.is_active == True, Alert.severity == "critical"
+    ).count()
+    warning_alerts = db.query(Alert).filter(
+        Alert.is_active == True, Alert.severity == "warning"
+    ).count()
+
+    # Среднее NDVI по всем полям (последние снимки)
+    fields = db.query(Field).filter(Field.is_active == True).all()
+    ndvi_values = []
+    fields_with_problems = 0
+    fields_no_data = 0
+
+    for f in fields:
+        last = db.query(NDVIRecord).filter(
+            NDVIRecord.field_id == f.id
+        ).order_by(NDVIRecord.captured_date.desc()).first()
+
+        if last and last.mean_ndvi is not None:
+            ndvi_values.append(last.mean_ndvi)
+            if last.mean_ndvi < 0.3:
+                fields_with_problems += 1
+        else:
+            fields_no_data += 1
+
+    avg_ndvi = round(sum(ndvi_values) / len(ndvi_values), 4) if ndvi_values else None
+
+    # Общая площадь
+    total_area = db.query(func.sum(Field.area_ha)).filter(Field.is_active == True).scalar()
+
+    result = {
+        "total_fields": total_fields,
+        "total_enterprises": total_enterprises,
+        "total_area_ha": round(total_area, 1) if total_area else 0,
+        "avg_ndvi": avg_ndvi,
+        "active_alerts": active_alerts,
+        "critical_alerts": critical_alerts,
+        "warning_alerts": warning_alerts,
+        "fields_with_problems": fields_with_problems,
+        "fields_no_data": fields_no_data,
+        "last_updated": date.today().isoformat(),
+    }
+    cache_set(cache_key, result, ttl_seconds=120)
+    return result
+
+
+@router.get("/enterprises/{enterprise_id}")
+def get_enterprise_summary(enterprise_id: int, db: Session = Depends(get_db)):
+    """Сводка по конкретному предприятию — агрегированные KPI."""
+    from models.crop import CropType
+    from models.field import CropSeason
+    from datetime import date
+
+    fields = db.query(Field).filter(
+        Field.enterprise_id == enterprise_id,
+        Field.is_active == True
+    ).all()
+
+    total_fields = len(fields)
+    active_alerts = 0
+    critical_alerts = 0
+    fields_with_problems = 0
+    ndvi_values = []
+    fields_list = []
+
+    for f in fields:
+        last = db.query(NDVIRecord).filter(
+            NDVIRecord.field_id == f.id
+        ).order_by(NDVIRecord.captured_date.desc()).first()
+
+        alerts_count = db.query(Alert).filter(
+            Alert.field_id == f.id, Alert.is_active == True
+        ).count()
+
+        # Считаем критические алерты
+        crit = db.query(Alert).filter(
+            Alert.field_id == f.id,
+            Alert.is_active == True,
+            Alert.severity == "critical"
+        ).count()
+
+        active_alerts += alerts_count
+        critical_alerts += crit
+
+        if last and last.mean_ndvi is not None:
+            ndvi_values.append(last.mean_ndvi)
+            if last.mean_ndvi < 0.3:
+                fields_with_problems += 1
+
+        season = db.query(CropSeason).filter(
+            CropSeason.field_id == f.id,
+            CropSeason.season_year == date.today().year
+        ).first()
+
+        crop_name = None
+        if season:
+            crop = db.query(CropType).filter(CropType.id == season.crop_type_id).first()
+            crop_name = crop.name_ru if crop else None
+
+        fields_list.append({
+            "id": f.id,
+            "name": f.name,
+            "area_ha": f.area_ha,
+            "current_crop": crop_name,
+            "ndvi": last.mean_ndvi if last else None,
+            "ndvi_date": last.captured_date.isoformat() if last else None,
+            "alerts": alerts_count,
+        })
+
+    avg_ndvi = round(sum(ndvi_values) / len(ndvi_values), 4) if ndvi_values else None
+
+    return {
+        "enterprise_id": enterprise_id,
+        "total_fields": total_fields,
+        "active_alerts": active_alerts,
+        "critical_alerts": critical_alerts,
+        "avg_ndvi": avg_ndvi,
+        "fields_with_problems": fields_with_problems,
+        "fields": fields_list,
+        "last_updated": date.today().isoformat(),
+    }
+
+
+
+========================================================
+=== FILE: backend/api/weather.py
+========================================================
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from sqlalchemy import text
+from database import get_db
+from services.weather import get_field_weather
+
+router = APIRouter(prefix="/api/weather", tags=["weather"])
+
+
+@router.get("/field/{field_id}")
+def get_weather_for_field(field_id: int, db: Session = Depends(get_db)):
+    """Погода для конкретного поля по его координатам."""
+    f = db.execute(
+        text("SELECT id, name, centroid_lat, centroid_lon FROM fields WHERE id = :fid OR code = CAST(:fid AS TEXT) LIMIT 1"),
+        {"fid": field_id}
+    ).fetchone()
+    if not f:
+        raise HTTPException(status_code=404, detail="Поле не найдено")
+
+    if not f.centroid_lat or not f.centroid_lon:
+        raise HTTPException(status_code=400, detail="У поля не заданы координаты центра")
+
+    weather = get_field_weather(f.centroid_lat, f.centroid_lon)
+    if not weather:
+        raise HTTPException(status_code=503, detail="Не удалось получить данные погоды")
+
+    weather["field_id"] = f.id
+    weather["field_name"] = f.name
+    return weather
+
+
+@router.get("/location")
+def get_weather_by_location(lat: float, lon: float):
+    """Погода по координатам."""
+    weather = get_field_weather(lat, lon)
+    if not weather:
+        raise HTTPException(status_code=503, detail="Не удалось получить данные погоды")
+    return weather
+
+
+
+========================================================
+=== FILE: backend/api/ai.py
+========================================================
+"""
+AI агрономические рекомендации через Claude API.
+
+Эндпоинт:
+    POST /api/ai/recommend — агрономический анализ ситуации на поле
+"""
+
+import logging
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from sqlalchemy import text
+from database import get_db
+from config import settings
+import anthropic
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/api/ai", tags=["ai"])
+
+
+@router.post("/recommend")
+def get_ai_recommendation(payload: dict, db: Session = Depends(get_db)):
+    """
+    Generate AI agronomic recommendation for a specific alert + field.
+
+    Payload:
+        alert_id: int
+        field_id: int
+    """
+    alert_id = payload.get("alert_id")
+    field_id = payload.get("field_id")
+
+    if not alert_id or not field_id:
+        raise HTTPException(status_code=400, detail="alert_id and field_id required")
+
+    # --- Load field data ---
+    field_row = db.execute(text("""
+        SELECT
+            f.name, f.code, f.area_ha, f.irrigation_type,
+            f.centroid_lat, f.centroid_lon,
+            ct.name_ru as crop_name,
+            e.name as enterprise_name
+        FROM fields f
+        LEFT JOIN crop_seasons cs ON cs.field_id = f.id AND cs.season_year = 2026
+        LEFT JOIN crop_types ct ON ct.id = cs.crop_type_id
+        LEFT JOIN enterprises e ON e.id = f.enterprise_id
+        WHERE f.id = :fid
+    """), {"fid": field_id}).fetchone()
+
+    if not field_row:
+        raise HTTPException(status_code=404, detail="Field not found")
+
+    # --- Load alert data ---
+    alert_row = db.execute(text("""
+        SELECT alert_type, severity, title, description, recommendation,
+               triggered_value, threshold_value
+        FROM alerts
+        WHERE id = :aid
+    """), {"aid": alert_id}).fetchone()
+
+    if not alert_row:
+        raise HTTPException(status_code=404, detail="Alert not found")
+
+    # --- Load NDVI history (last 10 records) ---
+    ndvi_rows = db.execute(text("""
+        SELECT captured_date, mean_ndvi, ndvi_change_pct
+        FROM ndvi_records
+        WHERE field_id = :fid
+        ORDER BY captured_date DESC
+        LIMIT 10
+    """), {"fid": field_id}).fetchall()
+
+    ndvi_history = [
+        f"{row.captured_date}: NDVI={row.mean_ndvi:.4f}"
+        + (f", изменение={row.ndvi_change_pct:+.1f}%" if row.ndvi_change_pct else "")
+        for row in ndvi_rows
+    ]
+
+    # --- Load weather (current conditions from open-meteo, synchronous httpx) ---
+    weather_summary = "Данные о погоде недоступны"
+    try:
+        import httpx
+        if field_row.centroid_lat and field_row.centroid_lon:
+            lat = field_row.centroid_lat
+            lon = field_row.centroid_lon
+            url = (
+                f"https://api.open-meteo.com/v1/forecast"
+                f"?latitude={lat}&longitude={lon}"
+                f"&current=temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m"
+                f"&timezone=Asia/Tashkent"
+            )
+            resp = httpx.get(url, timeout=5)
+            if resp.status_code == 200:
+                data = resp.json().get("current", {})
+                weather_summary = (
+                    f"Температура: {data.get('temperature_2m', '?')}°C, "
+                    f"Влажность: {data.get('relative_humidity_2m', '?')}%, "
+                    f"Осадки: {data.get('precipitation', 0)} мм, "
+                    f"Ветер: {data.get('wind_speed_10m', '?')} км/ч"
+                )
+    except Exception as e:
+        logger.warning(f"Weather fetch failed: {e}")
+
+    # --- Build prompt ---
+    irrigation_map = {
+        "drip": "капельное орошение (томчи)",
+        "furrow": "полив по бороздам (очик)",
+        "sprinkler": "дождевание",
+        "flood": "затопление",
+    }
+    irrigation = irrigation_map.get(
+        str(field_row.irrigation_type).lower(),
+        field_row.irrigation_type or "не указано"
+    )
+
+    prompt = f"""Ты — опытный агроном-консультант для Бухарской области Узбекистана.
+Проанализируй ситуацию на поле и дай конкретные практические рекомендации.
+
+## Данные поля
+- Предприятие: {field_row.enterprise_name}
+- Поле: {field_row.name} (код: {field_row.code})
+- Площадь: {field_row.area_ha:.1f} га
+- Культура: {field_row.crop_name or 'не указана'}
+- Тип орошения: {irrigation}
+
+## Алерт (проблема)
+- Тип: {alert_row.alert_type}
+- Критичность: {alert_row.severity}
+- Заголовок: {alert_row.title}
+- Описание: {alert_row.description}
+- Базовая рекомендация системы: {alert_row.recommendation or 'нет'}
+- Значение NDVI при алерте: {alert_row.triggered_value}
+- Пороговое значение: {alert_row.threshold_value}
+
+## История NDVI (последние 10 измерений, новые сначала)
+{chr(10).join(ndvi_history) if ndvi_history else 'Нет данных'}
+
+## Текущая погода
+{weather_summary}
+
+## Задача
+Дай структурированный агрономический анализ и рекомендации. Будь конкретным и практичным.
+Учитывай что сейчас июнь 2026 года — активная вегетация хлопка/уборка пшеницы.
+
+Ответ дай строго в следующем формате (используй именно эти заголовки):
+
+### 🔍 Диагноз
+[1-2 предложения: что происходит с посевом и почему]
+
+### ⚠️ Основные риски
+[маркированный список из 2-3 конкретных рисков для данной культуры и региона]
+
+### ✅ Рекомендуемые действия
+[нумерованный список из 3-5 конкретных действий с указанием сроков]
+
+### 💧 Режим орошения
+[конкретная рекомендация по поливу с нормой воды для данной культуры]
+
+### 📅 Контрольная точка
+[когда и что проверить через N дней]
+"""
+
+    # --- Call Claude API ---
+    try:
+        client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+        if not settings.anthropic_api_key:
+            raise ValueError("ANTHROPIC_API_KEY is empty or not set in .env")
+
+        message = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=1024,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        recommendation = message.content[0].text
+        logger.info(f"AI recommendation generated for field {field_id}, alert {alert_id}")
+
+    except anthropic.AuthenticationError as e:
+        logger.error(f"Claude API auth error — check ANTHROPIC_API_KEY in .env: {e}")
+        raise HTTPException(status_code=502, detail="Ошибка авторизации Claude API. Проверьте ANTHROPIC_API_KEY в .env")
+    except anthropic.RateLimitError as e:
+        logger.error(f"Claude API rate limit: {e}")
+        raise HTTPException(status_code=429, detail="Превышен лимит запросов Claude API. Попробуйте через минуту.")
+    except Exception as e:
+        logger.error(f"Claude API unexpected error: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=502, detail=f"Ошибка Claude API: {str(e)[:200]}")
+
+    return {
+        "alert_id": alert_id,
+        "field_id": field_id,
+        "field_name": field_row.name,
+        "recommendation": recommendation,
+        "model": "claude-sonnet-4-6",
+    }
+
+
+
+========================================================
+=== FILE: backend/api/telegram.py
+========================================================
+"""
+API для управления Telegram уведомлениями.
+
+Эндпоинты:
+    POST /api/telegram/test       — отправить тестовое сообщение
+    POST /api/telegram/send-alert — отправить уведомление по конкретному алерту
+    GET  /api/telegram/status     — проверить настроен ли Telegram
+"""
+
+import logging
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from sqlalchemy import text
+from database import get_db
+from config import settings
+from services.telegram import send_telegram_message, format_alert_message
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/api/telegram", tags=["telegram"])
+
+
+@router.get("/status")
+def telegram_status():
+    """Проверить настроен ли Telegram."""
+    configured = bool(settings.telegram_bot_token and settings.telegram_chat_id)
+    return {
+        "configured": configured,
+        "enabled": settings.telegram_notifications_enabled,
+    }
+
+
+@router.post("/test")
+def send_test_notification():
+    """Отправить тестовое сообщение в Telegram."""
+    result = send_telegram_message(
+        "✅ <b>Тест AgroSat</b>\n\n"
+        "Если вы видите это сообщение — Telegram уведомления настроены правильно!\n\n"
+        "🛰 AgroSat — Мониторинг полей"
+    )
+    if not result["ok"]:
+        raise HTTPException(status_code=502, detail=result["error"])
+    return {"ok": True, "message": "Тестовое сообщение отправлено"}
+
+
+@router.post("/send-alert")
+def send_alert_notification(payload: dict, db: Session = Depends(get_db)):
+    """
+    Отправить Telegram уведомление по конкретному алерту.
+
+    Payload: {alert_id: int}
+    """
+    alert_id = payload.get("alert_id")
+    if not alert_id:
+        raise HTTPException(status_code=400, detail="alert_id required")
+
+    # Загрузить алерт + поле + предприятие одним запросом
+    row = db.execute(text("""
+        SELECT
+            a.alert_type, a.severity, a.title, a.description,
+            a.recommendation, a.triggered_value, a.threshold_value,
+            f.name as field_name, f.code as field_code, f.area_ha,
+            e.name as enterprise_name
+        FROM alerts a
+        JOIN fields f ON f.id = a.field_id
+        JOIN enterprises e ON e.id = f.enterprise_id
+        WHERE a.id = :aid
+    """), {"aid": alert_id}).fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Alert not found")
+
+    alert = {
+        "alert_type": row.alert_type,
+        "severity": row.severity,
+        "title": row.title,
+        "description": row.description,
+        "recommendation": row.recommendation,
+        "triggered_value": row.triggered_value,
+        "threshold_value": row.threshold_value,
+    }
+    field = {"name": row.field_name, "code": row.field_code, "area_ha": row.area_ha}
+    enterprise = {"name": row.enterprise_name}
+
+    message = format_alert_message(alert, field, enterprise)
+    result = send_telegram_message(message)
+
+    if not result["ok"]:
+        raise HTTPException(status_code=502, detail=result["error"])
+    return {"ok": True, "message": "Уведомление отправлено"}
+
+
+
+========================================================
+=== FILE: backend/api/reports.py
+========================================================
+"""
+API для генерации PDF отчётов.
+
+Эндпоинт:
+    GET /api/reports/enterprise/{enterprise_id}/pdf — скачать PDF отчёт
+
+Положить в: backend/api/reports.py
+"""
+
+import logging
+import io
+import urllib.parse
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Session
+from sqlalchemy import text
+from database import get_db
+from services.pdf_report import generate_enterprise_pdf
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/api/reports", tags=["reports"])
+
+
+@router.get("/enterprise/{enterprise_id}/pdf")
+def download_enterprise_pdf(enterprise_id: int, db: Session = Depends(get_db)):
+    """Сгенерировать и вернуть PDF отчёт по предприятию."""
+
+    ent_row = db.execute(text("""
+        SELECT id, name, code, region FROM enterprises WHERE id = :eid
+    """), {"eid": enterprise_id}).fetchone()
+    if not ent_row:
+        raise HTTPException(status_code=404, detail="Enterprise not found")
+
+    enterprise = {"name": ent_row.name, "code": ent_row.code, "region": ent_row.region}
+
+    field_rows = db.execute(text("""
+        SELECT
+            f.id, f.name, f.code, f.area_ha,
+            ct.name_ru as current_crop,
+            latest.mean_ndvi as current_ndvi
+        FROM fields f
+        LEFT JOIN crop_seasons cs ON cs.field_id = f.id AND cs.season_year = 2026
+        LEFT JOIN crop_types ct ON ct.id = cs.crop_type_id
+        LEFT JOIN LATERAL (
+            SELECT mean_ndvi
+            FROM ndvi_records nr
+            WHERE nr.field_id = f.id
+            ORDER BY nr.captured_date DESC
+            LIMIT 1
+        ) latest ON true
+        WHERE f.enterprise_id = :eid AND f.is_active = true
+        ORDER BY f.name
+    """), {"eid": enterprise_id}).fetchall()
+
+    fields = [
+        {
+            "name": r.name, "code": r.code, "area_ha": r.area_ha,
+            "current_crop": r.current_crop,
+            "current_ndvi": float(r.current_ndvi) if r.current_ndvi is not None else None,
+        }
+        for r in field_rows
+    ]
+
+    alert_rows = db.execute(text("""
+        SELECT a.title, a.severity, a.description, a.recommendation,
+               f.name as field_name
+        FROM alerts a
+        JOIN fields f ON f.id = a.field_id
+        WHERE f.enterprise_id = :eid AND a.is_active = true AND a.severity = 'critical'
+        ORDER BY a.triggered_at DESC
+    """), {"eid": enterprise_id}).fetchall()
+
+    alerts = [
+        {
+            "title": r.title, "severity": r.severity,
+            "description": r.description, "recommendation": r.recommendation,
+            "field_name": r.field_name,
+        }
+        for r in alert_rows
+    ]
+
+    ndvis = [f["current_ndvi"] for f in fields if f["current_ndvi"] is not None]
+    areas = [f["area_ha"] for f in fields if f["area_ha"] is not None]
+    kpi = {
+        "total_fields": len(fields),
+        "avg_ndvi": (sum(ndvis) / len(ndvis)) if ndvis else None,
+        "critical_count": len(alerts),
+        "normal_count": sum(1 for v in ndvis if v >= 0.35),
+        "total_area": sum(areas) if areas else None,
+    }
+
+    try:
+        pdf_bytes = generate_enterprise_pdf(enterprise, fields, alerts, kpi)
+    except Exception as e:
+        logger.error(f"PDF generation failed: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка генерации PDF: {str(e)[:200]}")
+
+    safe_name = enterprise["name"].replace(" ", "_")
+    filename = f"AgroSat_{safe_name}.pdf"
+    encoded = urllib.parse.quote(filename)
+
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded}"}
+    )
+
+
+
+========================================================
+=== FILE: backend/services/satellite.py
+========================================================
+"""
+Сервис получения спутниковых данных NDVI из Sentinel-2 через Sentinel Hub API.
+
+Регистрация (бесплатно): https://www.sentinel-hub.com/
+Бесплатный план: 30,000 processing units / месяц
+При 100 полях размером ~50 га: ~5,000 PU/месяц — хватает с запасом.
+"""
+
+import logging
+from datetime import date, timedelta
+from typing import Optional
+import json
+
+import httpx
+import numpy as np
+from shapely.geometry import shape, mapping
+from shapely import wkt
+
+from config import settings
+
+logger = logging.getLogger(__name__)
+
+
+def safe_float(v, default=0.0):
+    """Convert to float, returning default for None/invalid."""
+    try:
+        val = float(v)
+        import math
+        if math.isnan(val) or math.isinf(val):
+            return default
+        return val
+    except (TypeError, ValueError):
+        return default
+
+
+# ─── Quality Gate ────────────────────────────────────────────────────────────────
+
+def validate_ndvi_quality(mean_ndvi, cloud_cover_pct=None, min_ndvi=None, max_ndvi=None, field_name=""):
+    """
+    Validate NDVI data quality before saving to database.
+    Returns (is_valid, rejection_reason).
+
+    Rejection criteria for agricultural fields:
+    - mean_ndvi < 0: water/cloud/shadow artifact (impossible for crops)
+    - mean_ndvi > 1.0: sensor error
+    - cloud_cover_pct > 30: too cloudy for reliable reading
+    - min_ndvi < -0.5 AND max_ndvi > 0.5: mixed pixel (cloud edge + vegetation)
+    - mean_ndvi very close to 0 (< 0.02) with low std: bare sensor noise
+    """
+    if mean_ndvi is None:
+        return False, "mean_ndvi is None"
+
+    try:
+        mean_ndvi = float(mean_ndvi)
+    except (TypeError, ValueError):
+        return False, f"mean_ndvi not numeric: {mean_ndvi}"
+
+    # NaN / Inf / zero — sensor noise, no vegetation
+    import math
+    if math.isnan(mean_ndvi) or math.isinf(mean_ndvi):
+        logger.warning(
+            f"NDVI quality gate REJECT [{field_name}]: NaN/Inf NDVI"
+        )
+        return False, f"NaN/Inf NDVI"
+
+    if mean_ndvi <= 0.0:
+        logger.warning(
+            f"NDVI quality gate REJECT [{field_name}]: non-positive NDVI {mean_ndvi:.4f} "
+            f"(no vegetation signal)"
+        )
+        return False, f"non-positive NDVI ({mean_ndvi:.4f})"
+
+    if mean_ndvi > 1.0:
+        logger.warning(
+            f"NDVI quality gate REJECT [{field_name}]: NDVI > 1.0 ({mean_ndvi:.4f})"
+        )
+        return False, f"NDVI exceeds 1.0 ({mean_ndvi:.4f})"
+
+    if cloud_cover_pct is not None:
+        try:
+            cloud_cover_pct = float(cloud_cover_pct)
+        except (TypeError, ValueError):
+            cloud_cover_pct = None
+
+    if cloud_cover_pct is not None and cloud_cover_pct > 30:
+        logger.info(
+            f"NDVI quality gate REJECT [{field_name}]: cloud cover {cloud_cover_pct:.1f}% > 30%"
+        )
+        return False, f"high cloud cover ({cloud_cover_pct:.1f}%)"
+
+    # Mixed pixel detection
+    if min_ndvi is not None and max_ndvi is not None:
+        try:
+            min_val = float(min_ndvi)
+            max_val = float(max_ndvi)
+            if min_val < -0.3 and max_val > 0.4:
+                logger.warning(
+                    f"NDVI quality gate REJECT [{field_name}]: mixed pixel "
+                    f"(min={min_val:.4f}, max={max_val:.4f})"
+                )
+                return False, f"mixed pixel (min={min_val:.4f}, max={max_val:.4f})"
+        except (TypeError, ValueError):
+            pass
+
+    return True, "ok"
+
+
+# ─── Sentinel Hub Evalscripts ─────────────────────────────────────────────────
+
+# NDVI с маскировкой облаков по Scene Classification Layer (SCL)
+NDVI_EVALSCRIPT = """
+//VERSION=3
+
+function setup() {
+  return {
+    input: [{ bands: ["B04", "B08", "SCL"] }],
+    output: [
+      { id: "ndvi", bands: 1, sampleType: "FLOAT32" },
+      { id: "dataMask", bands: 1 }
+    ]
+  };
+}
+
+function evaluatePixel(sample) {
+  // SCL маска: исключаем облака (8,9,10), снег (11), дефектные пиксели (1)
+  let isValid = ![1, 3, 8, 9, 10, 11].includes(sample.SCL);
+  let ndvi = (sample.B08 - sample.B04) / (sample.B08 + sample.B04 + 0.0001);
+  return {
+    ndvi: [ndvi],
+    dataMask: [isValid ? 1 : 0]
+  };
+}
+"""
+
+
+class SentinelHubService:
+    """Клиент для Sentinel Hub Statistical API."""
+
+    STATISTICAL_API_URL = "https://services.sentinel-hub.com/api/v1/statistics"
+    TOKEN_URL = "https://services.sentinel-hub.com/auth/realms/main/protocol/openid-connect/token"
+
+    def __init__(self):
+        self.client_id = settings.sentinel_hub_client_id
+        self.client_secret = settings.sentinel_hub_client_secret
+        self._access_token: Optional[str] = None
+        self._token_expires_at: float = 0
+
+    def _get_access_token(self) -> str:
+        """Получить OAuth2 токен от Sentinel Hub с кешированием."""
+        import time
+
+        # Return cached token if still valid (tokens last ~60 min, refresh at 55)
+        if self._access_token and time.time() < self._token_expires_at - 300:
+            return self._access_token
+
+        if not self.client_id or not self.client_secret:
+            raise ValueError(
+                "Sentinel Hub credentials не настроены. "
+                "Зарегистрируйтесь на https://www.sentinel-hub.com/ и добавьте "
+                "SENTINEL_HUB_CLIENT_ID и SENTINEL_HUB_CLIENT_SECRET в .env"
+            )
+
+        import time
+
+        response = httpx.post(
+            self.TOKEN_URL,
+            data={
+                "grant_type": "client_credentials",
+                "client_id": self.client_id,
+                "client_secret": self.client_secret,
+            }
+        )
+        response.raise_for_status()
+        token_data = response.json()
+        self._access_token = token_data["access_token"]
+        self._token_expires_at = time.time() + token_data.get("expires_in", 3600)
+        return self._access_token
+
+    def get_ndvi_stats(
+        self,
+        geometry_wkt: str,
+        date_from: date,
+        date_to: date,
+        aggregation_interval: str = "P5D",
+    ) -> Optional[dict]:
+        """
+        Получить статистику NDVI для поля за период.
+
+        Args:
+            geometry_wkt: Геометрия поля в формате WKT (POLYGON)
+            date_from: Начало периода
+            date_to: Конец периода (включительно)
+
+        Returns:
+            dict с ключами: mean, min, max, std, p10, p90, valid_pct, date
+        """
+        try:
+            token = self._get_access_token()
+        except Exception as e:
+            logger.error(f"Ошибка получения токена Sentinel Hub: {e}")
+            return None
+
+        # Преобразуем WKT в GeoJSON
+        geom = wkt.loads(geometry_wkt)
+        geojson_geom = mapping(geom)
+
+        payload = {
+            "input": {
+                "bounds": {
+                    "geometry": geojson_geom,
+                    "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}
+                },
+                "data": [{
+                    "type": "sentinel-2-l2a",
+                    "dataFilter": {
+                        "timeRange": {
+                            "from": f"{date_from.isoformat()}T00:00:00Z",
+                            "to": f"{date_to.isoformat()}T23:59:59Z"
+                        },
+                        "maxCloudCoverage": 80  # исключаем снимки >80% облаков
+                    },
+                    "processing": {
+                        "harmonizeValues": True
+                    }
+                }]
+            },
+            "aggregation": {
+                "timeRange": {
+                    "from": f"{date_from.isoformat()}T00:00:00Z",
+                    "to": f"{date_to.isoformat()}T23:59:59Z"
+                },
+                "aggregationInterval": {"of": aggregation_interval},
+                "evalscript": NDVI_EVALSCRIPT,
+                "resx": 10,
+                "resy": 10
+            },
+            "calculations": {
+                "default": {
+                    "statistics": {
+                        "default": {
+                            "percentiles": {"k": [10, 25, 75, 90]}
+                        }
+                    }
+                }
+            }
+        }
+
+        try:
+            response = httpx.post(
+                self.STATISTICAL_API_URL,
+                json=payload,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=60.0
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            return self._parse_stats_response(data)
+
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Sentinel Hub API error: {e.response.status_code} — {e.response.text}")
+            return None
+        except Exception as e:
+            logger.error(f"Непредвиденная ошибка при запросе NDVI: {e}")
+            return None
+
+    def _parse_stats_response(self, response_data: dict) -> Optional[dict]:
+        """Парсим ответ Statistical API и возвращаем наиболее свежий снимок."""
+        try:
+            intervals = response_data.get("data", [])
+            if not intervals:
+                logger.warning("Sentinel Hub вернул пустой ответ (возможно, нет снимков за период)")
+                return None
+
+            # Берём последний интервал с данными
+            valid_intervals = [
+                i for i in intervals
+                if i.get("outputs", {}).get("ndvi", {}).get("bands", {}).get("B0", {}).get("stats", {}).get("sampleCount", 0) > 0
+            ]
+
+            if not valid_intervals:
+                return None
+
+            latest = valid_intervals[-1]
+            interval_date = latest["interval"]["to"][:10]
+
+            stats = latest["outputs"]["ndvi"]["bands"]["B0"]["stats"]
+
+            # valid_pct = непустые пиксели / все пиксели
+            sample_count = stats.get("sampleCount", 0)
+            no_data_count = stats.get("noDataCount", 0)
+            total = sample_count + no_data_count
+            valid_pct = (sample_count / total * 100) if total > 0 else 0
+
+            percentiles = stats.get("percentiles", {})
+
+            return {
+                "captured_date": interval_date,
+                "mean_ndvi": round(safe_float(stats.get("mean", 0)), 4),
+                "min_ndvi": round(safe_float(stats.get("min", 0)), 4),
+                "max_ndvi": round(safe_float(stats.get("max", 0)), 4),
+                "std_ndvi": round(safe_float(stats.get("stDev", 0)), 4),
+                "p10_ndvi": round(safe_float(percentiles.get("10.0", 0)), 4),
+                "p90_ndvi": round(safe_float(percentiles.get("90.0", 0)), 4),
+                "valid_pixels_pct": round(valid_pct, 1),
+                "satellite": "Sentinel-2",
+            }
+
+        except (KeyError, IndexError, TypeError) as e:
+            logger.error(f"Ошибка парсинга ответа Sentinel Hub: {e}")
+            return None
+
+    def get_latest_ndvi(self, geometry_wkt: str) -> Optional[dict]:
+        """Получить самый свежий NDVI (за последние 15 дней)."""
+        today = date.today()
+        date_from = today - timedelta(days=15)
+        return self.get_ndvi_stats(geometry_wkt, date_from, today)
+
+    def get_ndvi_stats_for_date(self, geometry_wkt: str, target_date: date) -> Optional[dict]:
+        """
+        Получить NDVI для конкретной даты (±2 дня поисковое окно).
+        Использует 1-дневный aggregationInterval для точного попадания.
+        """
+        time_from = target_date - timedelta(days=2)
+        time_to = target_date + timedelta(days=2)
+        return self.get_ndvi_stats(geometry_wkt, time_from, time_to, aggregation_interval="P1D")
+
+
+# ─── Mock режим (для разработки без API ключей) ───────────────────────────────
+
+class MockSatelliteService:
+    """
+    Заглушка для разработки без ключей Sentinel Hub.
+    Генерирует реалистичные NDVI данные на основе культуры и месяца.
+    Замените на SentinelHubService когда получите ключи.
+    """
+
+    def get_ndvi_stats(self, geometry_wkt: str, date_from: date, date_to: date) -> dict:
+        import random
+        from datetime import datetime
+
+        # Базовое NDVI зависит от месяца (сезонность Узбекистана)
+        month = date_to.month
+        seasonal_base = {
+            1: 0.18, 2: 0.22, 3: 0.30, 4: 0.38,
+            5: 0.52, 6: 0.65, 7: 0.68, 8: 0.60,
+            9: 0.45, 10: 0.30, 11: 0.22, 12: 0.18
+        }
+        base = seasonal_base.get(month, 0.35)
+        noise = random.uniform(-0.05, 0.05)
+        mean = max(0.05, min(0.95, base + noise))
+
+        return {
+            "captured_date": date_to.isoformat(),
+            "mean_ndvi": round(mean, 4),
+            "min_ndvi": round(mean - 0.12, 4),
+            "max_ndvi": round(mean + 0.12, 4),
+            "std_ndvi": round(random.uniform(0.03, 0.08), 4),
+            "p10_ndvi": round(mean - 0.10, 4),
+            "p90_ndvi": round(mean + 0.10, 4),
+            "valid_pixels_pct": round(random.uniform(75, 98), 1),
+            "satellite": "Mock/Dev",
+        }
+
+    def get_latest_ndvi(self, geometry_wkt: str) -> dict:
+        today = date.today()
+        return self.get_ndvi_stats(geometry_wkt, today - timedelta(days=5), today)
+
+    def _mock_historical_ndvi(self, field, target_date: date) -> dict:
+        """Generate realistic mock NDVI for a historical date based on crop."""
+        import random
+        import math
+
+        name_lower = (field.name or "").lower()
+
+        if "пшеница" in name_lower or "галла" in name_lower:
+            # Winter wheat: dormant Jan-Feb, active growth Mar-May, harvest/senescence Jun+
+            day_of_year = target_date.timetuple().tm_yday
+            if day_of_year < 60:
+                base = 0.25 + random.uniform(-0.05, 0.05)
+            elif day_of_year < 120:
+                base = 0.25 + (day_of_year - 60) * 0.007 + random.uniform(-0.05, 0.05)
+            elif day_of_year < 152:
+                base = 0.65 + random.uniform(-0.08, 0.08)
+            else:
+                base = 0.65 - (day_of_year - 152) * 0.02 + random.uniform(-0.05, 0.05)
+        elif "пахта" in name_lower or "хлопок" in name_lower:
+            # Cotton: bare soil Jan-Apr, emergence May, vegetative Jun-Jul, peak Aug+
+            day_of_year = target_date.timetuple().tm_yday
+            if day_of_year < 100:
+                base = 0.10 + random.uniform(-0.03, 0.05)
+            elif day_of_year < 140:
+                base = 0.10 + (day_of_year - 100) * 0.005 + random.uniform(-0.03, 0.03)
+            elif day_of_year < 200:
+                base = 0.30 + (day_of_year - 140) * 0.005 + random.uniform(-0.05, 0.05)
+            else:
+                base = 0.55 + random.uniform(-0.08, 0.08)
+        else:
+            # Generic seasonal crop
+            day_of_year = target_date.timetuple().tm_yday
+            base = 0.30 + 0.15 * math.sin((day_of_year - 90) * math.pi / 180) + random.uniform(-0.05, 0.05)
+
+        mean_ndvi = max(0.05, min(0.85, base))
+
+        return {
+            "captured_date": target_date.isoformat(),
+            "mean_ndvi": round(mean_ndvi, 4),
+            "min_ndvi": round(max(0.01, mean_ndvi - random.uniform(0.05, 0.15)), 4),
+            "max_ndvi": round(min(0.95, mean_ndvi + random.uniform(0.05, 0.15)), 4),
+            "std_ndvi": round(random.uniform(0.02, 0.08), 4),
+            "cloud_cover_pct": round(random.uniform(0, 20), 1),
+            "valid_pixels_pct": round(random.uniform(75, 98), 1),
+            "satellite": "Mock/Dev",
+        }
+
+    def get_ndvi_stats_for_date(self, geometry_wkt: str, target_date: date) -> Optional[dict]:
+        """
+        For Mock mode: generate historical NDVI data with seasonal patterns.
+        Falls back to _mock_historical_ndvi when mock mode is active.
+        """
+        # MockSatelliteService can't get real data — this will be handled
+        # by the fetch_ndvi_for_field_date wrapper which calls _mock_historical_ndvi
+        return None
+
+
+def fetch_ndvi_for_field_date(db, field, target_date: date) -> Optional[dict]:
+    """
+    Fetch NDVI for a specific target date (±2 day window).
+    Works with both real SentinelHubService and MockSatelliteService.
+
+    Returns the NDVI data dict if valid data was found, None otherwise.
+    Does NOT save to DB — caller is responsible for that.
+    """
+    from sqlalchemy import text
+
+    # Get geometry WKT
+    result = db.execute(
+        text("SELECT ST_AsText(geometry) FROM fields WHERE id = :id"),
+        {"id": field.id}
+    ).fetchone()
+    if not result:
+        logger.warning(f"fetch_ndvi_for_field_date: field {field.id} has no geometry")
+        return None
+
+    geometry_wkt = result[0]
+
+    # Try real service first, fall back to mock
+    ndvi_data = satellite_service.get_ndvi_stats_for_date(geometry_wkt, target_date)
+
+    # If real returned nothing and we're in mock mode, use mock generator
+    if ndvi_data is None and isinstance(satellite_service, MockSatelliteService):
+        ndvi_data = satellite_service._mock_historical_ndvi(field, target_date)
+
+    if ndvi_data is None:
+        return None
+
+    # Quality gate
+    is_valid, reason = validate_ndvi_quality(
+        mean_ndvi=ndvi_data["mean_ndvi"],
+        cloud_cover_pct=ndvi_data.get("cloud_cover_pct"),
+        min_ndvi=ndvi_data.get("min_ndvi"),
+        max_ndvi=ndvi_data.get("max_ndvi"),
+        field_name=field.name,
+    )
+    if not is_valid:
+        logger.debug(f"Quality gate rejected {field.name} @ {target_date}: {reason}")
+        return None
+
+    return ndvi_data
+
+
+def get_satellite_service():
+    """Фабрика: реальный или Mock сервис в зависимости от наличия ключей."""
+    if settings.sentinel_hub_client_id and settings.sentinel_hub_client_secret:
+        logger.info("Используется Sentinel Hub API (реальные данные)")
+        return SentinelHubService()
+    else:
+        logger.warning("⚠️  Sentinel Hub ключи не настроены. Используется MOCK режим.")
+        return MockSatelliteService()
+
+
+satellite_service = get_satellite_service()
+
+
+
+========================================================
+=== FILE: backend/services/alert_engine.py
+========================================================
+"""
+Движок алертов. Анализирует NDVI и генерирует предупреждения с учётом:
+- Культуры и её текущей фенологической фазы
+- Исторического NDVI этого поля
+- Норм NDVI для данной фазы роста
+- Погодного контекста
+"""
+
+import logging
+from datetime import date, datetime
+from typing import Optional
+from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
+
+
+def safe_pct_change(new_val, old_val):
+    """
+    Возвращает процент изменения ТОЛЬКО когда это имеет смысл.
+    Возвращает None если old_val слишком мал или отрицателен — caller должен показывать абсолютное изменение.
+    """
+    if old_val is None or new_val is None:
+        return None
+    if old_val < 0.15:           # слишком близко к нулю / почва — процент вводит в заблуждение
+        return None
+    if old_val < 0:              # отрицательный NDVI = вода/облака — не база
+        return None
+    return round((new_val - old_val) / old_val * 100, 1)
+
+
+def get_current_growth_stage(crop_type, today: date = None) -> Optional[dict]:
+    """Определить текущую фенологическую фазу по месяцу."""
+    if today is None:
+        today = date.today()
+
+    if not crop_type or not crop_type.growth_stages:
+        return None
+
+    month = today.month
+    for stage in crop_type.growth_stages:
+        start = stage.get("month_start", 1)
+        end = stage.get("month_end", 12)
+
+        # Обработка переходящих сезонов (напр. кущение: ноябрь → февраль)
+        if start <= end:
+            if start <= month <= end:
+                return stage
+        else:  # start > end (сезон переходит через Новый год)
+            if month >= start or month <= end:
+                return stage
+
+    return None
+
+
+def analyze_field_ndvi(
+    field,
+    ndvi_record,
+    db: Session,
+) -> list[dict]:
+    """
+    Проанализировать новый NDVI снимок и вернуть список алертов.
+
+    Returns:
+        Список dict с полями: alert_type, severity, title, description,
+        recommendation, triggered_value, threshold_value
+    """
+    alerts = []
+
+    if ndvi_record.mean_ndvi is None:
+        return alerts
+
+    current_ndvi = ndvi_record.mean_ndvi
+    today = ndvi_record.captured_date if isinstance(ndvi_record.captured_date, date) else date.today()
+
+    # ─── 1. Проверка валидности данных ───────────────────────────────────────
+    # Skip unreliable readings — clouds or sensor noise
+    if ndvi_record.cloud_cover_pct is not None and ndvi_record.cloud_cover_pct > 30:
+        return alerts  # do not create alert from cloudy snapshot
+    if ndvi_record.mean_ndvi is None or ndvi_record.mean_ndvi < -0.5:
+        return alerts  # sensor noise / water — not a real reading
+
+    if ndvi_record.valid_pixels_pct is not None and ndvi_record.valid_pixels_pct < 30:
+        alerts.append({
+            "alert_type": "no_data",
+            "severity": "info",
+            "title": "Мало данных: высокая облачность",
+            "description": f"Только {ndvi_record.valid_pixels_pct:.0f}% пикселей свободны от облаков. "
+                           f"Данные могут быть неточными.",
+            "recommendation": "Дождитесь ясной погоды для получения корректного снимка.",
+            "triggered_value": ndvi_record.valid_pixels_pct,
+            "threshold_value": 30,
+        })
+        return alerts  # Дальше нет смысла анализировать
+
+    # ─── 2. Резкое падение NDVI (по сравнению с предыдущим снимком) ─────────
+    ndvi_change = ndvi_record.ndvi_change
+    ndvi_change_pct = ndvi_record.ndvi_change_pct
+    if ndvi_change_pct is not None:
+        # Пересчитываем через safe_pct_change, т.к. сохранённый % может быть от низкой базы
+        prev_ndvi = (current_ndvi - ndvi_change) if ndvi_change is not None else None
+        safe_pct = safe_pct_change(current_ndvi, prev_ndvi) if prev_ndvi is not None else None
+        change = safe_pct if safe_pct is not None else ndvi_change_pct  # fallback
+        use_absolute = safe_pct is None and ndvi_change is not None  # percent unreliable, show absolute
+
+        if use_absolute and ndvi_change is not None and ndvi_change <= -0.04:
+            # Процент ненадёжный — показываем абсолютное падение
+            abs_change = round(ndvi_change, 4)
+            if abs_change <= -0.08:
+                alerts.append({
+                    "alert_type": "ndvi_drop",
+                    "severity": "critical",
+                    "title": f"🚨 Критическое падение NDVI ({abs_change:+.3f})",
+                    "description": f"NDVI снизился с {prev_ndvi:.3f} до {current_ndvi:.3f} "
+                                   f"({abs_change:+.3f}). "
+                                   f"Это может указывать на: болезнь, вредителя, засуху, "
+                                   f"механическое повреждение или подтопление.",
+                    "recommendation": "⚡ Требуется немедленный выезд на поле для осмотра. "
+                                      "Проверьте: наличие признаков болезней, состояние листьев, "
+                                      "работу ирригационной системы, следы вредителей.",
+                    "triggered_value": current_ndvi,
+                    "threshold_value": prev_ndvi,
+                })
+        elif not use_absolute and change <= -25:
+            alerts.append({
+                "alert_type": "ndvi_drop",
+                "severity": "critical",
+                "title": f"🚨 Критическое падение NDVI (-{abs(change):.1f}%)",
+                "description": f"NDVI упал с {prev_ndvi:.3f} "
+                               f"до {current_ndvi:.3f} — снижение на {abs(change):.1f}%. "
+                               f"Это может указывать на: болезнь, вредителя, засуху, "
+                               f"механическое повреждение или подтопление.",
+                "recommendation": "⚡ Требуется немедленный выезд на поле для осмотра. "
+                                  "Проверьте: наличие признаков болезней, состояние листьев, "
+                                  "работу ирригационной системы, следы вредителей.",
+                "triggered_value": current_ndvi,
+                "threshold_value": prev_ndvi,
+            })
+        elif not use_absolute and change <= -15:
+            alerts.append({
+                "alert_type": "ndvi_drop",
+                "severity": "warning",
+                "title": f"⚠️ Значительное снижение NDVI (-{abs(change):.1f}%)",
+                "description": f"NDVI снизился на {abs(change):.1f}% по сравнению с предыдущим снимком. "
+                               f"Текущее значение: {current_ndvi:.3f}.",
+                "recommendation": "Рекомендуется выезд на поле в течение 2-3 дней. "
+                                  "Проверьте состояние посевов и условия влагообеспеченности.",
+                "triggered_value": current_ndvi,
+                "threshold_value": prev_ndvi,
+            })
+
+    # ─── 3. Сравнение с нормой для фазы роста ───────────────────────────────
+    current_season = None
+    for season in field.seasons:
+        if season.season_year == today.year:
+            current_season = season
+            break
+
+    if current_season and current_season.crop_type:
+        crop = current_season.crop_type
+        stage = get_current_growth_stage(crop, today)
+
+        if stage:
+            ndvi_min = stage.get("ndvi_min", 0)
+            ndvi_max = stage.get("ndvi_max", 1)
+            stage_name = stage.get("name", "текущая фаза")
+            crop_name = crop.name_ru
+
+            if current_ndvi < ndvi_min:
+                deficit = ndvi_min - current_ndvi
+                severity = "critical" if deficit > 0.15 else "warning"
+                alerts.append({
+                    "alert_type": "ndvi_low",
+                    "severity": severity,
+                    "title": f"NDVI ниже нормы для {crop_name} ({stage_name})",
+                    "description": f"Текущий NDVI: {current_ndvi:.3f}. "
+                                   f"Норма для «{stage_name}»: {ndvi_min:.2f}–{ndvi_max:.2f}. "
+                                   f"Отклонение: -{deficit:.3f}.",
+                    "recommendation": _get_low_ndvi_recommendation(crop, stage, current_ndvi),
+                    "triggered_value": current_ndvi,
+                    "threshold_value": ndvi_min,
+                })
+
+            elif current_ndvi > ndvi_max + 0.05:
+                alerts.append({
+                    "alert_type": "ndvi_high",
+                    "severity": "info",
+                    "title": f"NDVI выше нормы для {crop_name} ({stage_name})",
+                    "description": f"Текущий NDVI: {current_ndvi:.3f}. "
+                                   f"Норма: {ndvi_min:.2f}–{ndvi_max:.2f}. "
+                                   f"Отклонение: +{current_ndvi - ndvi_max:.3f}.",
+                    "recommendation": "Хороший показатель. Убедитесь в отсутствии полегания посевов "
+                                      "или избыточного ветвления (применимо к хлопку).",
+                    "triggered_value": current_ndvi,
+                    "threshold_value": ndvi_max,
+                })
+
+    # ─── 4. Неоднородность поля ──────────────────────────────────────────────
+    if ndvi_record.std_ndvi is not None and ndvi_record.std_ndvi > 0.12:
+        alerts.append({
+            "alert_type": "ndvi_uneven",
+            "severity": "info",
+            "title": "Неравномерное состояние посевов по полю",
+            "description": f"Стандартное отклонение NDVI: {ndvi_record.std_ndvi:.3f} "
+                           f"(мин: {ndvi_record.min_ndvi:.3f}, макс: {ndvi_record.max_ndvi:.3f}). "
+                           f"Высокая вариабельность указывает на проблемные участки.",
+            "recommendation": "Выявите неоднородные зоны на карте NDVI и проведите "
+                              "точечный осмотр. Возможные причины: неравномерный полив, "
+                              "засолённые пятна, уплотнение почвы, болезни очагового характера.",
+            "triggered_value": ndvi_record.std_ndvi,
+            "threshold_value": 0.12,
+        })
+
+    return alerts
+
+
+def _get_low_ndvi_recommendation(crop, stage, current_ndvi: float) -> str:
+    """Сформировать рекомендацию исходя из культуры и фазы."""
+    crop_code = crop.code
+    stage_name = stage.get("name", "")
+    alerts_config = crop.alerts_config or {}
+
+    base = (
+        f"Проверьте: обеспеченность влагой, признаки болезней "
+        f"({', '.join(alerts_config.get('disease_risk', [])[:2]) or 'нет данных'}), "
+        f"наличие вредителей ({', '.join(alerts_config.get('pest_risk', [])[:2]) or 'нет данных'})."
+    )
+
+    if crop_code == "cotton":
+        if "Вегетация" in stage_name or "Бутонизация" in stage_name:
+            return (
+                "Хлопок в критической фазе роста. " + base +
+                " Особое внимание: своевременный полив (норма 700-900 м³/га), "
+                "контроль вертициллёза и фузариоза."
+            )
+    elif crop_code == "wheat":
+        if "Трубкование" in stage_name or "Колошение" in stage_name:
+            return (
+                "Критическая фаза формирования урожая пшеницы. " + base +
+                " Проверьте наличие ржавчины на листьях."
+            )
+
+    return base
+
+
+# ─── Сохранение алертов в БД ─────────────────────────────────────────────────
+
+def save_alerts(field, ndvi_record, alerts_data: list, db: Session) -> int:
+    """Сохранить новые алерты в базу данных. Возвращает количество сохранённых."""
+    from models.monitoring import Alert
+
+    saved = 0
+    for alert_data in alerts_data:
+        # Дедупликация: не создаём одинаковый алерт если он уже активен
+        existing = db.query(Alert).filter(
+            Alert.field_id == field.id,
+            Alert.alert_type == alert_data["alert_type"],
+            Alert.is_active == True
+        ).first()
+
+        if existing:
+            continue
+
+        alert = Alert(
+            field_id=field.id,
+            ndvi_record_id=ndvi_record.id if ndvi_record else None,
+            alert_type=alert_data["alert_type"],
+            severity=alert_data["severity"],
+            title=alert_data["title"],
+            description=alert_data["description"],
+            recommendation=alert_data.get("recommendation"),
+            triggered_value=alert_data.get("triggered_value"),
+            threshold_value=alert_data.get("threshold_value"),
+        )
+        db.add(alert)
+        saved += 1
+
+    if saved > 0:
+        db.commit()
+
+    return saved
+
+
+
+========================================================
+=== FILE: backend/services/weather.py
+========================================================
+"""
+Сервис погоды через Open-Meteo API.
+Полностью бесплатный, без API ключей. https://open-meteo.com/
+"""
+
+import logging
+from datetime import date, timedelta
+from typing import Optional
+import httpx
+
+logger = logging.getLogger(__name__)
+
+OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
+
+
+def get_field_weather(lat: float, lon: float) -> Optional[dict]:
+    """
+    Получить прогноз погоды для координат поля.
+
+    Returns:
+        dict с текущими условиями и прогнозом на 5 дней.
+    """
+    try:
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "current": [
+                "temperature_2m",
+                "relative_humidity_2m",
+                "apparent_temperature",
+                "wind_speed_10m",
+                "wind_direction_10m",
+                "precipitation",
+                "weather_code",
+                "is_day",
+            ],
+            "daily": [
+                "temperature_2m_max",
+                "temperature_2m_min",
+                "precipitation_sum",
+                "et0_fao_evapotranspiration",  # Эвапотранспирация (для ирригации)
+                "wind_speed_10m_max",
+                "wind_direction_10m_dominant",
+                "weather_code",
+                "sunrise",
+                "sunset",
+            ],
+            "forecast_days": 7,
+            "timezone": "Asia/Tashkent",
+        }
+
+        response = httpx.get(OPEN_METEO_URL, params=params, timeout=10.0)
+        response.raise_for_status()
+        data = response.json()
+
+        current = data.get("current", {})
+        daily = data.get("daily", {})
+
+        # Формируем прогноз
+        forecast_days = []
+        times = daily.get("time", [])
+        for i, d in enumerate(times):
+            weather_code = daily.get("weather_code", [None])[i]
+            forecast_days.append({
+                "date": d,
+                "temp_max": daily.get("temperature_2m_max", [None])[i],
+                "temp_min": daily.get("temperature_2m_min", [None])[i],
+                "precipitation": daily.get("precipitation_sum", [None])[i],
+                "et0_mm": daily.get("et0_fao_evapotranspiration", [None])[i],
+                "wind_speed_max": daily.get("wind_speed_10m_max", [None])[i],
+                "weather_code": weather_code,
+                "sunrise": daily.get("sunrise", [None])[i],
+                "sunset": daily.get("sunset", [None])[i],
+            })
+
+        # Анализ рисков (засуха, заморозки, сильный дождь)
+        risks = detect_weather_risks(forecast_days)
+
+        return {
+            "current": {
+                "temperature": current.get("temperature_2m"),
+                "feels_like": current.get("apparent_temperature"),
+                "humidity": current.get("relative_humidity_2m"),
+                "wind_speed": current.get("wind_speed_10m"),
+                "wind_direction": current.get("wind_direction_10m"),
+                "precipitation": current.get("precipitation"),
+                "weather_code": current.get("weather_code"),
+                "is_day": current.get("is_day", 1) == 1,
+            },
+            "forecast": forecast_days[:5],  # 5-дневный прогноз
+            "risks": risks,
+            "location": {"lat": lat, "lon": lon},
+        }
+
+    except Exception as e:
+        logger.error(f"Ошибка получения погоды: {e}")
+        return None
+
+
+def detect_weather_risks(forecast: list) -> list:
+    """Выявить погодные риски из прогноза."""
+    risks = []
+
+    for day in forecast[:3]:  # ближайшие 3 дня
+        temp_max = day.get("temp_max")
+        temp_min = day.get("temp_min")
+        precip = day.get("precipitation", 0) or 0
+        et0 = day.get("et0_mm", 0) or 0
+
+        # Риск заморозков
+        if temp_min is not None and temp_min < 2:
+            risks.append({
+                "type": "frost_risk",
+                "severity": "critical" if temp_min < 0 else "warning",
+                "date": day["date"],
+                "description": f"Риск заморозков: {temp_min:.1f}°C",
+                "value": temp_min,
+            })
+
+        # Жара (стресс для растений)
+        if temp_max is not None and temp_max > 38:
+            risks.append({
+                "type": "heat_stress",
+                "severity": "warning",
+                "date": day["date"],
+                "description": f"Тепловой стресс: до {temp_max:.1f}°C",
+                "value": temp_max,
+            })
+
+        # Засуха (высокое испарение, мало осадков)
+        if et0 > 0 and precip < et0 * 0.3:
+            risks.append({
+                "type": "drought_risk",
+                "severity": "info",
+                "date": day["date"],
+                "description": f"Дефицит влаги: осадки {precip:.1f} мм, испарение {et0:.1f} мм",
+                "value": precip - et0,
+            })
+
+        # Сильный дождь
+        if precip > 30:
+            risks.append({
+                "type": "heavy_rain",
+                "severity": "warning",
+                "date": day["date"],
+                "description": f"Сильные осадки: {precip:.1f} мм — риск подтопления",
+                "value": precip,
+            })
+
+    return risks
+
+
+def wmo_code_to_description(code: Optional[int]) -> str:
+    """Перевести WMO код погоды в описание на русском."""
+    if code is None:
+        return "Нет данных"
+
+    codes = {
+        0: "Ясно",
+        1: "Преимущественно ясно", 2: "Переменная облачность", 3: "Пасмурно",
+        45: "Туман", 48: "Изморозь",
+        51: "Мелкая морось", 53: "Морось", 55: "Сильная морось",
+        61: "Слабый дождь", 63: "Дождь", 65: "Сильный дождь",
+        71: "Слабый снег", 73: "Снег", 75: "Сильный снег",
+        77: "Снежная крупа",
+        80: "Кратковременный дождь", 81: "Дождь с ливнями", 82: "Сильный ливень",
+        85: "Снежные ливни", 86: "Сильные снежные ливни",
+        95: "Гроза", 96: "Гроза с градом", 99: "Сильная гроза с градом",
+    }
+    return codes.get(code, f"Код {code}")
+
+
+
+========================================================
+=== FILE: backend/services/telegram.py
+========================================================
+"""
+Telegram уведомления о критических алертах.
+Использует Telegram Bot API через httpx (без внешних библиотек).
+"""
+
+import logging
+import httpx
+from config import settings
+
+logger = logging.getLogger(__name__)
+
+TELEGRAM_API_BASE = "https://api.telegram.org"
+
+
+def send_telegram_message(text: str, parse_mode: str = "HTML") -> dict:
+    """
+    Отправить сообщение в Telegram чат.
+
+    Returns:
+        dict с результатом: {"ok": bool, "error": str | None}
+    """
+    token = settings.telegram_bot_token
+    chat_id = settings.telegram_chat_id
+
+    if not token or not chat_id:
+        logger.warning("Telegram не настроен (отсутствует token или chat_id)")
+        return {"ok": False, "error": "Telegram не настроен. Заполните TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID в .env"}
+
+    url = f"{TELEGRAM_API_BASE}/bot{token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": parse_mode,
+        "disable_web_page_preview": True,
+    }
+
+    try:
+        resp = httpx.post(url, json=payload, timeout=10)
+        data = resp.json()
+        if resp.status_code == 200 and data.get("ok"):
+            logger.info("Telegram сообщение отправлено успешно")
+            return {"ok": True, "error": None}
+        else:
+            error_desc = data.get("description", f"HTTP {resp.status_code}")
+            logger.error(f"Telegram API ошибка: {error_desc}")
+            return {"ok": False, "error": error_desc}
+    except Exception as e:
+        logger.error(f"Telegram отправка не удалась: {e}")
+        return {"ok": False, "error": str(e)}
+
+
+def format_alert_message(alert: dict, field: dict, enterprise: dict) -> str:
+    """
+    Сформировать HTML-сообщение для критического алерта.
+
+    alert: {alert_type, severity, title, description, recommendation, triggered_value, threshold_value}
+    field: {name, code, area_ha}
+    enterprise: {name}
+    """
+    severity_emoji = {
+        "critical": "🔴",
+        "warning": "🟡",
+        "info": "🔵",
+    }.get(alert.get("severity", "info"), "⚪")
+
+    msg = (
+        f"{severity_emoji} <b>{alert.get('title', 'Алерт')}</b>\n\n"
+        f"🏢 Предприятие: {enterprise.get('name', '—')}\n"
+        f"🌾 Поле: {field.get('name', '—')}"
+    )
+    if field.get('code'):
+        msg += f" (код: {field['code']})"
+    if field.get('area_ha'):
+        msg += f"\n📐 Площадь: {field['area_ha']:.1f} га"
+
+    msg += f"\n\n📊 {alert.get('description', '')}"
+
+    if alert.get('triggered_value') is not None and alert.get('threshold_value') is not None:
+        msg += f"\n\n⚠️ Значение: {alert['triggered_value']} (порог: {alert['threshold_value']})"
+
+    if alert.get('recommendation'):
+        msg += f"\n\n💡 <i>{alert['recommendation']}</i>"
+
+    msg += "\n\n🛰 AgroSat — Мониторинг полей"
+    return msg
+
+
+
+========================================================
+=== FILE: backend/services/pdf_report.py
+========================================================
+"""
+Генерация PDF отчётов по предприятию.
+Использует reportlab со шрифтом Arial (Windows) для поддержки кириллицы.
+
+Положить в: backend/services/pdf_report.py
+"""
+
+import os
+import io
+import logging
+from datetime import datetime
+
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+)
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
+logger = logging.getLogger(__name__)
+
+# Windows Arial — поддерживает кириллицу, всегда присутствует на Windows
+ARIAL_REGULAR = r"C:\Windows\Fonts\arial.ttf"
+ARIAL_BOLD = r"C:\Windows\Fonts\arialbd.ttf"
+
+_FONTS_REGISTERED = False
+
+
+def _register_fonts():
+    global _FONTS_REGISTERED
+    if _FONTS_REGISTERED:
+        return
+    pdfmetrics.registerFont(TTFont("AppFont", ARIAL_REGULAR))
+    if os.path.exists(ARIAL_BOLD):
+        pdfmetrics.registerFont(TTFont("AppFont-Bold", ARIAL_BOLD))
+    else:
+        pdfmetrics.registerFont(TTFont("AppFont-Bold", ARIAL_REGULAR))
+    _FONTS_REGISTERED = True
+
+
+def _ndvi_color(v):
+    """Цвет фона для значения NDVI."""
+    if v is None:
+        return colors.HexColor("#cccccc")
+    if v < 0.2:
+        return colors.HexColor("#c0392b")
+    if v < 0.35:
+        return colors.HexColor("#e67e22")
+    if v < 0.5:
+        return colors.HexColor("#f1c40f")
+    if v < 0.65:
+        return colors.HexColor("#7fb800")
+    return colors.HexColor("#27ae60")
+
+
+def generate_enterprise_pdf(enterprise: dict, fields: list, alerts: list, kpi: dict) -> bytes:
+    """
+    Создать PDF отчёт по предприятию.
+
+    enterprise: {name, code, region}
+    fields: list of {name, code, current_crop, area_ha, current_ndvi}
+    alerts: list of {title, severity, field_name, description, recommendation}
+    kpi: {total_fields, avg_ndvi, critical_count, total_area, normal_count}
+
+    Returns: PDF bytes
+    """
+    _register_fonts()
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf,
+        pagesize=A4,
+        topMargin=20 * mm,
+        bottomMargin=20 * mm,
+        leftMargin=15 * mm,
+        rightMargin=15 * mm,
+        title=f"Отчёт — {enterprise.get('name', '')}",
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "TitleRu", parent=styles["Title"],
+        fontName="AppFont-Bold", fontSize=22, textColor=colors.HexColor("#1a5d1a"),
+        spaceAfter=6,
+    )
+    subtitle_style = ParagraphStyle(
+        "SubtitleRu", parent=styles["Normal"],
+        fontName="AppFont", fontSize=11, textColor=colors.HexColor("#666666"),
+        spaceAfter=4,
+    )
+    h2_style = ParagraphStyle(
+        "H2Ru", parent=styles["Heading2"],
+        fontName="AppFont-Bold", fontSize=15, textColor=colors.HexColor("#1a5d1a"),
+        spaceBefore=14, spaceAfter=8,
+    )
+    body_style = ParagraphStyle(
+        "BodyRu", parent=styles["Normal"],
+        fontName="AppFont", fontSize=10, leading=14,
+    )
+    small_style = ParagraphStyle(
+        "SmallRu", parent=styles["Normal"],
+        fontName="AppFont", fontSize=9, leading=12, textColor=colors.HexColor("#444444"),
+    )
+
+    story = []
+
+    # ─── Header ───
+    story.append(Paragraph("AgroSat — Отчёт по предприятию", subtitle_style))
+    story.append(Spacer(1, 4))
+    story.append(Paragraph(enterprise.get("name", "—"), title_style))
+    meta = f"Код: {enterprise.get('code', '—')}  •  Регион: {enterprise.get('region', '—')}"
+    story.append(Paragraph(meta, subtitle_style))
+    story.append(Paragraph(
+        f"Дата формирования: {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+        subtitle_style
+    ))
+    story.append(Spacer(1, 10))
+
+    # ─── KPI Summary ───
+    story.append(Paragraph("Сводка", h2_style))
+    kpi_data = [
+        ["Всего полей", str(kpi.get("total_fields", "—"))],
+        ["Средний NDVI", f"{kpi.get('avg_ndvi'):.3f}" if kpi.get("avg_ndvi") is not None else "—"],
+        ["Критических алертов", str(kpi.get("critical_count", "—"))],
+        ["Полей в норме", str(kpi.get("normal_count", "—"))],
+        ["Общая площадь, га", f"{kpi.get('total_area'):.1f}" if kpi.get("total_area") is not None else "—"],
+    ]
+    kpi_table = Table(kpi_data, colWidths=[80 * mm, 40 * mm])
+    kpi_table.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (-1, -1), "AppFont"),
+        ("FONTSIZE", (0, 0), (-1, -1), 10),
+        ("TEXTCOLOR", (0, 0), (0, -1), colors.HexColor("#555555")),
+        ("FONTNAME", (1, 0), (1, -1), "AppFont-Bold"),
+        ("ROWBACKGROUNDS", (0, 0), (-1, -1), [colors.HexColor("#f5f9f5"), colors.white]),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#dddddd")),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10),
+    ]))
+    story.append(kpi_table)
+
+    # ─── Fields Table ───
+    story.append(Paragraph(f"Поля предприятия ({len(fields)})", h2_style))
+
+    table_data = [["Контур", "Культура", "Площадь, га", "NDVI"]]
+    sorted_fields = sorted(
+        fields,
+        key=lambda f: f.get("current_ndvi") if f.get("current_ndvi") is not None else 999
+    )
+    for f in sorted_fields:
+        ndvi_val = f.get("current_ndvi")
+        table_data.append([
+            Paragraph(str(f.get("name", "—")), small_style),
+            Paragraph(str(f.get("current_crop", "—") or "—"), small_style),
+            f"{f.get('area_ha'):.1f}" if f.get("area_ha") is not None else "—",
+            f"{ndvi_val:.3f}" if ndvi_val is not None else "—",
+        ])
+
+    fields_table = Table(
+        table_data,
+        colWidths=[70 * mm, 50 * mm, 30 * mm, 30 * mm],
+        repeatRows=1,
+    )
+    table_style_cmds = [
+        ("FONTNAME", (0, 0), (-1, -1), "AppFont"),
+        ("FONTNAME", (0, 0), (-1, 0), "AppFont-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 10),
+        ("FONTSIZE", (0, 1), (-1, -1), 9),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1a5d1a")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#dddddd")),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("ALIGN", (2, 0), (3, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]
+    for i, f in enumerate(sorted_fields, start=1):
+        table_style_cmds.append(
+            ("BACKGROUND", (3, i), (3, i), _ndvi_color(f.get("current_ndvi")))
+        )
+        table_style_cmds.append(
+            ("TEXTCOLOR", (3, i), (3, i), colors.white)
+        )
+    fields_table.setStyle(TableStyle(table_style_cmds))
+    story.append(fields_table)
+
+    # ─── Critical Alerts ───
+    critical = [a for a in alerts if a.get("severity") == "critical"]
+    if critical:
+        story.append(PageBreak())
+        story.append(Paragraph(f"Критические алерты ({len(critical)})", h2_style))
+        for a in critical:
+            story.append(Paragraph(
+                f"<b>{a.get('title', 'Алерт')}</b> — {a.get('field_name', '')}",
+                body_style
+            ))
+            if a.get("description"):
+                story.append(Paragraph(a["description"], small_style))
+            if a.get("recommendation"):
+                story.append(Paragraph(f"<i>Рекомендация: {a['recommendation']}</i>", small_style))
+            story.append(Spacer(1, 8))
+
+    # ─── Footer ───
+    story.append(Spacer(1, 16))
+    story.append(Paragraph(
+        "Отчёт сформирован автоматически системой AgroSat на основе данных Sentinel-2.",
+        small_style
+    ))
+
+    doc.build(story)
+    pdf_bytes = buf.getvalue()
+    buf.close()
+    return pdf_bytes
+
+
+
+========================================================
+=== FILE: backend/services/cache.py
+========================================================
+"""
+Redis cache service for AgroSat backend.
+Reduces repeated queries to Supabase (London) from Bukhara.
+"""
+import json
+import logging
+from typing import Optional, Any
+import redis
+from config import settings
+
+logger = logging.getLogger(__name__)
+
+try:
+    _redis = redis.from_url(settings.redis_url, decode_responses=True, socket_timeout=2)
+    _redis.ping()
+    CACHE_AVAILABLE = True
+    logger.info("✅ Redis cache connected")
+except Exception as e:
+    _redis = None
+    CACHE_AVAILABLE = False
+    logger.warning(f"⚠️ Redis not available, caching disabled: {e}")
+
+
+def cache_get(key: str) -> Optional[Any]:
+    if not CACHE_AVAILABLE or not _redis:
+        return None
+    try:
+        val = _redis.get(key)
+        return json.loads(val) if val else None
+    except Exception:
+        return None
+
+
+def cache_set(key: str, value: Any, ttl_seconds: int = 120) -> bool:
+    if not CACHE_AVAILABLE or not _redis:
+        return False
+    try:
+        _redis.setex(key, ttl_seconds, json.dumps(value, default=str))
+        return True
+    except Exception:
+        return False
+
+
+def cache_delete(key: str) -> None:
+    if CACHE_AVAILABLE and _redis:
+        try:
+            _redis.delete(key)
+        except Exception:
+            pass
+
+
+def cache_delete_pattern(pattern: str) -> None:
+    """Delete all keys matching pattern, e.g. 'alerts:*'"""
+    if CACHE_AVAILABLE and _redis:
+        try:
+            keys = _redis.keys(pattern)
+            if keys:
+                _redis.delete(*keys)
+        except Exception:
+            pass
+
+
+========================================================
+EOF

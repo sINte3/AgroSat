@@ -26,11 +26,6 @@ def get_db():
 
 def init_db():
     from sqlalchemy import text
-    from models.enterprise import Enterprise
-    from models.crop import CropType
-    from models.field import Field, CropSeason
-    from models.monitoring import NDVIRecord, Alert, ScoutingNote, User
     with engine.connect() as conn:
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
         conn.commit()
-    Base.metadata.create_all(bind=engine)
