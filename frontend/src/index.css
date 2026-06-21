@@ -1,0 +1,94 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body, #root {
+    height: 100%;
+    width: 100%;
+    overflow: hidden;
+  }
+  body {
+    font-family: 'Inter', system-ui, sans-serif;
+    background-color: #f8faf9;
+    color: #1a2e23;
+  }
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: #f1f5f3; }
+  ::-webkit-scrollbar-thumb { background: #c8d5cc; border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #a3b5a9; }
+
+  /* Smooth transitions globally */
+  * {
+    transition-property: background-color, border-color, color, opacity;
+    transition-duration: 150ms;
+  }
+  /* Override for map — no transitions on map elements */
+  .maplibregl-map * {
+    transition: none !important;
+  }
+}
+
+@layer components {
+  .card {
+    background-color: #ffffff;
+    border-radius: 0.5rem;
+    border: 1px solid #e0e7e3;
+    padding: 1rem;
+  }
+  .btn-primary {
+    background-color: #16a34a;
+    color: #ffffff;
+    font-weight: 600;
+    padding: 0.5rem 1rem;
+    border-radius: 0.5rem;
+    transition: background-color 200ms;
+  }
+  .btn-primary:hover {
+    background-color: #15803d;
+  }
+  .btn-primary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .btn-secondary {
+    background-color: #f1f5f3;
+    color: #1a2e23;
+    padding: 0.5rem 1rem;
+    border-radius: 0.5rem;
+    transition: background-color 200ms, color 200ms;
+  }
+  .btn-secondary:hover {
+    background-color: #16a34a;
+    color: #ffffff;
+  }
+  .input {
+    background-color: #ffffff;
+    border: 1px solid #e0e7e3;
+    border-radius: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    color: #1a2e23;
+  }
+  .input::placeholder {
+    color: #6b8578;
+  }
+  .input:focus {
+    outline: none;
+    border-color: #16a34a;
+    box-shadow: 0 0 0 1px #16a34a;
+  }
+  .badge {
+    @apply inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium;
+  }
+  .badge-critical { @apply badge bg-red-100 text-red-700; }
+  .badge-warning  { @apply badge bg-amber-100 text-amber-700; }
+  .badge-info     { @apply badge bg-blue-100 text-blue-700; }
+  .status-dot {
+    @apply inline-block w-2 h-2 rounded-full mr-1.5;
+  }
+  .status-dot-green  { @apply status-dot bg-green-400; }
+  .status-dot-yellow { @apply status-dot bg-yellow-400; }
+  .status-dot-red    { @apply status-dot bg-red-400; }
+  .status-dot-gray   { @apply status-dot bg-gray-500; }
+}

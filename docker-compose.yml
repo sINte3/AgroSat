@@ -1,0 +1,52 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgis/postgis:15-3.3
+    container_name: agrosat_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: agrosat
+      POSTGRES_PASSWORD: agrosat_secret_2024
+      POSTGRES_DB: agrosat
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agrosat"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: agrosat_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+
+  backend:
+    build: ./backend
+    container_name: agrosat_backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql://agrosat:agrosat_secret_2024@db:5432/agrosat
+      REDIS_URL: redis://redis:6379/0
+      SENTINEL_HUB_CLIENT_ID: ${SENTINEL_HUB_CLIENT_ID}
+      SENTINEL_HUB_CLIENT_SECRET: ${SENTINEL_HUB_CLIENT_SECRET}
+      SECRET_KEY: ${SECRET_KEY:-agrosat_dev_secret_key_change_in_prod}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+    volumes:
+      - ./backend:/app
+    ports:
+      - "8000:8000"
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  postgres_data:

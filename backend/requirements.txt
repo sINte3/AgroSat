@@ -1,0 +1,43 @@
+# Web Framework
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+python-multipart==0.0.9
+
+# Database
+sqlalchemy==2.0.30
+geoalchemy2==0.15.1
+alembic==1.13.1
+psycopg2-binary==2.9.9
+
+# Geospatial
+shapely==2.0.4
+pyproj==3.6.1
+geojson==3.1.0
+rasterio==1.3.10
+numpy==1.26.4
+
+# Satellite Data
+sentinelhub==3.10.2
+
+# HTTP & API
+httpx==0.27.0
+requests==2.31.0
+
+# Auth
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# Task scheduling (lightweight, no Celery for Phase 0)
+apscheduler==3.10.4
+
+# Cache
+redis==5.0.4
+
+# Config
+python-dotenv==1.0.1
+pydantic-settings==2.2.1
+pydantic==2.7.1
+
+# Utils
+python-dateutil==2.9.0
+pandas==2.2.2

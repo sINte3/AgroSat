@@ -1,0 +1,1 @@
+2026-06-19 17:35:30,387 | WARNING | services.cache | \u26a0\ufe0f Redis not available, caching disabled: Error 10061 connecting to localhost:6379. Подключение не установлено, т.к. конечный компьютер отверг запрос на подключение.
