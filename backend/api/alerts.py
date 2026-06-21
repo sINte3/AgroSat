@@ -2,13 +2,14 @@
 API роутер для алертов — оптимизированные SQL запросы (без N+1).
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from database import get_db
-from models.monitoring import Alert
+from models.monitoring import Alert, User
 from datetime import datetime
 from services.cache import cache_get, cache_set, cache_delete_pattern
+from api.auth import get_current_active_user
 
 router = APIRouter(prefix="/api/alerts", tags=["alerts"])
 
@@ -170,15 +171,54 @@ def get_field_alerts(field_id: int, db: Session = Depends(get_db)):
 
 
 @router.put("/{alert_id}/acknowledge")
-def acknowledge_alert(alert_id: int, db: Session = Depends(get_db)):
-    """Отметить алерт как просмотренный."""
-    alert = db.query(Alert).filter(Alert.id == alert_id).first()
-    if not alert:
+def acknowledge_alert(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Отметить алерт как просмотренный с проверкой прав доступа (RBAC)."""
+    # 1. Enforce Role Matrix: Viewers can never write/acknowledge anything
+    if current_user.role == "viewer":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Пользователи с ролью 'viewer' не имеют прав на выполнение этого действия"
+        )
+
+    # 2. Extract alert and field details in a single query to prevent lazy loading
+    alert_info = db.execute(text("""
+        SELECT a.id, a.is_active, f.enterprise_id
+        FROM alerts a
+        JOIN fields f ON f.id = a.field_id
+        WHERE a.id = :aid
+    """), {"aid": alert_id}).fetchone()
+
+    if not alert_info:
         raise HTTPException(status_code=404, detail="Алерт не найден")
-    alert.acknowledged_at = datetime.utcnow()
-    alert.is_active = False
+
+    # 3. Enforce Agronomist enterprise limits
+    if current_user.role == "agronomist":
+        if alert_info.enterprise_id != current_user.enterprise_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Агроном может подтверждать алерты только для своего предприятия"
+            )
+
+    # 4. Perform direct database updates (no relationships triggered)
+    db.execute(text("""
+        UPDATE alerts
+        SET is_active = false,
+            acknowledged_at = :now,
+            acknowledged_by_id = :uid
+        WHERE id = :aid
+    """), {
+        "now": datetime.utcnow(),
+        "uid": current_user.id,
+        "aid": alert_id
+    })
     db.commit()
-    # After acknowledging, clear alert and dashboard caches
+
+    # 5. Reset Redis caches
     cache_delete_pattern("alerts:*")
     cache_delete_pattern("dashboard:*")
+
     return {"status": "ok", "alert_id": alert_id}

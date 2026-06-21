@@ -85,7 +85,9 @@ from api.weather import router as weather_router
 from api.ai import router as ai_router
 from api.telegram import router as telegram_router
 from api.reports import router as reports_router
+from api.auth import router as auth_router
 
+app.include_router(auth_router)
 app.include_router(enterprises_router)
 app.include_router(fields_router)
 app.include_router(ndvi_router)
