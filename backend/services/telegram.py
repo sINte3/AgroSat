@@ -44,9 +44,15 @@ def send_telegram_message(text: str, parse_mode: str = "HTML") -> dict:
             error_desc = data.get("description", f"HTTP {resp.status_code}")
             logger.error(f"Telegram API ошибка: {error_desc}")
             return {"ok": False, "error": error_desc}
+    except httpx.TimeoutException:
+        logger.error("Telegram send failed: timeout")
+        return {"ok": False, "error": "Telegram API timeout"}
+    except httpx.HTTPError as e:
+        logger.error("Telegram send failed: %s", type(e).__name__)
+        return {"ok": False, "error": "Telegram API request failed"}
     except Exception as e:
-        logger.error(f"Telegram отправка не удалась: {e}")
-        return {"ok": False, "error": str(e)}
+        logger.error("Telegram send failed: %s", type(e).__name__)
+        return {"ok": False, "error": "Telegram send failed"}
 
 
 def format_alert_message(alert: dict, field: dict, enterprise: dict) -> str:
