@@ -1,6 +1,6 @@
 """
-Планировщик фоновых задач: автоматический запрос NDVI каждые 12 часов.
-Использует APScheduler (легче Celery, подходит для Phase 0).
+Планировщик фоновых задач: автоматический запрос NDVI.
+Использует APScheduler — запускать только через CLI runner.
 """
 
 import logging
@@ -144,8 +144,12 @@ def fetch_all_fields_ndvi():
         db.close()
 
 
-def start_scheduler():
-    """Запустить планировщик."""
+def start_scheduler(immediate_run=True):
+    """Запустить планировщик. Idempotent — безопасен для повторных вызовов."""
+    if scheduler.running:
+        logger.info("⏱️ Планировщик уже запущен, повторная регистрация пропущена")
+        return
+
     interval_hours = settings.ndvi_fetch_interval_hours
 
     scheduler.add_job(
@@ -154,19 +158,28 @@ def start_scheduler():
         id="fetch_ndvi",
         name="Обновление NDVI всех полей",
         replace_existing=True,
-        max_instances=1,  # не запускаем повторно если предыдущий не завершён
+        max_instances=1,
     )
 
     scheduler.start()
     logger.info(f"⏱️ Планировщик запущен. NDVI обновляется каждые {interval_hours} ч.")
 
-    # Запускаем сразу при старте (через 30 сек после инициализации)
-    from apscheduler.triggers.date import DateTrigger
-    from datetime import datetime, timedelta
-    scheduler.add_job(
-        fetch_all_fields_ndvi,
-        trigger=DateTrigger(run_date=datetime.utcnow() + timedelta(seconds=30)),
-        id="fetch_ndvi_startup",
-        name="Первоначальное обновление NDVI",
-        max_instances=1,
-    )
+    if immediate_run:
+        from apscheduler.triggers.date import DateTrigger
+        from datetime import datetime, timedelta
+        scheduler.add_job(
+            fetch_all_fields_ndvi,
+            trigger=DateTrigger(run_date=datetime.now(scheduler.timezone) + timedelta(seconds=30)),
+            id="fetch_ndvi_startup",
+            name="Первоначальное обновление NDVI",
+            max_instances=1,
+        )
+
+
+def stop_scheduler():
+    """Остановить планировщик и дождаться завершения текущих задач."""
+    if scheduler.running:
+        scheduler.shutdown(wait=True)
+        logger.info("⏹️ Планировщик остановлен")
+    else:
+        logger.info("⏹️ Планировщик не был запущен")

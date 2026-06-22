@@ -39,14 +39,6 @@ async def lifespan(app: FastAPI):
         logger.error(f"❌ Ошибка инициализации БД: {e}")
         raise
 
-    # Запуск планировщика задач (NDVI фетчинг)
-    try:
-        from scheduler import start_scheduler
-        start_scheduler()
-        logger.info("✅ Планировщик задач запущен")
-    except Exception as e:
-        logger.warning(f"⚠️ Планировщик не запущен: {e}")
-
     logger.info(f"✅ AgroSat v{settings.app_version} запущен в режиме '{settings.environment}'")
 
     yield  # Приложение работает
