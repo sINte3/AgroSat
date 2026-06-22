@@ -5,14 +5,35 @@ from database import get_db
 from datetime import date
 import logging
 
+from api.auth import get_current_active_user
+from api.dependencies import normalize_role, is_global_role, is_tenant_role
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/enterprises", tags=["enterprises"])
 
 
 @router.get("/")
-async def list_enterprises(db: Session = Depends(get_db)):
-    """Список всех предприятий с агрегированными KPI — один запрос."""
-    rows = db.execute(text("""
+async def list_enterprises(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Enterprise list with aggregated KPIs — one query, tenant-scoped."""
+    role = normalize_role(current_user)
+
+    if is_global_role(role):
+        # admin/manager: see all enterprises
+        where = ""
+        params = {}
+    elif is_tenant_role(role):
+        # agronomist/viewer: see only their assigned enterprise
+        if current_user.enterprise_id is None:
+            raise HTTPException(status_code=403, detail="User has no enterprise_id")
+        where = "WHERE e.id = :eid"
+        params = {"eid": current_user.enterprise_id}
+    else:
+        raise HTTPException(status_code=403, detail="Unknown role")
+
+    rows = db.execute(text(f"""
         SELECT
             e.id,
             e.name,
@@ -37,9 +58,10 @@ async def list_enterprises(db: Session = Depends(get_db)):
             AND a_crit.is_active = true AND a_crit.severity = 'critical'
         LEFT JOIN alerts a_all ON a_all.field_id = f.id
             AND a_all.is_active = true
+        {where}
         GROUP BY e.id, e.name, e.code, e.region, e.total_area_ha
         ORDER BY e.name
-    """)).fetchall()
+    """), params).fetchall()
 
     return [
         {
@@ -59,15 +81,27 @@ async def list_enterprises(db: Session = Depends(get_db)):
 
 
 @router.get("/{enterprise_id}")
-async def get_enterprise(enterprise_id: int, db: Session = Depends(get_db)):
-    """Предприятие + список его полей с последним NDVI, культурой и алертами."""
+async def get_enterprise(
+    enterprise_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Enterprise detail + field list with last NDVI, crop, and alerts. Tenant-scoped."""
+    role = normalize_role(current_user)
+
+    if is_tenant_role(role):
+        if current_user.enterprise_id is None or current_user.enterprise_id != enterprise_id:
+            raise HTTPException(status_code=403, detail="Cannot access another enterprise")
+    elif not is_global_role(role):
+        raise HTTPException(status_code=403, detail="Unknown role")
+
     row = db.execute(
         text("SELECT id, name, code, region, total_area_ha FROM enterprises WHERE id = :id"),
         {"id": enterprise_id}
     ).fetchone()
 
     if not row:
-        raise HTTPException(status_code=404, detail=f"Предприятие {enterprise_id} не найдено")
+        raise HTTPException(status_code=404, detail="Enterprise not found")
 
     fields = db.execute(text("""
         SELECT
