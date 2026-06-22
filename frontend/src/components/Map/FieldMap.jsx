@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef } from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import { fetchFieldsGeoJson } from '../../api/client';
+import MapboxDraw from '@mapbox/mapbox-gl-draw';
+import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css';
+import apiClient from '../../api/client';
 
-// ─── Цвета по культурам ───────────────────────────────────────────────────────
 const CROP_COLORS = {
   wheat:        '#EAB308',
   cotton_drip:  '#60A5FA',
@@ -25,23 +26,6 @@ const CROP_COLOR_EXPR = [
   CROP_COLORS.default,
 ];
 
-// ─── NDVI цветовая шкала ──────────────────────────────────────────────────────
-const NDVI_COLORS = [
-  { stop: 0.0,  color: '#8B0000' },
-  { stop: 0.2,  color: '#FF4500' },
-  { stop: 0.35, color: '#FFD700' },
-  { stop: 0.5,  color: '#9ACD32' },
-  { stop: 0.65, color: '#228B22' },
-  { stop: 0.8,  color: '#006400' },
-];
-
-const NDVI_COLOR_EXPR = [
-  'interpolate', ['linear'],
-  ['coalesce', ['get', 'last_ndvi'], 0],
-  ...NDVI_COLORS.flatMap(c => [c.stop, c.color]),
-];
-
-// ─── Источники карт ───────────────────────────────────────────────────────────
 const OSM_SOURCE = {
   type: 'raster',
   tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
@@ -107,438 +91,483 @@ const MAP_STYLES = {
 const DEFAULT_CENTER = [64.4286, 39.7747];
 const DEFAULT_ZOOM = 9;
 
-// ─── Легенда культур ─────────────────────────────────────────────────────────
-const CROP_LEGEND = [
-  { color: CROP_COLORS.wheat,        label: 'Пшеница' },
-  { color: CROP_COLORS.cotton_drip,  label: 'Пахта томчи' },
-  { color: CROP_COLORS.cotton_canal, label: 'Пахта очик' },
-  { color: CROP_COLORS.alfalfa,      label: 'Люцерна' },
-  { color: CROP_COLORS.default,      label: 'Прочее' },
-];
-
-export default function FieldMap({ onFieldSelect, selectedFieldId, enterpriseId, highlightedFieldId, onMapReady }) {
-  const mapContainer = useRef(null);
-  const map = useRef(null);
-  const [mapLoaded, setMapLoaded] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [mapStyle, setMapStyle] = useState('satellite');
-  const [colorMode, setColorMode] = useState('crop');
-  const geojsonRef = useRef(null);
+export default function FieldMap({
+  onFieldSelect,
+  onDrawComplete,
+  isDrawingMode,
+  setIsDrawingMode,
+  canDraw,
+  selectedFieldId,
+  enterpriseId,
+  highlightedFieldId,
+  onMapReady,
+}) {
+  const mapContainerRef = useRef(null);
+  const mapRef = useRef(null);
+  const drawRef = useRef(null);
+  const isDrawingRef = useRef(false);
+  const abortControllerRef = useRef(null);
+  const isMountedRef = useRef(true);
+  const sessionPurgedRef = useRef(false);
   const dataLoadedRef = useRef(false);
+  const geojsonRef = useRef(null);
+  const styleSwitchColorModeRef = useRef('crop');
 
-  // ─── Инициализация карты ───────────────────────────────────────────────────
+  const callbacksRef = useRef({
+    onFieldSelect,
+    onDrawComplete,
+    setIsDrawingMode,
+    onMapReady,
+  });
+
+  const handlersRef = useRef({
+    onLoad: null,
+    onMouseMove: null,
+    onMouseLeave: null,
+    onFieldClick: null,
+    onDrawCreate: null,
+  });
+
   useEffect(() => {
-    if (map.current) return;
+    callbacksRef.current = {
+      onFieldSelect,
+      onDrawComplete,
+      setIsDrawingMode,
+      onMapReady,
+    };
+  }, [onFieldSelect, onDrawComplete, setIsDrawingMode, onMapReady]);
 
-    map.current = new maplibregl.Map({
-      container: mapContainer.current,
+  useEffect(() => {
+    isDrawingRef.current = isDrawingMode;
+  }, [isDrawingMode]);
+
+  // ─── Disable draw mode ───────────────────────────────────────────────────────
+  const disableDrawMode = () => {
+    const m = mapRef.current;
+    if (!m) return;
+
+    if (handlersRef.current.onDrawCreate) {
+      m.off('draw.create', handlersRef.current.onDrawCreate);
+      handlersRef.current.onDrawCreate = null;
+    }
+
+    if (drawRef.current) {
+      drawRef.current.deleteAll();
+      m.removeControl(drawRef.current);
+      drawRef.current = null;
+    }
+
+    isDrawingRef.current = false;
+    m.getCanvas().style.cursor = '';
+  };
+
+  // ─── Enable draw mode ────────────────────────────────────────────────────────
+  const enableDrawMode = () => {
+    const m = mapRef.current;
+    if (!m || !m.isStyleLoaded()) {
+      console.error('Map style is not ready for drawing mode');
+      callbacksRef.current.setIsDrawingMode?.(false);
+      return;
+    }
+
+    if (!MapboxDraw.constants?.classes) {
+      console.error('MapboxDraw compatibility check failed');
+      callbacksRef.current.setIsDrawingMode?.(false);
+      return;
+    }
+
+    // ponytail: patch MapboxDraw class constants for MapLibre GL compat
+    MapboxDraw.constants.classes.CANVAS = 'maplibregl-canvas';
+    MapboxDraw.constants.classes.CONTROL_BASE = 'maplibregl-ctrl';
+    MapboxDraw.constants.classes.CONTROL_PREFIX = 'maplibregl-ctrl-';
+    MapboxDraw.constants.classes.CONTROL_GROUP = 'maplibregl-ctrl-group';
+    MapboxDraw.constants.classes.ATTRIBUTION = 'maplibregl-ctrl-attrib';
+
+    const draw = new MapboxDraw({
+      displayControlsDefault: false,
+      controls: {
+        polygon: true,
+        trash: true,
+      },
+      defaultMode: 'draw_polygon',
+    });
+
+    drawRef.current = draw;
+    m.addControl(draw);
+
+    handlersRef.current.onDrawCreate = (e) => {
+      const feature = e.features?.[0];
+      if (feature?.geometry?.type !== 'Polygon') return;
+
+      callbacksRef.current.onDrawComplete?.(feature.geometry);
+      callbacksRef.current.setIsDrawingMode?.(false);
+    };
+
+    m.on('draw.create', handlersRef.current.onDrawCreate);
+
+    // ponytail: global lock, per-account locks if throughput matters
+  };
+
+  // ─── Draw mode effect ────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (isDrawingMode && canDraw) {
+      enableDrawMode();
+    } else {
+      disableDrawMode();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDrawingMode, canDraw]);
+
+  // ─── Logout handler ──────────────────────────────────────────────────────────
+  const handleLogout = () => {
+    sessionPurgedRef.current = true;
+
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+
+    disableDrawMode();
+
+    callbacksRef.current.setIsDrawingMode?.(false);
+    callbacksRef.current.onFieldSelect?.(null);
+
+    const m = mapRef.current;
+    if (m) {
+      try {
+        const src = m.getSource('fields-source');
+        if (src) {
+          src.setData({ type: 'FeatureCollection', features: [] });
+        }
+      } catch (_) {}
+    }
+  };
+
+  // ─── Map initialization ──────────────────────────────────────────────────────
+  useEffect(() => {
+    if (mapRef.current) return;
+    isMountedRef.current = true;
+    sessionPurgedRef.current = false;
+
+    const map = new maplibregl.Map({
+      container: mapContainerRef.current,
       style: MAP_STYLES.satellite.style,
       center: DEFAULT_CENTER,
       zoom: DEFAULT_ZOOM,
     });
+    mapRef.current = map;
+    map.addControl(new maplibregl.NavigationControl(), 'top-right');
 
-    map.current.addControl(new maplibregl.NavigationControl(), 'top-right');
+    handlersRef.current.onLoad = async () => {
+      sessionPurgedRef.current = false;
 
-    map.current.on('load', () => {
-      setMapLoaded(true);
-    });
+      const m = mapRef.current;
+      if (!m || !isMountedRef.current) return;
 
-    map.current.on('click', 'fields-fill', (e) => {
-      if (e.features?.length > 0 && onFieldSelect) {
-        onFieldSelect(e.features[0].properties.id);
+      // ─── GeoJSON load ────────────────────────────────────────────────────
+      abortControllerRef.current = new AbortController();
+
+      try {
+        const params = {};
+        if (enterpriseId) params.enterprise_id = enterpriseId;
+        const res = await apiClient.get('/api/fields/geojson/all', {
+          params,
+          signal: abortControllerRef.current.signal,
+        });
+
+        // Mandatory check after request resolves
+        if (
+          sessionPurgedRef.current ||
+          !isMountedRef.current ||
+          !mapRef.current
+        ) {
+          return;
+        }
+
+        geojsonRef.current = res.data;
+        dataLoadedRef.current = true;
+
+        if (!m.getSource('fields-source')) {
+          m.addSource('fields-source', {
+            type: 'geojson',
+            data: res.data,
+            promoteId: 'id',
+          });
+        }
+
+        // Add layers only if they don't exist
+        if (!m.getLayer('fields-fill')) {
+          m.addLayer({
+            id: 'fields-fill',
+            type: 'fill',
+            source: 'fields-source',
+            paint: {
+              'fill-color': [
+                'interpolate',
+                ['linear'],
+                ['coalesce', ['get', 'current_ndvi'], -1],
+                -1, '#4b5563',
+                0.0, '#8B0000',
+                0.2, '#FF4500',
+                0.35, '#FFD700',
+                0.5, '#9ACD32',
+                0.65, '#228B22',
+                0.8, '#006400',
+              ],
+              'fill-opacity': 0.25,
+            },
+          });
+        }
+
+        if (!m.getLayer('fields-border')) {
+          m.addLayer({
+            id: 'fields-border',
+            type: 'line',
+            source: 'fields-source',
+            paint: {
+              'line-color': '#ffffff',
+              'line-width': 1.5,
+              'line-opacity': 0.9,
+            },
+          });
+        }
+
+        // ─── Interaction handlers ──────────────────────────────────────────
+        if (handlersRef.current.onMouseMove) {
+          m.off('mousemove', 'fields-fill', handlersRef.current.onMouseMove);
+        }
+        if (handlersRef.current.onMouseLeave) {
+          m.off('mouseleave', 'fields-fill', handlersRef.current.onMouseLeave);
+        }
+        if (handlersRef.current.onFieldClick) {
+          m.off('click', 'fields-fill', handlersRef.current.onFieldClick);
+        }
+
+        handlersRef.current.onMouseMove = (e) => {
+          if (isDrawingRef.current) return;
+          if (e.features?.length > 0) {
+            m.getCanvas().style.cursor = 'pointer';
+            if (m.getLayer('fields-border')) {
+              m.setPaintProperty('fields-border', 'line-width', [
+                'case',
+                ['==', ['get', 'id'], e.features[0].properties.id],
+                3,
+                1.5,
+              ]);
+              m.setPaintProperty('fields-border', 'line-opacity', [
+                'case',
+                ['==', ['get', 'id'], e.features[0].properties.id],
+                1,
+                0.9,
+              ]);
+            }
+          }
+        };
+
+        handlersRef.current.onMouseLeave = () => {
+          if (isDrawingRef.current) return;
+          m.getCanvas().style.cursor = '';
+          if (m.getLayer('fields-border')) {
+            m.setPaintProperty('fields-border', 'line-width', 1.5);
+            m.setPaintProperty('fields-border', 'line-opacity', 0.9);
+          }
+        };
+
+        handlersRef.current.onFieldClick = (e) => {
+          if (isDrawingRef.current) return;
+          const featureId = e.features?.[0]?.properties?.id;
+          if (featureId) {
+            callbacksRef.current.onFieldSelect?.(featureId);
+          }
+        };
+
+        m.on('mousemove', 'fields-fill', handlersRef.current.onMouseMove);
+        m.on('mouseleave', 'fields-fill', handlersRef.current.onMouseLeave);
+        m.on('click', 'fields-fill', handlersRef.current.onFieldClick);
+
+        callbacksRef.current.onMapReady?.(m);
+      } catch (err) {
+        if (err.name !== 'CanceledError') {
+          console.error('Failed to load spatial layers');
+        }
       }
-    });
+    };
 
-    map.current.on('mouseenter', 'fields-fill', () => {
-      map.current.getCanvas().style.cursor = 'pointer';
-    });
-    map.current.on('mouseleave', 'fields-fill', () => {
-      map.current.getCanvas().style.cursor = '';
-    });
+    window.addEventListener('agrosat:logout', handleLogout);
 
-    return () => { map.current?.remove(); map.current = null; };
+    map.on('load', handlersRef.current.onLoad);
+
+    return () => {
+      isMountedRef.current = false;
+      sessionPurgedRef.current = true;
+      window.removeEventListener('agrosat:logout', handleLogout);
+
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        abortControllerRef.current = null;
+      }
+
+      disableDrawMode();
+
+      if (mapRef.current) {
+        if (handlersRef.current.onMouseMove) {
+          mapRef.current.off('mousemove', 'fields-fill', handlersRef.current.onMouseMove);
+        }
+        if (handlersRef.current.onMouseLeave) {
+          mapRef.current.off('mouseleave', 'fields-fill', handlersRef.current.onMouseLeave);
+        }
+        if (handlersRef.current.onFieldClick) {
+          mapRef.current.off('click', 'fields-fill', handlersRef.current.onFieldClick);
+        }
+        mapRef.current.remove();
+        mapRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ─── Добавление слоёв полей ───────────────────────────────────────────────
-  const addFieldLayers = useCallback((geojson, mode) => {
-    const m = map.current;
-    if (!m) return;
-
+  // ─── Selected / highlight filter updates ─────────────────────────────────────
+  useEffect(() => {
+    const m = mapRef.current;
+    if (!m || !m.isStyleLoaded()) return;
     try {
-      if (m.getLayer('field-highlight')) m.removeLayer('field-highlight');
-      if (m.getLayer('field-selected')) m.removeLayer('field-selected');
-      if (m.getLayer('fields-outline')) m.removeLayer('fields-outline');
-      if (m.getLayer('fields-fill')) m.removeLayer('fields-fill');
-      if (m.getLayer('fields-labels')) m.removeLayer('fields-labels');
-      if (m.getSource('field-centroids')) m.removeSource('field-centroids');
-      if (m.getSource('fields')) m.removeSource('fields');
-    } catch (_) {}
-
-    m.addSource('fields', { type: 'geojson', data: geojson });
-
-    const fillColor = mode === 'ndvi' ? NDVI_COLOR_EXPR : CROP_COLOR_EXPR;
-    const fillOpacity = mode === 'ndvi' ? 0.3 : 0.25;
-
-    m.addLayer({
-      id: 'fields-fill',
-      type: 'fill',
-      source: 'fields',
-      paint: {
-        'fill-color': fillColor,
-        'fill-opacity': fillOpacity,
-      },
-    });
-
-    const outlineColor = mode === 'ndvi'
-      ? '#ffffff'
-      : CROP_COLOR_EXPR;
-
-    m.addLayer({
-      id: 'fields-outline',
-      type: 'line',
-      source: 'fields',
-      paint: {
-        'line-color': outlineColor,
-        'line-width': [
+      if (m.getLayer('fields-border')) {
+        m.setPaintProperty('fields-border', 'line-width', [
           'case',
-          ['==', ['get', 'alert_severity'], 'critical'], 2.5,
-          ['==', ['get', 'alert_severity'], 'warning'],  2,
-          ['==', ['get', 'id'], selectedFieldId || -1], 3,
+          ['==', ['get', 'id'], selectedFieldId || -1],
+          3,
           1.5,
-        ],
-        'line-opacity': [
+        ]);
+        m.setPaintProperty('fields-border', 'line-opacity', [
           'case',
-          ['==', ['get', 'alert_severity'], 'critical'], 1,
-          ['==', ['get', 'alert_severity'], 'warning'],  0.95,
+          ['==', ['get', 'id'], selectedFieldId || -1],
+          1,
           0.9,
-        ],
-      },
-    });
-
-    // Highlight layer (hover)
-    m.addLayer({
-      id: 'field-highlight',
-      type: 'line',
-      source: 'fields',
-      paint: {
-        'line-color': '#16a34a',
-        'line-width': 3,
-        'line-opacity': 0.9,
-      },
-      filter: ['==', ['get', 'id'], ''],
-    });
-
-    // Selected layer — blue dashed
-    m.addLayer({
-      id: 'field-selected',
-      type: 'line',
-      source: 'fields',
-      paint: {
-        'line-color': '#2563eb',
-        'line-width': 3,
-        'line-dasharray': [2, 1],
-        'line-opacity': 1,
-      },
-      filter: ['==', ['get', 'id'], ''],
-    });
-
-    // Build centroid labels
-    const centroidFeatures = (geojson.features || [])
-      .filter(f => f.properties?.centroid_lat && f.properties?.centroid_lon)
-      .map(f => ({
-        type: 'Feature',
-        geometry: {
-          type: 'Point',
-          coordinates: [f.properties.centroid_lon, f.properties.centroid_lat],
-        },
-        properties: {
-          id: f.properties.id,
-          name: f.properties.name,
-        },
-      }));
-
-    m.addSource('field-centroids', {
-      type: 'geojson',
-      data: { type: 'FeatureCollection', features: centroidFeatures },
-    });
-
-    m.addLayer({
-      id: 'fields-labels',
-      type: 'symbol',
-      source: 'field-centroids',
-      minzoom: 11,
-      layout: {
-        'text-field': ['get', 'name'],
-        'text-font': ['Noto Sans Regular'],
-        'text-size': [
-          'interpolate', ['linear'], ['zoom'],
-          11, 9,
-          13, 11,
-          15, 13,
-          17, 15,
-        ],
-        'text-anchor': 'center',
-        'text-max-width': 10,
-        'text-allow-overlap': false,
-        'text-ignore-placement': false,
-      },
-      paint: {
-        'text-color': '#1a2e23',
-        'text-halo-color': '#ffffff',
-        'text-halo-width': 1.5,
-        'text-halo-blur': 0,
-      },
-    });
-  }, [selectedFieldId]);
-
-  // ─── Expose map to parent ──────────────────────────────────────────────────
-  useEffect(() => {
-    if (mapLoaded && map.current && onMapReady) {
-      onMapReady(map.current);
-    }
-  }, [mapLoaded, onMapReady]);
-
-  // ─── Загрузка полей ───────────────────────────────────────────────────────
-  const loadFields = useCallback(async () => {
-    if (dataLoadedRef.current && geojsonRef.current) {
-      if (map.current?.isStyleLoaded()) {
-        addFieldLayers(geojsonRef.current, colorMode);
-      }
-      return;
-    }
-
-    setLoading(true);
-    try {
-      const params = {};
-      if (enterpriseId) params.enterprise_id = enterpriseId;
-      const geojson = await fetchFieldsGeoJson(params);
-      geojsonRef.current = geojson;
-      dataLoadedRef.current = true;
-      if (map.current?.isStyleLoaded()) {
-        addFieldLayers(geojson, colorMode);
-      }
-    } catch (err) {
-      console.error('Ошибка загрузки полей:', err);
-    } finally {
-      setLoading(false);
-    }
-  }, [enterpriseId, colorMode, addFieldLayers]);
-
-  useEffect(() => {
-    if (mapLoaded) loadFields();
-  }, [mapLoaded, loadFields]);
-
-  const prevEnterpriseRef = useRef(enterpriseId);
-  useEffect(() => {
-    if (prevEnterpriseRef.current !== enterpriseId) {
-      dataLoadedRef.current = false;
-      prevEnterpriseRef.current = enterpriseId;
-    }
-  }, [enterpriseId]);
-
-  // ─── Смена стиля карты ────────────────────────────────────────────────────
-  const switchMapStyle = useCallback((styleKey) => {
-    if (!map.current) return;
-    setMapStyle(styleKey);
-    map.current.setStyle(MAP_STYLES[styleKey].style);
-    map.current.once('style.load', () => {
-      if (geojsonRef.current) {
-        addFieldLayers(geojsonRef.current, colorMode);
-      }
-    });
-  }, [addFieldLayers, colorMode]);
-
-  // ─── Смена режима окраски ─────────────────────────────────────────────────
-  const switchColorMode = useCallback((mode) => {
-    setColorMode(mode);
-    if (geojsonRef.current && map.current?.isStyleLoaded()) {
-      addFieldLayers(geojsonRef.current, mode);
-    }
-  }, [addFieldLayers]);
-
-  // ─── Обновление выделения поля ────────────────────────────────────────────
-  useEffect(() => {
-    if (!map.current || !mapLoaded) return;
-    try {
-      if (map.current.getLayer('fields-outline')) {
-        map.current.setPaintProperty('fields-outline', 'line-width', [
-          'case',
-          ['==', ['get', 'alert_severity'], 'critical'], 2.5,
-          ['==', ['get', 'alert_severity'], 'warning'],  2,
-          ['==', ['get', 'id'], selectedFieldId || -1], 3,
-          1.5,
         ]);
       }
     } catch (_) {}
-  }, [selectedFieldId, mapLoaded]);
+  }, [selectedFieldId]);
 
-  // ─── Fly to selected field ─────────────────────────────────────────────────
-  useEffect(() => {
-    if (!selectedFieldId || !map.current || !mapLoaded || !geojsonRef.current) return;
-    const feature = geojsonRef.current.features?.find(
-      f => f.properties?.id === selectedFieldId
-    );
-    if (!feature) return;
+  // ─── Style switch ────────────────────────────────────────────────────────────
+  const switchMapStyle = (styleKey) => {
+    const m = mapRef.current;
+    if (!m) return;
+    styleSwitchColorModeRef.current = 'crop';
+    m.setStyle(MAP_STYLES[styleKey].style);
+    m.once('style.load', () => {
+      if (geojsonRef.current) {
+        rehydrateLayers(geojsonRef.current);
+      }
+    });
+  };
 
-    // Use fitBounds to account for panel overlap (left: 420px padding)
-    const coords = feature.geometry?.coordinates;
-    if (coords && coords[0]) {
-      const bounds = coords[0].reduce(
-        (b, c) => [
-          [Math.min(b[0][0], c[0]), Math.min(b[0][1], c[1])],
-          [Math.max(b[1][0], c[0]), Math.max(b[1][1], c[1])],
-        ],
-        [[Infinity, Infinity], [-Infinity, -Infinity]]
-      );
-      map.current.fitBounds(bounds, {
-        padding: { top: 80, bottom: 80, left: 420, right: 80 },
-        maxZoom: 16,
-        duration: 1000,
+  const rehydrateLayers = (data) => {
+    const m = mapRef.current;
+    if (!m || !isMountedRef.current) return;
+
+    const mode = styleSwitchColorModeRef.current;
+    const fillColor = mode === 'ndvi'
+      ? [
+          'interpolate',
+          ['linear'],
+          ['coalesce', ['get', 'current_ndvi'], -1],
+          -1, '#4b5563',
+          0.0, '#8B0000',
+          0.2, '#FF4500',
+          0.35, '#FFD700',
+          0.5, '#9ACD32',
+          0.65, '#228B22',
+          0.8, '#006400',
+        ]
+      : CROP_COLOR_EXPR;
+
+    if (!m.getSource('fields-source')) {
+      m.addSource('fields-source', {
+        type: 'geojson',
+        data,
+        promoteId: 'id',
       });
     } else {
-      // Fallback to centroid flyTo
-      const lat = feature.properties?.centroid_lat;
-      const lon = feature.properties?.centroid_lon;
-      if (lat && lon) {
-        map.current.flyTo({
-          center: [lon, lat],
-          zoom: Math.max(map.current.getZoom(), 14),
-          duration: 1000,
-          essential: true,
-        });
-      }
+      m.getSource('fields-source').setData(data);
     }
-  }, [selectedFieldId, mapLoaded]);
 
-  // ─── Highlight hovered field ──────────────────────────────────────────────
-  useEffect(() => {
-    if (!map.current || !mapLoaded) return;
-    try {
-      if (map.current.getLayer('field-highlight')) {
-        map.current.setFilter('field-highlight',
-          highlightedFieldId
-            ? ['any', ['==', ['get', 'id'], highlightedFieldId], ['==', ['get', 'id'], String(highlightedFieldId)]]
-            : ['==', ['get', 'id'], '']
-        );
-      }
-    } catch (_) {}
-  }, [highlightedFieldId, mapLoaded]);
+    if (!m.getLayer('fields-fill')) {
+      m.addLayer({
+        id: 'fields-fill',
+        type: 'fill',
+        source: 'fields-source',
+        paint: {
+          'fill-color': fillColor,
+          'fill-opacity': 0.25,
+        },
+      });
+    } else {
+      m.setPaintProperty('fields-fill', 'fill-color', fillColor);
+    }
 
-  // ─── Update selected field filter ───────────────────────────────────────
-  useEffect(() => {
-    if (!map.current || !mapLoaded) return;
-    try {
-      if (map.current.getLayer('field-selected')) {
-        map.current.setFilter('field-selected',
-          selectedFieldId
-            ? ['any', ['==', ['get', 'id'], selectedFieldId], ['==', ['get', 'id'], String(selectedFieldId)]]
-            : ['==', ['get', 'id'], '']
-        );
-      }
-    } catch (_) {}
-  }, [selectedFieldId, mapLoaded]);
+    if (!m.getLayer('fields-border')) {
+      m.addLayer({
+        id: 'fields-border',
+        type: 'line',
+        source: 'fields-source',
+        paint: {
+          'line-color': '#ffffff',
+          'line-width': 1.5,
+          'line-opacity': 0.9,
+        },
+      });
+    }
+  };
 
-  // ─── Map resize when container changes ────────────────────────────────────
-  useEffect(() => {
-    if (!map.current || !mapLoaded) return;
-    const timer = setTimeout(() => map.current.resize(), 100);
-    return () => clearTimeout(timer);
-  }, [mapLoaded]);
+  const switchColorMode = (mode) => {
+    styleSwitchColorModeRef.current = mode;
+    if (geojsonRef.current && mapRef.current?.isStyleLoaded()) {
+      rehydrateLayers(geojsonRef.current);
+    }
+  };
 
   return (
     <div className="relative w-full h-full">
-      <div ref={mapContainer} className="w-full h-full" />
+      <div ref={mapContainerRef} className="w-full h-full" />
 
-      {/* Style switcher — top-right, below nav controls */}
+      {/* Style switcher */}
       <div className="absolute top-3 right-3 z-10 flex gap-1">
         {Object.entries(MAP_STYLES).map(([key, s]) => (
           <button
             key={key}
             onClick={() => switchMapStyle(key)}
-            className={`px-2.5 py-1 text-xs rounded-md font-medium transition-colors shadow ${
-              mapStyle === key
-                ? 'bg-agro-accent text-white'
-                : 'bg-white/90 backdrop-blur-sm text-agro-muted hover:text-agro-text border border-agro-border'
-            }`}
+            className="px-2.5 py-1 text-xs rounded-md font-medium transition-colors shadow bg-white/90 backdrop-blur-sm text-slate-600 hover:text-slate-900 border border-slate-200"
           >
             {s.label}
           </button>
         ))}
       </div>
 
-      {/* Color mode toggle — above legend */}
+      {/* Color mode toggle */}
       <div className="absolute top-12 right-3 z-10 flex gap-1">
         <button
           onClick={() => switchColorMode('crop')}
-          className={`px-2.5 py-1 text-xs rounded-md font-medium transition-colors shadow ${
-            colorMode === 'crop'
-              ? 'bg-agro-accent text-white'
-              : 'bg-white/90 backdrop-blur-sm text-agro-muted hover:text-agro-text border border-agro-border shadow-sm'
-          }`}
+          className="px-2.5 py-1 text-xs rounded-md font-medium transition-colors shadow bg-white/90 backdrop-blur-sm text-slate-600 hover:text-slate-900 border border-slate-200"
         >
           Культуры
         </button>
         <button
           onClick={() => switchColorMode('ndvi')}
-          className={`px-2.5 py-1 text-xs rounded-md font-medium transition-colors shadow ${
-            colorMode === 'ndvi'
-              ? 'bg-agro-accent text-white'
-              : 'bg-white/90 backdrop-blur-sm text-agro-muted hover:text-agro-text border border-agro-border shadow-sm'
-          }`}
+          className="px-2.5 py-1 text-xs rounded-md font-medium transition-colors shadow bg-white/90 backdrop-blur-sm text-slate-600 hover:text-slate-900 border border-slate-200"
         >
           NDVI
         </button>
       </div>
 
-      {/* Loading indicator */}
-      {loading && (
-        <div className="absolute top-24 left-3 z-10 bg-white/90 backdrop-blur-sm rounded-lg px-3 py-2 text-xs text-agro-muted flex items-center gap-2 shadow-sm border border-agro-border">
-          <svg className="animate-spin h-4 w-4 text-agro-accent" fill="none" viewBox="0 0 24 24">
-            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/>
-            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
-          </svg>
-          Загрузка полей...
-        </div>
-      )}
-
-      {/* Legend */}
-      <div className="absolute bottom-8 left-3 z-10 bg-white/90 backdrop-blur-sm rounded-lg px-3 py-2 text-xs border border-agro-border shadow-sm">
-        {colorMode === 'crop' ? (
-          <>
-            <p className="text-agro-muted mb-1.5 font-medium">Культуры</p>
-            <div className="space-y-1">
-              {CROP_LEGEND.map(item => (
-                <div key={item.label} className="flex items-center gap-2">
-                  <div className="w-3 h-3 rounded-sm flex-shrink-0" style={{ backgroundColor: item.color }} />
-                  <span className="text-agro-text">{item.label}</span>
-                </div>
-              ))}
-            </div>
-          </>
-        ) : (
-          <>
-            <p className="text-agro-muted mb-1 font-medium">NDVI</p>
-            <div className="flex gap-0.5 h-3 rounded overflow-hidden">
-              {NDVI_COLORS.slice(0, -1).map((c, i) => (
-                <div key={i} className="flex-1" style={{ backgroundColor: c.color }} />
-              ))}
-            </div>
-            <div className="flex justify-between text-agro-muted mt-0.5">
-              <span>0.0</span><span>0.8</span>
-            </div>
-          </>
-        )}
-      </div>
-
       {/* Re-center button */}
       <button
-        onClick={() => map.current?.flyTo({ center: DEFAULT_CENTER, zoom: DEFAULT_ZOOM, duration: 1000 })}
-        className="absolute bottom-8 right-3 z-10 bg-white/90 backdrop-blur-sm hover:bg-agro-card rounded-lg p-2 shadow-lg transition-colors border border-agro-border"
+        onClick={() => mapRef.current?.flyTo({ center: DEFAULT_CENTER, zoom: DEFAULT_ZOOM, duration: 1000 })}
+        className="absolute bottom-8 right-3 z-10 bg-white/90 backdrop-blur-sm hover:bg-slate-100 rounded-lg p-2 shadow-lg transition-colors border border-slate-200"
         title="Бухара"
       >
-        <svg className="w-5 h-5 text-agro-text" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <svg className="w-5 h-5 text-slate-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-            d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
         </svg>
       </button>
     </div>

@@ -10,10 +10,19 @@ const client = axios.create({
 // Некоторые компоненты вызывают client.get('/api/...') — при baseURL='/api/'
 // это даёт /api/api/... → 404. Этот interceptor убирает лишний префикс.
 
+// TODO: For production, migrate authentication to HttpOnly SameSite=Strict cookies
+// with short token lifetimes. localStorage is acceptable only for local development.
 client.interceptors.request.use(config => {
   if (config.url && config.url.startsWith('/api/')) {
     config.url = config.url.replace(/^\/api\//, '');
   }
+
+  const token = localStorage.getItem('agrosat_token');
+  if (token) {
+    config.headers = config.headers || {};
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+
   return config;
 });
 
@@ -36,6 +45,18 @@ async function cachedGet(url, params = {}, ttl = TTL) {
 client.interceptors.response.use(
   response => response,
   async error => {
+    if (error?.response?.status === 401) {
+      localStorage.removeItem('agrosat_token');
+      localStorage.removeItem('agrosat_user');
+      window.dispatchEvent(new Event('agrosat:logout'));
+
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login';
+      }
+
+      return Promise.reject(error);
+    }
+
     const config = error.config;
     if (!config || config.__retryCount >= 2) return Promise.reject(error);
     if (error.code === 'ECONNABORTED' || error.response?.status >= 500) {

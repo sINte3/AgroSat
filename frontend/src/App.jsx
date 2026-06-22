@@ -1,4 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
+import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { AuthProvider } from './context/AuthContext';
+import PrivateRoute from './components/Routing/PrivateRoute';
 import Sidebar from './components/Layout/Sidebar';
 import Header from './components/Layout/Header';
 import DashboardPage from './pages/DashboardPage';
@@ -7,9 +10,11 @@ import FieldDetailPage from './pages/FieldDetailPage';
 import AlertsPage from './pages/AlertsPage';
 import EnterprisesPage from './pages/EnterprisesPage';
 import EnterpriseDetailPage from './pages/EnterpriseDetailPage';
+import LoginPage from './pages/LoginPage';
+import UnauthorizedPage from './pages/UnauthorizedPage';
 import { getCachedEnterprises } from './api/client';
 
-export default function App() {
+function AppLayout() {
   const [view, setView] = useState('dashboard');
   const [selectedFieldId, setSelectedFieldId] = useState(null);
   const [selectedEnterpriseId, setSelectedEnterpriseId] = useState(null);
@@ -18,7 +23,7 @@ export default function App() {
   useEffect(() => {
     getCachedEnterprises()
       .then(setEnterprises)
-      .catch(err => console.error('Ошибка загрузки предприятий:', err));
+      .catch(() => console.error('Ошибка загрузки предприятий'));
   }, []);
 
   const handleFieldClick = useCallback((fieldId) => {
@@ -132,5 +137,28 @@ export default function App() {
         {renderContent()}
       </main>
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <AuthProvider>
+        <Routes>
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/unauthorized" element={<UnauthorizedPage />} />
+
+          <Route
+            element={
+              <PrivateRoute
+                allowedRoles={['admin', 'manager', 'agronomist', 'viewer']}
+              />
+            }
+          >
+            <Route path="*" element={<AppLayout />} />
+          </Route>
+        </Routes>
+      </AuthProvider>
+    </BrowserRouter>
   );
 }
