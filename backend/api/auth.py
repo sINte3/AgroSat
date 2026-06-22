@@ -10,7 +10,13 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from config import settings
-from models.monitoring import User
+# Register all ORM classes used by relationships before auth ORM queries.
+# Without these imports, db.query(User) can fail when SQLAlchemy resolves
+# relationships such as NDVIRecord.field -> "Field".
+from models.enterprise import Enterprise  # noqa: F401
+from models.crop import CropType  # noqa: F401
+from models.field import Field, CropSeason  # noqa: F401
+from models.monitoring import NDVIRecord, Alert, ScoutingNote, User  # noqa: F401
 from schemas.auth import UserRegister, Token, UserResponse
 
 logger = logging.getLogger(__name__)
