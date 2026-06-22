@@ -12,6 +12,7 @@ class Settings(BaseSettings):
 
     # Database
     database_url: str = "postgresql://agrosat:agrosat_secret_2024@localhost:5432/agrosat"
+    supabase_database_url: str = ""
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"
@@ -39,6 +40,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = False
+        extra = "ignore"
 
 
 @lru_cache()

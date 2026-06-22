@@ -1,3 +1,38 @@
+# TASK_032: Secure Windows start.bat Launcher for Redis, Backend, and Frontend
+
+## Context
+AgroSat is developed locally on Windows. The project is started from the repository root via `start.bat`. The launcher must start/check Redis, FastAPI backend, React frontend, and open the browser without leaking environment variables or launching unsafe executables through ambiguous Windows PATH resolution.
+
+This task updates only the root `start.bat` file.
+
+## Critical Safety Rules
+1. Modify only `start.bat`.
+2. Read the existing `start.bat` first.
+3. Do not print environment variables.
+4. Do not print `.env` contents.
+5. Do not print `DATABASE_URL`, `SECRET_KEY`, Sentinel Hub credentials, Anthropic API key, Telegram bot token, or JWT tokens.
+6. Do not launch `redis-server` by bare command name.
+7. Do not rely only on `tasklist` to verify Redis.
+8. Verify Redis by checking TCP port `127.0.0.1:6379`.
+9. Verify backend/frontend ports before starting duplicate processes.
+10. Use quoted paths everywhere.
+11. Use paths relative to the location of `start.bat`, not hardcoded `C:\AgroSat`, except in user-facing messages.
+12. Do not use Docker.
+13. Do not modify backend Python code in this task.
+14. `uvicorn --reload` must be enabled only if the backend already supports a scheduler-disable environment gate. If not supported, start backend without `--reload` and print a warning.
+
+## File to Modify
+* `start.bat`
+
+No Python, frontend, Alembic, database, or `.env` files should be changed.
+
+---
+
+## Required Final `start.bat`
+
+Replace the contents of `start.bat` with the following complete script:
+
+```bat
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
 chcp 65001 >nul
@@ -136,3 +171,14 @@ exit /b 0
 :check_port
 powershell -NoProfile -ExecutionPolicy Bypass -Command "if (Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort %~1 -State Listen -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }"
 exit /b %ERRORLEVEL%
+```
+
+---
+
+## Verification Criteria
+- Run `start.bat` in one click.
+- Verify 3 minimized command windows are spawned: Redis (if not running as a global service), FastAPI backend, and React frontend.
+- Verify browser automatically opens `http://localhost:5173`.
+- Verify backend logs show successful Redis connection (warning `Redis not available` must disappear).
+- Verify frontend dashboard cards render instantaneously due to active cache.
+```
