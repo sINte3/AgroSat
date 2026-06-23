@@ -58,11 +58,14 @@ export default function AlertsList({
   loading: externalLoading = null,
   error: externalError = null,
   searchQuery = '',
+  onAlertAcknowledged = null,
 }) {
   const [internalAlerts, setInternalAlerts] = useState([]);
   const [internalLoading, setInternalLoading] = useState(true);
   const [internalError, setInternalError] = useState(null);
   const [expanded, setExpanded] = useState(new Set());
+  const [acknowledgingIds, setAcknowledgingIds] = useState(new Set());
+  const [ackError, setAckError] = useState(null);
 
   const useExternal = externalAlerts !== null;
 
@@ -111,12 +114,22 @@ export default function AlertsList({
 
   async function handleAcknowledge(e, alertId) {
     e.stopPropagation();
+    if (acknowledgingIds.has(alertId)) return;
+    setAckError(null);
+    setAcknowledgingIds(prev => { const n = new Set(prev); n.add(alertId); return n; });
     try {
       await acknowledgeAlert(alertId);
-      setAlerts(prev => prev.filter(a => a.id !== alertId));
+      if (useExternal) {
+        onAlertAcknowledged?.(alertId);
+      } else {
+        setInternalAlerts(prev => prev.filter(a => a.id !== alertId));
+      }
       setExpanded(prev => { const n = new Set(prev); n.delete(alertId); return n; });
     } catch (err) {
       console.error(err);
+      setAckError('Не удалось подтвердить предупреждение');
+    } finally {
+      setAcknowledgingIds(prev => { const n = new Set(prev); n.delete(alertId); return n; });
     }
   }
 
@@ -165,6 +178,11 @@ export default function AlertsList({
 
   return (
     <div className="space-y-2">
+      {ackError && (
+        <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">
+          {ackError}
+        </p>
+      )}
       {filteredAlerts.map((alert) => {
         const isExpanded = expanded.has(alert.id);
         const borderColor =
@@ -212,10 +230,11 @@ export default function AlertsList({
                 <div className="flex flex-col items-end gap-2 flex-shrink-0">
                   <button
                     onClick={(e) => handleAcknowledge(e, alert.id)}
-                    className="text-xs text-agro-muted hover:text-green-400 transition-colors"
+                    disabled={acknowledgingIds.has(alert.id)}
+                    className="text-xs text-agro-muted hover:text-green-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                     title="Отметить просмотренным"
                   >
-                    ✓
+                    {acknowledgingIds.has(alert.id) ? '...' : '✓'}
                   </button>
                   <span className="text-agro-muted text-xs mt-1">
                     {isExpanded ? '▲' : '▼'}

@@ -34,6 +34,10 @@ export default function AlertsPage({ onFieldClick, onFieldHighlight }) {
     }
   }
 
+  const handleAlertAcknowledged = (alertId) => {
+    setAlerts(prev => prev.filter(a => a.id !== alertId));
+  };
+
   const activeCounts = useMemo(() => {
     const counts = { critical: 0, warning: 0, info: 0 };
     alerts.forEach((a) => {
@@ -117,6 +121,7 @@ export default function AlertsPage({ onFieldClick, onFieldHighlight }) {
           limit={200}
           onFieldClick={onFieldClick}
           onFieldHighlight={onFieldHighlight}
+          onAlertAcknowledged={handleAlertAcknowledged}
         />
       </div>
     </div>
