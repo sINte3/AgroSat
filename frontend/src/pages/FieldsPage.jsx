@@ -121,7 +121,7 @@ export default function FieldsPage({ onFieldClick, onNavigate, enterpriseId }) {
 
       {/* Draw controls overlay */}
       {canCreateField && (
-        <div className="absolute top-3 left-3 z-10 flex flex-col gap-2">
+        <div className="absolute top-3 left-[408px] z-50 flex flex-col gap-2">
           {!isDrawingMode ? (
             <button
               id="add-field-btn"
