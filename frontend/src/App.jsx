@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, useLocation, useNavigate } from 'react-router-dom';
 import { AuthProvider } from './context/AuthContext';
 import PrivateRoute from './components/Routing/PrivateRoute';
 import Sidebar from './components/Layout/Sidebar';
@@ -14,8 +14,18 @@ import LoginPage from './pages/LoginPage';
 import UnauthorizedPage from './pages/UnauthorizedPage';
 import { getCachedEnterprises } from './api/client';
 
+const PATH_VIEW_MAP = {
+  '/dashboard': 'dashboard',
+  '/fields': 'fields',
+  '/alerts': 'alerts',
+  '/enterprises': 'enterprises',
+};
+
 function AppLayout() {
-  const [view, setView] = useState('dashboard');
+  const location = useLocation();
+  const navigate = useNavigate();
+  const pathView = PATH_VIEW_MAP[location.pathname] || 'dashboard';
+  const [view, setView] = useState(pathView);
   const [selectedFieldId, setSelectedFieldId] = useState(null);
   const [selectedEnterpriseId, setSelectedEnterpriseId] = useState(null);
   const [enterprises, setEnterprises] = useState([]);
@@ -25,6 +35,17 @@ function AppLayout() {
       .then(setEnterprises)
       .catch(() => console.error('Ошибка загрузки предприятий'));
   }, []);
+
+  // Sync view from URL changes (back/forward, manual URL entry, refresh)
+  // Only override local state when the URL is a known top-level path — ignore
+  // detail/internal views so back-button from field-detail goes to /fields.
+  useEffect(() => {
+    if (PATH_VIEW_MAP[location.pathname]) {
+      setView(pathView);
+      setSelectedFieldId(null);
+      setSelectedEnterpriseId(null);
+    }
+  }, [location.pathname, pathView]);
 
   const handleFieldClick = useCallback((fieldId) => {
     setSelectedFieldId(fieldId);
@@ -41,10 +62,12 @@ function AppLayout() {
         setView('dashboard');
         setSelectedFieldId(null);
         setSelectedEnterpriseId(null);
+        navigate('/dashboard', { replace: true });
         break;
       case 'fields':
         setView('fields');
         setSelectedFieldId(null);
+        navigate('/fields', { replace: true });
         break;
       case 'field':
         setSelectedFieldId(id);
@@ -53,11 +76,13 @@ function AppLayout() {
       case 'alerts':
         setView('alerts');
         setSelectedFieldId(null);
+        navigate('/alerts', { replace: true });
         break;
       case 'enterprises':
         setView('enterprises');
         setSelectedFieldId(null);
         setSelectedEnterpriseId(null);
+        navigate('/enterprises', { replace: true });
         break;
       case 'enterprise':
         setSelectedEnterpriseId(id);
@@ -70,7 +95,7 @@ function AppLayout() {
       default:
         setView('dashboard');
     }
-  }, []);
+  }, [navigate]);
 
   const getHeaderInfo = () => {
     switch (view) {
