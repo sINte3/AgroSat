@@ -1,38 +1,110 @@
-from fastapi import APIRouter, Depends, HTTPException
+"""
+Weather API — field-authorized weather with tenant isolation.
+Harden: auth/tenant isolation/bbox checks/sanitized errors per TASK_007.
+"""
+
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from database import get_db
+from models.monitoring import User
 from services.weather import get_field_weather
+from services.cache import cache_get, cache_set
+from api.auth import get_current_active_user
+from api.dependencies import (
+    get_authorized_field_row,
+    normalize_role,
+    require_enterprise_scope,
+)
 
 router = APIRouter(prefix="/api/weather", tags=["weather"])
 
 
 @router.get("/field/{field_id}")
-def get_weather_for_field(field_id: int, db: Session = Depends(get_db)):
-    """Погода для конкретного поля по его координатам."""
-    f = db.execute(
-        text("SELECT id, name, centroid_lat, centroid_lon FROM fields WHERE id = :fid OR code = CAST(:fid AS TEXT) LIMIT 1"),
-        {"fid": field_id}
-    ).fetchone()
-    if not f:
-        raise HTTPException(status_code=404, detail="Поле не найдено")
+def get_weather_for_field(
+    field_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Погода для конкретного поля — требует авторизации поля."""
+    # Object-level field authorization (404 for cross-tenant access)
+    field_row = get_authorized_field_row(field_id=field_id, db=db, current_user=current_user)
 
-    if not f.centroid_lat or not f.centroid_lon:
-        raise HTTPException(status_code=400, detail="У поля не заданы координаты центра")
+    if not field_row.centroid_lat or not field_row.centroid_lon:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Для данного поля не заданы координаты центра"
+        )
 
-    weather = get_field_weather(f.centroid_lat, f.centroid_lon)
+    # Cache after auth, keyed by field_id
+    cache_key = f"weather:field:{field_id}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
+
+    lat = float(field_row.centroid_lat)
+    lon = float(field_row.centroid_lon)
+
+    try:
+        weather = get_field_weather(lat, lon)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Не удалось получить данные погоды"
+        )
+
     if not weather:
-        raise HTTPException(status_code=503, detail="Не удалось получить данные погоды")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Не удалось получить данные погоды"
+        )
 
-    weather["field_id"] = f.id
-    weather["field_name"] = f.name
+    weather["field_id"] = field_row.id
+    weather["field_name"] = field_row.name
+    cache_set(cache_key, weather, ttl_seconds=300)
     return weather
 
 
 @router.get("/location")
-def get_weather_by_location(lat: float, lon: float):
-    """Погода по координатам."""
-    weather = get_field_weather(lat, lon)
+def get_weather_by_location(
+    lat: float,
+    lon: float,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Погода по координатам. Только admin/manager, ограничено Бухарой."""
+    role = normalize_role(current_user)
+    if role not in ("admin", "manager"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Только администраторы и менеджеры могут запрашивать погоду по координатам"
+        )
+
+    # Bukhara bounding box
+    if not (63.0 <= lon <= 65.5 and 38.5 <= lat <= 40.5):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Координаты вне разрешённого региона (Бухарская область)"
+        )
+
+    cache_key = f"weather:location:{lat}:{lon}"
+    cached = cache_get(cache_key)
+    if cached:
+        return cached
+
+    try:
+        weather = get_field_weather(lat, lon)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Не удалось получить данные погоды"
+        )
+
     if not weather:
-        raise HTTPException(status_code=503, detail="Не удалось получить данные погоды")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Не удалось получить данные погоды"
+        )
+
+    cache_set(cache_key, weather, ttl_seconds=300)
     return weather

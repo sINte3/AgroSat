@@ -1,146 +1,120 @@
-# dashboard.py
-from fastapi import APIRouter, Depends
+"""
+Dashboard API — aggregate metrics with tenant isolation.
+Harden: auth/tenant isolation/explicit SQL CTEs per TASK_007.
+"""
+
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import text
 from database import get_db
-from models.field import Field
-from models.monitoring import NDVIRecord, Alert
-from models.enterprise import Enterprise
-from datetime import date, timedelta
-from services.cache import cache_get, cache_set
+from models.monitoring import User
+from services.cache import cache_get, cache_set, cache_delete_pattern
+from api.auth import get_current_active_user
+from api.dependencies import (
+    require_enterprise_scope,
+    normalize_role,
+    is_tenant_role,
+)
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 
 @router.get("/summary")
-def get_summary(db: Session = Depends(get_db)):
-    """Сводка по всему кластеру для главного дашборда."""
-    cache_key = "dashboard:summary"
+def get_summary(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+    effective_eid: int = Depends(require_enterprise_scope),
+):
+    """Сводка по кластеру или предприятию для главного дашборда.
+    Admin/manager: cluster-wide. Agronomist/viewer: their own enterprise.
+    """
+    cache_key = f"dashboard:summary:{effective_eid or 'all'}"
     cached = cache_get(cache_key)
     if cached:
         return cached
-    total_fields = db.query(Field).filter(Field.is_active == True).count()
-    total_enterprises = db.query(Enterprise).filter(Enterprise.is_active == True).count()
 
-    active_alerts = db.query(Alert).filter(Alert.is_active == True).count()
-    critical_alerts = db.query(Alert).filter(
-        Alert.is_active == True, Alert.severity == "critical"
-    ).count()
-    warning_alerts = db.query(Alert).filter(
-        Alert.is_active == True, Alert.severity == "warning"
-    ).count()
-
-    # Среднее NDVI по всем полям (последние снимки)
-    fields = db.query(Field).filter(Field.is_active == True).all()
-    ndvi_values = []
-    fields_with_problems = 0
-    fields_no_data = 0
-
-    for f in fields:
-        last = db.query(NDVIRecord).filter(
-            NDVIRecord.field_id == f.id
-        ).order_by(NDVIRecord.captured_date.desc()).first()
-
-        if last and last.mean_ndvi is not None:
-            ndvi_values.append(last.mean_ndvi)
-            if last.mean_ndvi < 0.3:
-                fields_with_problems += 1
-        else:
-            fields_no_data += 1
-
-    avg_ndvi = round(sum(ndvi_values) / len(ndvi_values), 4) if ndvi_values else None
-
-    # Общая площадь
-    total_area = db.query(func.sum(Field.area_ha)).filter(Field.is_active == True).scalar()
+    if effective_eid is not None:
+        # Tenant view — one CTE query
+        sql = text("""
+            WITH field_stats AS (
+                SELECT
+                    f.id,
+                    f.area_ha,
+                    (SELECT ndvi.mean_ndvi
+                     FROM ndvi_records ndvi
+                     WHERE ndvi.field_id = f.id
+                     ORDER BY ndvi.captured_date DESC
+                     LIMIT 1) AS last_ndvi,
+                    f.enterprise_id
+                FROM fields f
+                WHERE f.is_active = true AND f.enterprise_id = :eid
+            ),
+            alert_counts AS (
+                SELECT
+                    f.enterprise_id,
+                    COUNT(*) FILTER (WHERE a.severity = 'critical') AS critical_count,
+                    COUNT(*) FILTER (WHERE a.severity = 'warning') AS warning_count,
+                    COUNT(*) AS active_total
+                FROM alerts a
+                JOIN fields f ON f.id = a.field_id
+                WHERE a.is_active = true AND f.enterprise_id = :eid
+                GROUP BY f.enterprise_id
+            )
+            SELECT
+                COALESCE((SELECT COUNT(*) FROM field_stats), 0) AS total_fields,
+                COALESCE(SUM(fs.area_ha), 0) AS total_area_ha,
+                AVG(fs.last_ndvi) AS avg_ndvi,
+                COALESCE((SELECT active_total FROM alert_counts), 0) AS active_alerts_count,
+                COALESCE((SELECT critical_count FROM alert_counts), 0) AS critical_alerts_count,
+                COALESCE((SELECT warning_count FROM alert_counts), 0) AS warning_alerts_count,
+                COALESCE((SELECT COUNT(*) FROM field_stats WHERE last_ndvi IS NULL), 0) AS no_data_fields_count
+            FROM field_stats fs
+        """)
+        row = db.execute(sql, {"eid": effective_eid}).fetchone()
+    else:
+        # Global view
+        sql = text("""
+            WITH field_stats AS (
+                SELECT
+                    f.id,
+                    f.area_ha,
+                    (SELECT ndvi.mean_ndvi
+                     FROM ndvi_records ndvi
+                     WHERE ndvi.field_id = f.id
+                     ORDER BY ndvi.captured_date DESC
+                     LIMIT 1) AS last_ndvi
+                FROM fields f
+                WHERE f.is_active = true
+            ),
+            alert_counts AS (
+                SELECT
+                    COUNT(*) FILTER (WHERE severity = 'critical') AS critical_count,
+                    COUNT(*) FILTER (WHERE severity = 'warning') AS warning_count,
+                    COUNT(*) AS active_total
+                FROM alerts
+                WHERE is_active = true
+            )
+            SELECT
+                COALESCE((SELECT COUNT(*) FROM field_stats), 0) AS total_fields,
+                COALESCE(SUM(fs.area_ha), 0) AS total_area_ha,
+                AVG(fs.last_ndvi) AS avg_ndvi,
+                COALESCE((SELECT active_total FROM alert_counts), 0) AS active_alerts_count,
+                COALESCE((SELECT critical_count FROM alert_counts), 0) AS critical_alerts_count,
+                COALESCE((SELECT warning_count FROM alert_counts), 0) AS warning_alerts_count,
+                COALESCE((SELECT COUNT(*) FROM field_stats WHERE last_ndvi IS NULL), 0) AS no_data_fields_count
+            FROM field_stats fs
+        """)
+        row = db.execute(sql).fetchone()
 
     result = {
-        "total_fields": total_fields,
-        "total_enterprises": total_enterprises,
-        "total_area_ha": round(total_area, 1) if total_area else 0,
-        "avg_ndvi": avg_ndvi,
-        "active_alerts": active_alerts,
-        "critical_alerts": critical_alerts,
-        "warning_alerts": warning_alerts,
-        "fields_with_problems": fields_with_problems,
-        "fields_no_data": fields_no_data,
-        "last_updated": date.today().isoformat(),
+        "total_fields": row.total_fields,
+        "total_area_ha": round(float(row.total_area_ha), 1) if row.total_area_ha else 0,
+        "avg_ndvi": round(float(row.avg_ndvi), 4) if row.avg_ndvi is not None else None,
+        "active_alerts": row.active_alerts_count,
+        "critical_alerts": row.critical_alerts_count,
+        "warning_alerts": row.warning_alerts_count,
+        "fields_no_data": row.no_data_fields_count,
+        "last_updated": __import__("datetime").date.today().isoformat(),
     }
-    cache_set(cache_key, result, ttl_seconds=120)
+    cache_set(cache_key, result, ttl_seconds=60)
     return result
-
-
-@router.get("/enterprises/{enterprise_id}")
-def get_enterprise_summary(enterprise_id: int, db: Session = Depends(get_db)):
-    """Сводка по конкретному предприятию — агрегированные KPI."""
-    from models.crop import CropType
-    from models.field import CropSeason
-    from datetime import date
-
-    fields = db.query(Field).filter(
-        Field.enterprise_id == enterprise_id,
-        Field.is_active == True
-    ).all()
-
-    total_fields = len(fields)
-    active_alerts = 0
-    critical_alerts = 0
-    fields_with_problems = 0
-    ndvi_values = []
-    fields_list = []
-
-    for f in fields:
-        last = db.query(NDVIRecord).filter(
-            NDVIRecord.field_id == f.id
-        ).order_by(NDVIRecord.captured_date.desc()).first()
-
-        alerts_count = db.query(Alert).filter(
-            Alert.field_id == f.id, Alert.is_active == True
-        ).count()
-
-        # Считаем критические алерты
-        crit = db.query(Alert).filter(
-            Alert.field_id == f.id,
-            Alert.is_active == True,
-            Alert.severity == "critical"
-        ).count()
-
-        active_alerts += alerts_count
-        critical_alerts += crit
-
-        if last and last.mean_ndvi is not None:
-            ndvi_values.append(last.mean_ndvi)
-            if last.mean_ndvi < 0.3:
-                fields_with_problems += 1
-
-        season = db.query(CropSeason).filter(
-            CropSeason.field_id == f.id,
-            CropSeason.season_year == date.today().year
-        ).first()
-
-        crop_name = None
-        if season:
-            crop = db.query(CropType).filter(CropType.id == season.crop_type_id).first()
-            crop_name = crop.name_ru if crop else None
-
-        fields_list.append({
-            "id": f.id,
-            "name": f.name,
-            "area_ha": f.area_ha,
-            "current_crop": crop_name,
-            "ndvi": last.mean_ndvi if last else None,
-            "ndvi_date": last.captured_date.isoformat() if last else None,
-            "alerts": alerts_count,
-        })
-
-    avg_ndvi = round(sum(ndvi_values) / len(ndvi_values), 4) if ndvi_values else None
-
-    return {
-        "enterprise_id": enterprise_id,
-        "total_fields": total_fields,
-        "active_alerts": active_alerts,
-        "critical_alerts": critical_alerts,
-        "avg_ndvi": avg_ndvi,
-        "fields_with_problems": fields_with_problems,
-        "fields": fields_list,
-        "last_updated": date.today().isoformat(),
-    }
