@@ -5,23 +5,25 @@ import { useAuth } from '../context/AuthContext';
 export default function LoginPage() {
   const { login } = useAuth();
   const navigate = useNavigate();
-  const [tokenInput, setTokenInput] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!tokenInput.trim()) return;
+    const emailTrimmed = email.trim().toLowerCase();
+    if (!emailTrimmed || !password) return;
     setBusy(true);
     setError('');
 
-    const ok = await login(tokenInput.trim());
+    const ok = await login(emailTrimmed, password);
     setBusy(false);
 
     if (ok) {
       navigate('/', { replace: true });
     } else {
-      setError('Токен недействителен или истёк');
+      setError('Неверный email или пароль');
     }
   };
 
@@ -40,15 +42,28 @@ export default function LoginPage() {
         </div>
 
         <label className="block text-xs text-slate-400 font-mono mb-1.5">
-          Токен доступа
+          Email
+        </label>
+        <input
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="you@example.com"
+          className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500"
+          autoComplete="username"
+          autoFocus
+        />
+
+        <label className="block text-xs text-slate-400 font-mono mt-4 mb-1.5">
+          Пароль
         </label>
         <input
           type="password"
-          value={tokenInput}
-          onChange={(e) => setTokenInput(e.target.value)}
-          placeholder="Paste your JWT token"
-          className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500 font-mono"
-          autoFocus
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          placeholder="••••••••"
+          className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500"
+          autoComplete="current-password"
         />
 
         {error && (
@@ -57,10 +72,10 @@ export default function LoginPage() {
 
         <button
           type="submit"
-          disabled={busy || !tokenInput.trim()}
+          disabled={busy || !email.trim() || !password}
           className="w-full mt-4 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 disabled:text-slate-500 text-white text-sm font-medium rounded-lg py-2.5 transition-colors"
         >
-          {busy ? 'Проверка...' : 'Войти'}
+          {busy ? 'Вход...' : 'Войти'}
         </button>
       </form>
     </div>

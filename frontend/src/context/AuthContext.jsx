@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import apiClient from '../api/client';
+import apiClient, { loginWithPassword } from '../api/client';
 
 const AuthContext = createContext(null);
 
@@ -16,11 +16,14 @@ export function AuthProvider({ children }) {
     window.dispatchEvent(new Event('agrosat:logout'));
   };
 
-  const login = async (accessToken) => {
+  const login = async (email, password) => {
     try {
+      const tokenData = await loginWithPassword(email, password);
+      const accessToken = tokenData.access_token;
+
       localStorage.setItem('agrosat_token', accessToken);
 
-      const res = await apiClient.get('/api/auth/me');
+      const res = await apiClient.get('auth/me');
 
       setUser(res.data);
       setToken(accessToken);
@@ -28,7 +31,7 @@ export function AuthProvider({ children }) {
 
       return true;
     } catch {
-      console.error('Failed to log in during profile verification');
+      console.error('Failed to log in');
       logout();
       return false;
     }
@@ -38,7 +41,7 @@ export function AuthProvider({ children }) {
     if (!token) return;
 
     try {
-      const res = await apiClient.get('/api/auth/me');
+      const res = await apiClient.get('auth/me');
       setUser(res.data);
     } catch {
       console.error('Revalidation failed');
@@ -54,7 +57,7 @@ export function AuthProvider({ children }) {
       }
 
       try {
-        const res = await apiClient.get('/api/auth/me');
+        const res = await apiClient.get('auth/me');
         setUser(res.data);
       } catch {
         console.error('Session initialization failed');

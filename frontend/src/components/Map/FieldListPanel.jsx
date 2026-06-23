@@ -1,8 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
-import axios from 'axios';
+import { getField } from '../../api/client';
 import FieldDetailPanel from './FieldDetailPanel';
-
-const API = 'http://localhost:8000/api';
 
 // ─── Helper functions ─────────────────────────────────────────────────────────
 const getCropColor = (crop) => {
@@ -66,17 +64,28 @@ export default function FieldListPanel({
       setSelectedField(null);
       return;
     }
+    let cancelled = false;
+
     const basic = fields.find(f => f.id === selectedFieldId);
     setSelectedField(basic || null);
 
-    axios.get(`${API}/fields/${selectedFieldId}`)
-      .then(res => {
-        const data = res.data;
+    async function load() {
+      try {
+        const data = await getField(selectedFieldId);
+        if (cancelled) return;
         // API returns GeoJSON Feature — data in .properties
         const props = data.properties || data;
         setSelectedField(prev => ({ ...prev, ...props }));
-      })
-      .catch(err => console.error('Error loading field detail:', err));
+      } catch (err) {
+        if (!cancelled) console.error('Error loading field detail:', err);
+      }
+    }
+
+    load();
+
+    return () => {
+      cancelled = true;
+    };
   }, [selectedFieldId, fields]);
 
   // Filter by search + enterprise

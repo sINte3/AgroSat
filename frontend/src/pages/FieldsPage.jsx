@@ -1,10 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import FieldMap from '../components/Map/FieldMap';
 import FieldListPanel from '../components/Map/FieldListPanel';
-import { getCachedEnterprises } from '../api/client';
-import axios from 'axios';
-
-const API = 'http://localhost:8000/api';
+import { getCachedEnterprises, getFields } from '../api/client';
 
 export default function FieldsPage({ onFieldClick, onNavigate, enterpriseId }) {
   const [fields, setFields] = useState([]);
@@ -13,8 +10,8 @@ export default function FieldsPage({ onFieldClick, onNavigate, enterpriseId }) {
   const [highlightedFieldId, setHighlightedFieldId] = useState(null);
 
   useEffect(() => {
-    axios.get(`${API}/fields/`, { params: { include_ndvi: true } })
-      .then(res => setFields(res.data))
+    getFields({ include_ndvi: true })
+      .then(setFields)
       .catch(err => console.error('Error loading fields:', err));
 
     getCachedEnterprises()

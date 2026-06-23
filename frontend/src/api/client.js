@@ -202,4 +202,18 @@ export async function getLocationWeather(lat, lon) {
   return data;
 }
 
+// ─── Auth ────────────────────────────────────────────────────────────────────
+
+export async function loginWithPassword(email, password) {
+  const params = new URLSearchParams();
+  params.append('username', String(email || '').trim().toLowerCase());
+  params.append('password', password);
+
+  const { data } = await client.post('auth/login', params, {
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  });
+
+  return data;
+}
+
 export default client;
