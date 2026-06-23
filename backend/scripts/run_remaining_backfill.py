@@ -17,8 +17,10 @@ from datetime import date, timedelta
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from database import SessionLocal, init_db
-from models.field import Field
-from models.monitoring import NDVIRecord
+from models.field import Field, CropSeason
+from models.enterprise import Enterprise
+from models.crop import CropType
+from models.monitoring import NDVIRecord, Alert, ScoutingNote, User
 from services.satellite import fetch_ndvi_for_field_date
 from sqlalchemy import text
 
@@ -156,7 +158,7 @@ def main():
         total_fields = len(candidate_fields)
 
         for i, cf in enumerate(candidate_fields):
-            field = db.query(Field).get(cf["id"])
+            field = db.get(Field, cf["id"])
             if not field:
                 continue
 
