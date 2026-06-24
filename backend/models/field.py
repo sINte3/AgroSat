@@ -32,11 +32,11 @@ class Field(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Relationships
-    enterprise = relationship("Enterprise", back_populates="fields")
-    seasons = relationship("CropSeason", back_populates="field", order_by="desc(CropSeason.season_year)")
-    ndvi_records = relationship("NDVIRecord", back_populates="field", order_by="desc(NDVIRecord.captured_date)")
-    alerts = relationship("Alert", back_populates="field", order_by="desc(Alert.triggered_at)")
-    scouting_notes = relationship("ScoutingNote", back_populates="field")
+    enterprise = relationship("Enterprise", back_populates="fields", lazy="raise_on_sql")
+    seasons = relationship("CropSeason", back_populates="field", order_by="desc(CropSeason.season_year)", lazy="raise_on_sql")
+    ndvi_records = relationship("NDVIRecord", back_populates="field", order_by="desc(NDVIRecord.captured_date)", lazy="raise_on_sql")
+    alerts = relationship("Alert", back_populates="field", order_by="desc(Alert.triggered_at)", lazy="raise_on_sql")
+    scouting_notes = relationship("ScoutingNote", back_populates="field", lazy="raise_on_sql")
 
     @property
     def current_season(self):
@@ -73,5 +73,5 @@ class CropSeason(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
-    field = relationship("Field", back_populates="seasons")
-    crop_type = relationship("CropType", back_populates="seasons")
+    field = relationship("Field", back_populates="seasons", lazy="raise_on_sql")
+    crop_type = relationship("CropType", back_populates="seasons", lazy="raise_on_sql")

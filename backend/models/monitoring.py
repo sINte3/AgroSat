@@ -36,7 +36,7 @@ class NDVIRecord(Base):
     ndvi_change_pct = Column(Float, nullable=True)      # изменение в %
 
     # Relationships
-    field = relationship("Field", back_populates="ndvi_records")
+    field = relationship("Field", back_populates="ndvi_records", lazy="raise_on_sql")
 
 
 # ─── ALERTS ──────────────────────────────────────────────────────────────────
@@ -84,7 +84,7 @@ class Alert(Base):
     is_active = Column(Boolean, default=True)
 
     # Relationships
-    field = relationship("Field", back_populates="alerts")
+    field = relationship("Field", back_populates="alerts", lazy="raise_on_sql")
 
 
 # ─── SCOUTING ────────────────────────────────────────────────────────────────
@@ -108,7 +108,7 @@ class ScoutingNote(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
-    field = relationship("Field", back_populates="scouting_notes")
+    field = relationship("Field", back_populates="scouting_notes", lazy="raise_on_sql")
 
 
 # ─── USERS ───────────────────────────────────────────────────────────────────
@@ -138,4 +138,4 @@ class User(Base):
     last_login = Column(DateTime, nullable=True)
 
     # Relationships
-    enterprise = relationship("Enterprise", back_populates="users")
+    enterprise = relationship("Enterprise", back_populates="users", lazy="raise_on_sql")

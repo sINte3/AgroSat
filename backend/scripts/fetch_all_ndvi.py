@@ -14,9 +14,10 @@ from datetime import date, timedelta
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from database import SessionLocal, init_db
-from models.field import Field
+from models.field import Field, CropSeason
 from models.monitoring import NDVIRecord, Alert
 from sqlalchemy import text
+from sqlalchemy.orm import selectinload
 
 # Задержка между запросами (секунды) — не перегружаем Sentinel Hub
 DELAY_BETWEEN_REQUESTS = 3
@@ -30,7 +31,9 @@ def fetch_ndvi_for_all():
     db = SessionLocal()
 
     try:
-        fields = db.query(Field).filter(Field.is_active == True).all()
+        fields = db.query(Field).options(
+            selectinload(Field.seasons).selectinload(CropSeason.crop_type)
+        ).filter(Field.is_active == True).all()
         total = len(fields)
         print(f"\n🛰️  AgroSat — Запуск NDVI для {total} полей")
         print(f"    Sentinel Hub: {'реальные данные' if hasattr(satellite_service, 'client_id') else 'Mock режим'}")

@@ -190,4 +190,4 @@ class CropType(Base):
     alerts_config = Column(JSON, nullable=True)   # Конфигурация алертов
 
     # Relationships
-    seasons = relationship("CropSeason", back_populates="crop_type")
+    seasons = relationship("CropSeason", back_populates="crop_type", lazy="raise_on_sql")

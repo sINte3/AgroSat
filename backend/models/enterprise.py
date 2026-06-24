@@ -22,5 +22,5 @@ class Enterprise(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Relationships
-    fields = relationship("Field", back_populates="enterprise")
-    users = relationship("User", back_populates="enterprise")
+    fields = relationship("Field", back_populates="enterprise", lazy="raise_on_sql")
+    users = relationship("User", back_populates="enterprise", lazy="raise_on_sql")

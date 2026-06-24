@@ -22,14 +22,20 @@ def fetch_all_fields_ndvi():
     Запускается автоматически каждые N часов.
     """
     from database import SessionLocal
-    from models.field import Field
+    from models.field import Field, CropSeason
     from models.monitoring import NDVIRecord
     from services.satellite import satellite_service, validate_ndvi_quality
     from services.alert_engine import analyze_field_ndvi, save_alerts
+    from sqlalchemy.orm import selectinload
 
     db = SessionLocal()
     try:
-        fields = db.query(Field).filter(Field.is_active == True).all()
+        fields = (
+            db.query(Field)
+            .options(selectinload(Field.seasons).selectinload(CropSeason.crop_type))
+            .filter(Field.is_active == True)
+            .all()
+        )
         logger.info(f"📡 Начинаем обновление NDVI для {len(fields)} полей...")
 
         updated = 0
