@@ -88,18 +88,15 @@ echo.
 echo [2/4] Checking backend port 8000...
 call :check_port 8000
 if errorlevel 1 (
-    set "UVICORN_RELOAD="
-    findstr /c:"AGROSAT_DISABLE_SCHEDULER" "%BACKEND_DIR%\main.py" >nul 2>nul
+    findstr /c:"start_scheduler" "%BACKEND_DIR%\main.py" >nul 2>nul
     if errorlevel 1 (
-        echo [WARNING] Backend does not expose AGROSAT_DISABLE_SCHEDULER gate.
-        echo [WARNING] Starting without --reload to avoid duplicate APScheduler jobs.
+        echo Backend does not start scheduler in web process. Enabling --reload for development.
+        start "AgroSat Backend" /D "%BACKEND_DIR%" /min "%ComSpec%" /k ""%PY_EXE%" -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload"
     ) else (
-        echo Backend scheduler-disable gate detected. Starting with --reload.
-        set "AGROSAT_DISABLE_SCHEDULER=1"
-        set "UVICORN_RELOAD=--reload"
+        echo [WARNING] start_scheduler detected in "%BACKEND_DIR%\main.py".
+        echo [WARNING] Starting without --reload to avoid duplicate APScheduler jobs.
+        start "AgroSat Backend" /D "%BACKEND_DIR%" /min "%ComSpec%" /k ""%PY_EXE%" -m uvicorn main:app --host 127.0.0.1 --port 8000"
     )
-
-    start "AgroSat Backend" /min "%ComSpec%" /k "cd /d "%BACKEND_DIR%" && "%PY_EXE%" -m uvicorn main:app --host 127.0.0.1 --port 8000 %UVICORN_RELOAD%"
     timeout /t 3 /nobreak >nul
 ) else (
     echo Backend port 8000 is already listening. Not starting another backend process.
@@ -109,7 +106,7 @@ echo.
 echo [3/4] Checking frontend port 5173...
 call :check_port 5173
 if errorlevel 1 (
-    start "AgroSat Frontend" /min "%ComSpec%" /k "cd /d "%FRONTEND_DIR%" && npm run dev"
+    start "AgroSat Frontend" /D "%FRONTEND_DIR%" /min "%ComSpec%" /k "npm run dev"
     timeout /t 3 /nobreak >nul
 ) else (
     echo Frontend port 5173 is already listening. Not starting another frontend process.
