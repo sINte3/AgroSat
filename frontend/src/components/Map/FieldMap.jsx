@@ -117,6 +117,7 @@ export default function FieldMap({
   const dataLoadedRef = useRef(false);
   const geojsonRef = useRef(null);
   const styleSwitchColorModeRef = useRef('crop');
+  const styleLoadHandlerRef = useRef(null);
 
   const callbacksRef = useRef({
     onFieldSelect,
@@ -467,6 +468,12 @@ export default function FieldMap({
         abortControllerRef.current = null;
       }
 
+      // Cancel any pending style-load handler
+      if (styleLoadHandlerRef.current && mapRef.current) {
+        mapRef.current.off('style.load', styleLoadHandlerRef.current);
+        styleLoadHandlerRef.current = null;
+      }
+
       disableDrawMode();
 
       if (mapRef.current) {
@@ -516,14 +523,25 @@ export default function FieldMap({
   const switchMapStyle = (styleKey) => {
     const m = mapRef.current;
     if (!m) return;
-    if (styleKey === activeStyle) return; // Skip redundant style reload when the selected style is already active.
+    if (styleKey === activeStyle) return;
     setActiveStyle(styleKey);
-    m.setStyle(MAP_STYLES[styleKey].style);
-    m.once('style.load', () => {
+
+    // Cancel any pending style-load handler from a previous style switch
+    if (styleLoadHandlerRef.current) {
+      m.off('style.load', styleLoadHandlerRef.current);
+      styleLoadHandlerRef.current = null;
+    }
+
+    styleLoadHandlerRef.current = () => {
+      styleLoadHandlerRef.current = null;
+      if (!isMountedRef.current || !mapRef.current) return;
       if (geojsonRef.current) {
         rehydrateLayers(geojsonRef.current);
       }
-    });
+    };
+
+    m.once('style.load', styleLoadHandlerRef.current);
+    m.setStyle(MAP_STYLES[styleKey].style);
   };
 
   const rehydrateLayers = (data) => {
