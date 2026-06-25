@@ -50,7 +50,7 @@ const ESRI_LABELS_SOURCE = {
   maxzoom: 18,
 };
 
-const GLYPHS = 'https://protomaps.github.io/basemaps-assets/fonts/{fontstack}/{range}.pbf';
+const GLYPHS = 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf';
 
 const MAP_STYLES = {
   satellite: {
@@ -92,7 +92,7 @@ const DEFAULT_CENTER = [64.4286, 39.7747];
 const DEFAULT_ZOOM = 7;
 const MAP_MIN_ZOOM = 3;
 const MAP_MAX_ZOOM = 18;
-const LAYERS = ['fields-fill']; // TODO TASK_042: add field labels with a verified glyph source.
+const LAYERS = ['fields-fill', 'fields-label'];
 
 export default function FieldMap({
   onFieldSelect,
@@ -331,6 +331,28 @@ export default function FieldMap({
           });
         }
 
+        if (!m.getLayer('fields-label')) {
+          m.addLayer({
+            id: 'fields-label',
+            type: 'symbol',
+            source: 'fields-source',
+            minzoom: 12,
+            layout: {
+              'text-field': ['to-string', ['coalesce', ['get', 'name'], ['get', 'code'], ['get', 'id']]],
+              'text-font': ['Noto Sans Regular'],
+              'text-size': ['interpolate', ['linear'], ['zoom'], 12, 10, 16, 14, 22, 18],
+              'text-offset': [0, -0.5],
+              'text-anchor': 'center',
+            },
+            paint: {
+              'text-color': '#ffffff',
+              'text-halo-color': '#000000',
+              'text-halo-width': 1.5,
+              'text-halo-blur': 1,
+            },
+          });
+        }
+
         const features = res.data.features;
         if (features?.length && doFitBounds) {
           const bounds = new maplibregl.LngLatBounds();
@@ -557,6 +579,28 @@ export default function FieldMap({
           'line-color': '#ffffff',
           'line-width': 2,
           'line-opacity': 1,
+        },
+      });
+    }
+
+    if (!m.getLayer('fields-label')) {
+      m.addLayer({
+        id: 'fields-label',
+        type: 'symbol',
+        source: 'fields-source',
+        minzoom: 12,
+        layout: {
+          'text-field': ['to-string', ['coalesce', ['get', 'name'], ['get', 'code'], ['get', 'id']]],
+          'text-font': ['Noto Sans Regular'],
+          'text-size': ['interpolate', ['linear'], ['zoom'], 12, 10, 16, 14, 22, 18],
+          'text-offset': [0, -0.5],
+          'text-anchor': 'center',
+        },
+        paint: {
+          'text-color': '#ffffff',
+          'text-halo-color': '#000000',
+          'text-halo-width': 1.5,
+          'text-halo-blur': 1,
         },
       });
     }
