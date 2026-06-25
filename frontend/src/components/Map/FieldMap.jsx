@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import MapboxDraw from '@mapbox/mapbox-gl-draw';
@@ -90,6 +90,7 @@ const MAP_STYLES = {
 
 const DEFAULT_CENTER = [64.4286, 39.7747];
 const DEFAULT_ZOOM = 9;
+const LAYERS = ['fields-fill']; // TODO TASK_041: add fields-label layer with proper glyph URL
 
 export default function FieldMap({
   onFieldSelect,
@@ -102,6 +103,8 @@ export default function FieldMap({
   highlightedFieldId,
   onMapReady,
 }) {
+  const [activeStyle, setActiveStyle] = useState('satellite');
+  const [activeColorMode, setActiveColorMode] = useState('crop');
   const mapContainerRef = useRef(null);
   const mapRef = useRef(null);
   const drawRef = useRef(null);
@@ -302,19 +305,8 @@ export default function FieldMap({
             type: 'fill',
             source: 'fields-source',
             paint: {
-              'fill-color': [
-                'interpolate',
-                ['linear'],
-                ['coalesce', ['get', 'current_ndvi'], -1],
-                -1, '#4b5563',
-                0.0, '#8B0000',
-                0.2, '#FF4500',
-                0.35, '#FFD700',
-                0.5, '#9ACD32',
-                0.65, '#228B22',
-                0.8, '#006400',
-              ],
-              'fill-opacity': 0.25,
+              'fill-color': CROP_COLOR_EXPR,
+              'fill-opacity': 0.4,
             },
           });
         }
@@ -326,22 +318,60 @@ export default function FieldMap({
             source: 'fields-source',
             paint: {
               'line-color': '#ffffff',
-              'line-width': 1.5,
-              'line-opacity': 0.9,
+              'line-width': 2,
+              'line-opacity': 1,
             },
           });
         }
 
+        // TODO TASK_041: add field labels with a verified glyph source
+
+        // ─── Fit map to loaded field bounds ────────────────────────────
+        const features = res.data.features;
+        if (features?.length) {
+          const bounds = new maplibregl.LngLatBounds();
+          let hasCoords = false;
+          for (const f of features) {
+            if (!f?.geometry?.coordinates) continue;
+            if (f.geometry.type === 'Polygon') {
+              for (const ring of f.geometry.coordinates) {
+                for (const [lng, lat] of ring) {
+                  bounds.extend([lng, lat]);
+                  hasCoords = true;
+                }
+              }
+            } else if (f.geometry.type === 'MultiPolygon') {
+              for (const poly of f.geometry.coordinates) {
+                for (const ring of poly) {
+                  for (const [lng, lat] of ring) {
+                    bounds.extend([lng, lat]);
+                    hasCoords = true;
+                  }
+                }
+              }
+            }
+          }
+          if (hasCoords && !bounds.isEmpty()) {
+            setTimeout(() => {
+              try { m.fitBounds(bounds, { padding: 60, duration: 0, maxZoom: 15 }); } catch (_) {}
+            }, 100);
+          }
+        }
+
         // ─── Interaction handlers ──────────────────────────────────────────
-        if (handlersRef.current.onMouseMove) {
-          m.off('mousemove', 'fields-fill', handlersRef.current.onMouseMove);
-        }
-        if (handlersRef.current.onMouseLeave) {
-          m.off('mouseleave', 'fields-fill', handlersRef.current.onMouseLeave);
-        }
-        if (handlersRef.current.onFieldClick) {
-          m.off('click', 'fields-fill', handlersRef.current.onFieldClick);
-        }
+        LAYERS.forEach((layer) => {
+          if (m.getLayer(layer)) {
+            if (handlersRef.current.onMouseMove) {
+              m.off('mousemove', layer, handlersRef.current.onMouseMove);
+            }
+            if (handlersRef.current.onMouseLeave) {
+              m.off('mouseleave', layer, handlersRef.current.onMouseLeave);
+            }
+            if (handlersRef.current.onFieldClick) {
+              m.off('click', layer, handlersRef.current.onFieldClick);
+            }
+          }
+        });
 
         handlersRef.current.onMouseMove = (e) => {
           if (isDrawingRef.current) return;
@@ -352,13 +382,13 @@ export default function FieldMap({
                 'case',
                 ['==', ['get', 'id'], e.features[0].properties.id],
                 3,
-                1.5,
+                2,
               ]);
               m.setPaintProperty('fields-border', 'line-opacity', [
                 'case',
                 ['==', ['get', 'id'], e.features[0].properties.id],
                 1,
-                0.9,
+                1,
               ]);
             }
           }
@@ -368,8 +398,8 @@ export default function FieldMap({
           if (isDrawingRef.current) return;
           m.getCanvas().style.cursor = '';
           if (m.getLayer('fields-border')) {
-            m.setPaintProperty('fields-border', 'line-width', 1.5);
-            m.setPaintProperty('fields-border', 'line-opacity', 0.9);
+            m.setPaintProperty('fields-border', 'line-width', 2);
+            m.setPaintProperty('fields-border', 'line-opacity', 1);
           }
         };
 
@@ -381,9 +411,13 @@ export default function FieldMap({
           }
         };
 
-        m.on('mousemove', 'fields-fill', handlersRef.current.onMouseMove);
-        m.on('mouseleave', 'fields-fill', handlersRef.current.onMouseLeave);
-        m.on('click', 'fields-fill', handlersRef.current.onFieldClick);
+        LAYERS.forEach((layer) => {
+          if (m.getLayer(layer)) {
+            m.on('mousemove', layer, handlersRef.current.onMouseMove);
+            m.on('mouseleave', layer, handlersRef.current.onMouseLeave);
+            m.on('click', layer, handlersRef.current.onFieldClick);
+          }
+        });
 
         callbacksRef.current.onMapReady?.(m);
       } catch (err) {
@@ -410,15 +444,19 @@ export default function FieldMap({
       disableDrawMode();
 
       if (mapRef.current) {
-        if (handlersRef.current.onMouseMove) {
-          mapRef.current.off('mousemove', 'fields-fill', handlersRef.current.onMouseMove);
-        }
-        if (handlersRef.current.onMouseLeave) {
-          mapRef.current.off('mouseleave', 'fields-fill', handlersRef.current.onMouseLeave);
-        }
-        if (handlersRef.current.onFieldClick) {
-          mapRef.current.off('click', 'fields-fill', handlersRef.current.onFieldClick);
-        }
+        LAYERS.forEach((layer) => {
+          if (mapRef.current.getLayer(layer)) {
+            if (handlersRef.current.onMouseMove) {
+              mapRef.current.off('mousemove', layer, handlersRef.current.onMouseMove);
+            }
+            if (handlersRef.current.onMouseLeave) {
+              mapRef.current.off('mouseleave', layer, handlersRef.current.onMouseLeave);
+            }
+            if (handlersRef.current.onFieldClick) {
+              mapRef.current.off('click', layer, handlersRef.current.onFieldClick);
+            }
+          }
+        });
         mapRef.current.remove();
         mapRef.current = null;
       }
@@ -436,13 +474,13 @@ export default function FieldMap({
           'case',
           ['==', ['get', 'id'], selectedFieldId || -1],
           3,
-          1.5,
+          2,
         ]);
         m.setPaintProperty('fields-border', 'line-opacity', [
           'case',
           ['==', ['get', 'id'], selectedFieldId || -1],
           1,
-          0.9,
+          1,
         ]);
       }
     } catch (_) {}
@@ -452,7 +490,7 @@ export default function FieldMap({
   const switchMapStyle = (styleKey) => {
     const m = mapRef.current;
     if (!m) return;
-    styleSwitchColorModeRef.current = 'crop';
+    setActiveStyle(styleKey);
     m.setStyle(MAP_STYLES[styleKey].style);
     m.once('style.load', () => {
       if (geojsonRef.current) {
@@ -470,7 +508,7 @@ export default function FieldMap({
       ? [
           'interpolate',
           ['linear'],
-          ['coalesce', ['get', 'current_ndvi'], -1],
+          ['coalesce', ['get', 'last_ndvi'], -1],
           -1, '#4b5563',
           0.0, '#8B0000',
           0.2, '#FF4500',
@@ -498,7 +536,7 @@ export default function FieldMap({
         source: 'fields-source',
         paint: {
           'fill-color': fillColor,
-          'fill-opacity': 0.25,
+          'fill-opacity': 0.4,
         },
       });
     } else {
@@ -512,14 +550,35 @@ export default function FieldMap({
         source: 'fields-source',
         paint: {
           'line-color': '#ffffff',
-          'line-width': 1.5,
-          'line-opacity': 0.9,
+          'line-width': 2,
+          'line-opacity': 1,
         },
       });
     }
+
+    // TODO TASK_041: add field labels with a verified glyph source
+
+    // Re-attach interaction handlers after style switch
+    LAYERS.forEach((layer) => {
+      if (m.getLayer(layer)) {
+        if (handlersRef.current.onMouseMove) {
+          m.off('mousemove', layer, handlersRef.current.onMouseMove);
+          m.on('mousemove', layer, handlersRef.current.onMouseMove);
+        }
+        if (handlersRef.current.onMouseLeave) {
+          m.off('mouseleave', layer, handlersRef.current.onMouseLeave);
+          m.on('mouseleave', layer, handlersRef.current.onMouseLeave);
+        }
+        if (handlersRef.current.onFieldClick) {
+          m.off('click', layer, handlersRef.current.onFieldClick);
+          m.on('click', layer, handlersRef.current.onFieldClick);
+        }
+      }
+    });
   };
 
   const switchColorMode = (mode) => {
+    setActiveColorMode(mode);
     styleSwitchColorModeRef.current = mode;
     if (geojsonRef.current && mapRef.current?.isStyleLoaded()) {
       rehydrateLayers(geojsonRef.current);
@@ -536,7 +595,7 @@ export default function FieldMap({
           <button
             key={key}
             onClick={() => switchMapStyle(key)}
-            className="px-2.5 py-1 text-xs rounded-md font-medium transition-colors shadow bg-white/90 backdrop-blur-sm text-slate-600 hover:text-slate-900 border border-slate-200"
+            className={`px-2.5 py-1 text-xs rounded-md font-medium transition-colors shadow border ${activeStyle === key ? 'bg-blue-600 text-white border-blue-600' : 'bg-white/90 backdrop-blur-sm text-slate-600 hover:text-slate-900 border-slate-200'}`}
           >
             {s.label}
           </button>
@@ -547,17 +606,40 @@ export default function FieldMap({
       <div className="absolute top-12 right-3 z-10 flex gap-1">
         <button
           onClick={() => switchColorMode('crop')}
-          className="px-2.5 py-1 text-xs rounded-md font-medium transition-colors shadow bg-white/90 backdrop-blur-sm text-slate-600 hover:text-slate-900 border border-slate-200"
+          className={`px-2.5 py-1 text-xs rounded-md font-medium transition-colors shadow border ${activeColorMode === 'crop' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white/90 backdrop-blur-sm text-slate-600 hover:text-slate-900 border-slate-200'}`}
         >
           Культуры
         </button>
         <button
           onClick={() => switchColorMode('ndvi')}
-          className="px-2.5 py-1 text-xs rounded-md font-medium transition-colors shadow bg-white/90 backdrop-blur-sm text-slate-600 hover:text-slate-900 border border-slate-200"
+          className={`px-2.5 py-1 text-xs rounded-md font-medium transition-colors shadow border ${activeColorMode === 'ndvi' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white/90 backdrop-blur-sm text-slate-600 hover:text-slate-900 border-slate-200'}`}
         >
           NDVI
         </button>
       </div>
+
+      {/* NDVI legend */}
+      {activeColorMode === 'ndvi' && (
+        <div className="absolute bottom-20 right-3 z-10 bg-white/90 backdrop-blur-sm rounded-lg p-2.5 shadow-lg border border-slate-200 text-xs">
+          <div className="font-medium text-slate-700 mb-1.5 text-center">NDVI</div>
+          <div className="flex flex-col gap-1">
+            {[
+              { color: '#006400', label: '0.80+' },
+              { color: '#228B22', label: '0.65' },
+              { color: '#9ACD32', label: '0.50' },
+              { color: '#FFD700', label: '0.35' },
+              { color: '#FF4500', label: '0.20' },
+              { color: '#8B0000', label: '0.00' },
+              { color: '#4b5563', label: 'Нет' },
+            ].map(({ color, label }) => (
+              <div key={label} className="flex items-center gap-2">
+                <div className="w-4 h-3 rounded-sm" style={{ backgroundColor: color }} />
+                <span className="text-slate-600">{label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Re-center button */}
       <button
