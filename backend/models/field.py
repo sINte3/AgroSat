@@ -35,6 +35,7 @@ class Field(Base):
     enterprise = relationship("Enterprise", back_populates="fields", lazy="raise_on_sql")
     seasons = relationship("CropSeason", back_populates="field", order_by="desc(CropSeason.season_year)", lazy="raise_on_sql")
     ndvi_records = relationship("NDVIRecord", back_populates="field", order_by="desc(NDVIRecord.captured_date)", lazy="raise_on_sql")
+    satellite_index_records = relationship("SatelliteIndexRecord", back_populates="field", order_by="desc(SatelliteIndexRecord.captured_date)", lazy="raise_on_sql")
     alerts = relationship("Alert", back_populates="field", order_by="desc(Alert.triggered_at)", lazy="raise_on_sql")
     scouting_notes = relationship("ScoutingNote", back_populates="field", lazy="raise_on_sql")
 

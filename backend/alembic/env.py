@@ -15,7 +15,7 @@ from database import Base
 from models.enterprise import Enterprise
 from models.crop import CropType
 from models.field import Field, CropSeason
-from models.monitoring import NDVIRecord, Alert, ScoutingNote, User
+from models.monitoring import NDVIRecord, Alert, ScoutingNote, User, SatelliteIndexRecord
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, Text, Boolean, ForeignKey, Date, Enum
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text, Boolean, ForeignKey, Date, Enum, UniqueConstraint, Index
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
@@ -85,6 +85,43 @@ class Alert(Base):
 
     # Relationships
     field = relationship("Field", back_populates="alerts", lazy="raise_on_sql")
+
+
+# ─── SATELLITE INDEX RECORDS (multi-index) ────────────────────────────────────
+
+class SatelliteIndexRecord(Base):
+    """Multi-index satellite vegetation record (NDVI, SAVI, EVI, NDMI, NDRE)."""
+    __tablename__ = "satellite_index_records"
+    __table_args__ = (
+        UniqueConstraint("field_id", "captured_date", "index_code",
+                          name="uq_satellite_index_records_field_date_code"),
+        Index("ix_satellite_index_records_field_code_date",
+              "field_id", "index_code", "captured_date"),
+        Index("ix_satellite_index_records_captured_date", "captured_date"),
+        Index("ix_satellite_index_records_index_code", "index_code"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    field_id = Column(Integer, ForeignKey("fields.id"), nullable=False)
+
+    captured_date = Column(Date, nullable=False)
+    index_code = Column(String(20), nullable=False)           # ndvi, savi, evi, ndmi, ndre
+
+    mean_value = Column(Float, nullable=True)
+    min_value = Column(Float, nullable=True)
+    max_value = Column(Float, nullable=True)
+    std_value = Column(Float, nullable=True)
+    p10_value = Column(Float, nullable=True)
+    p90_value = Column(Float, nullable=True)
+
+    valid_pixels_pct = Column(Float, nullable=True)
+    cloud_cover_pct = Column(Float, nullable=True)
+    satellite = Column(String(50), default="Sentinel-2")
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Relationships
+    field = relationship("Field", back_populates="satellite_index_records", lazy="raise_on_sql")
 
 
 # ─── SCOUTING ────────────────────────────────────────────────────────────────
