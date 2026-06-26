@@ -20,6 +20,8 @@ from services.satellite_indices import (
     get_index_definition,
     normalize_index_code,
     build_multi_index_evalscript,
+    _is_finite_stat,
+    _interval_is_valid_for_index,
     parse_multi_index_stats_response,
     validate_index_quality,
 )
@@ -109,7 +111,7 @@ def test_parse_multi_index_response():
     assert abs(data["std_value"] - 0.0512) < 0.001
     assert abs(data["p10_value"] - 0.2211) < 0.001
     assert abs(data["p90_value"] - 0.6311) < 0.001
-    assert data["valid_pixels_pct"] == 93.8  # 1500/1600
+    assert abs(data["valid_pixels_pct"] - 93.3) < 0.1  # (1500-100)/1500*100 = 93.33...
     assert data["satellite"] == "Sentinel-2"
     assert data["captured_date"] == "2026-06-20"
     print("OK test_parse_multi_index_response")
@@ -175,7 +177,7 @@ def test_parse_multi_index_string_sample_count():
     }
     result = parse_multi_index_stats_response(mock_response, ["ndmi"])
     assert "ndmi" in result, "ndmi should parse even with string counts"
-    assert result["ndmi"]["valid_pixels_pct"] == 93.8, "valid_pixels_pct should be 1500/1600 * 100 = 93.8"
+    assert abs(result["ndmi"]["valid_pixels_pct"] - 93.3) < 0.1, "valid_pixels_pct should be (1500-100)/1500*100 = 93.33..."
     print("OK test_parse_multi_index_string_sample_count")
 
 
@@ -283,6 +285,311 @@ def test_unknown_index_evalscript():
     print("OK test_unknown_index_evalscript")
 
 
+# ─── NaN / interval validity tests (TASK_059C) ──────────────────────────
+
+
+def test_interval_is_valid_for_index():
+    """_interval_is_valid_for_index rejects NaN stats, accepts valid stats."""
+    valid_interval = {
+        "outputs": {
+            "savi": {
+                "bands": {
+                    "B0": {
+                        "stats": {
+                            "sampleCount": 100,
+                            "noDataCount": 25,
+                            "mean": "0.42",
+                            "min": "0.10",
+                            "max": "0.75",
+                            "stDev": "0.05",
+                            "percentiles": {"10.0": "0.20", "90.0": "0.65"},
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ok, reason = _interval_is_valid_for_index(valid_interval, "savi")
+    assert ok, f"valid interval should pass, got: {reason}"
+
+    # Reject noDataCount >= sampleCount
+    bad_nd = {
+        "outputs": {
+            "savi": {
+                "bands": {
+                    "B0": {
+                        "stats": {
+                            "sampleCount": 1,
+                            "noDataCount": 1,
+                            "mean": "NaN",
+                            "min": "NaN",
+                            "max": "NaN",
+                            "stDev": "NaN",
+                            "percentiles": {"10.0": "NaN", "90.0": "NaN"},
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ok, reason = _interval_is_valid_for_index(bad_nd, "savi")
+    assert not ok, "noDataCount>=sampleCount should be rejected"
+    assert "noDataCount" in reason, f"reason should mention noDataCount, got: {reason}"
+
+    # Reject NaN mean
+    nan_mean = {
+        "outputs": {
+            "savi": {
+                "bands": {
+                    "B0": {
+                        "stats": {
+                            "sampleCount": 100,
+                            "noDataCount": 0,
+                            "mean": "NaN",
+                            "min": "0.1",
+                            "max": "0.9",
+                            "stDev": "0.05",
+                            "percentiles": {"10.0": "0.2", "90.0": "0.8"},
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ok, reason = _interval_is_valid_for_index(nan_mean, "savi")
+    assert not ok, "NaN mean should be rejected"
+    print("OK test_interval_is_valid_for_index")
+
+
+def test_test_a_nan_interval_skipped_older_valid_selected():
+    """Latest NaN interval skipped, older valid interval selected."""
+    mock = {
+        "data": [
+            {
+                "interval": {"from": "2026-06-10T00:00:00Z", "to": "2026-06-15T00:00:00Z"},
+                "outputs": {
+                    "savi": {
+                        "bands": {
+                            "B0": {
+                                "stats": {
+                                    "sampleCount": 1200,
+                                    "noDataCount": 80,
+                                    "mean": "0.431",
+                                    "min": "0.112",
+                                    "max": "0.751",
+                                    "stDev": "0.048",
+                                    "percentiles": {"10.0": "0.201", "90.0": "0.661"},
+                                }
+                            }
+                        }
+                    },
+                    "evi": {
+                        "bands": {
+                            "B0": {
+                                "stats": {
+                                    "sampleCount": 1200,
+                                    "noDataCount": 80,
+                                    "mean": "0.312",
+                                    "min": "0.082",
+                                    "max": "0.612",
+                                    "stDev": "0.042",
+                                    "percentiles": {"10.0": "0.161", "90.0": "0.532"},
+                                }
+                            }
+                        }
+                    },
+                },
+            },
+            {
+                "interval": {"from": "2026-06-15T00:00:00Z", "to": "2026-06-20T00:00:00Z"},
+                "outputs": {
+                    "savi": {
+                        "bands": {
+                            "B0": {
+                                "stats": {
+                                    "sampleCount": 1,
+                                    "noDataCount": 1,
+                                    "mean": "NaN",
+                                    "min": "NaN",
+                                    "max": "NaN",
+                                    "stDev": "NaN",
+                                    "percentiles": {"10.0": "NaN", "90.0": "NaN"},
+                                }
+                            }
+                        }
+                    },
+                    "evi": {
+                        "bands": {
+                            "B0": {
+                                "stats": {
+                                    "sampleCount": 1,
+                                    "noDataCount": 1,
+                                    "mean": "NaN",
+                                    "min": "NaN",
+                                    "max": "NaN",
+                                    "stDev": "NaN",
+                                    "percentiles": {"10.0": "NaN", "90.0": "NaN"},
+                                }
+                            }
+                        }
+                    },
+                },
+            },
+        ]
+    }
+    result = parse_multi_index_stats_response(mock, ["savi", "evi"])
+    assert "savi" in result, "savi should be returned from older interval"
+    assert "evi" in result, "evi should be returned from older interval"
+    # Values should be from the OLDER (valid) interval
+    assert abs(result["savi"]["mean_value"] - 0.431) < 0.001, "savi mean should be non-zero from older interval"
+    assert abs(result["evi"]["mean_value"] - 0.312) < 0.001, "evi mean should be non-zero from older interval"
+    assert result["savi"]["captured_date"] == "2026-06-15", "should use older valid interval date"
+    assert result["evi"]["captured_date"] == "2026-06-15", "should use older valid interval date"
+    # Verify zero was NOT produced from NaN
+    assert result["savi"]["mean_value"] != 0.0, "NaN should not become 0.0"
+    assert result["evi"]["mean_value"] != 0.0, "NaN should not become 0.0"
+    # Verify valid_pixels_pct
+    assert abs(result["savi"]["valid_pixels_pct"] - 93.3) < 0.1
+    print("OK test_test_a_nan_interval_skipped_older_valid_selected")
+
+
+def test_test_b_all_intervals_nan_returns_no_fake_record():
+    """All intervals NaN for an index — no fake record returned."""
+    mock = {
+        "data": [
+            {
+                "interval": {"from": "2026-06-10T00:00:00Z", "to": "2026-06-15T00:00:00Z"},
+                "outputs": {
+                    "savi": {
+                        "bands": {
+                            "B0": {
+                                "stats": {
+                                    "sampleCount": 1,
+                                    "noDataCount": 1,
+                                    "mean": "NaN",
+                                    "min": "NaN",
+                                    "max": "NaN",
+                                    "stDev": "NaN",
+                                    "percentiles": {"10.0": "NaN", "90.0": "NaN"},
+                                }
+                            }
+                        }
+                    },
+                },
+            },
+            {
+                "interval": {"from": "2026-06-15T00:00:00Z", "to": "2026-06-20T00:00:00Z"},
+                "outputs": {
+                    "savi": {
+                        "bands": {
+                            "B0": {
+                                "stats": {
+                                    "sampleCount": 1,
+                                    "noDataCount": 1,
+                                    "mean": "NaN",
+                                    "min": "NaN",
+                                    "max": "NaN",
+                                    "stDev": "NaN",
+                                    "percentiles": {"10.0": "NaN", "90.0": "NaN"},
+                                }
+                            }
+                        }
+                    },
+                },
+            },
+        ]
+    }
+    result = parse_multi_index_stats_response(mock, ["savi"])
+    assert "savi" not in result, "NaN-only index should not be returned"
+    assert len(result) == 0, "result dict should be empty for NaN-only data"
+    print("OK test_test_b_all_intervals_nan_returns_no_fake_record")
+
+
+def test_test_c_valid_zero_interval_accepted():
+    """Real zero values accepted, not confused with NaN."""
+    mock = {
+        "data": [
+            {
+                "interval": {"from": "2026-06-10T00:00:00Z", "to": "2026-06-15T00:00:00Z"},
+                "outputs": {
+                    "ndmi": {
+                        "bands": {
+                            "B0": {
+                                "stats": {
+                                    "sampleCount": 500,
+                                    "noDataCount": 0,
+                                    "mean": "0.0",
+                                    "min": "0.0",
+                                    "max": "0.0",
+                                    "stDev": "0.0",
+                                    "percentiles": {"10.0": "0.0", "90.0": "0.0"},
+                                }
+                            }
+                        }
+                    },
+                },
+            }
+        ]
+    }
+    result = parse_multi_index_stats_response(mock, ["ndmi"])
+    assert "ndmi" in result, "ndmi with real zeros should be returned"
+    assert result["ndmi"]["mean_value"] == 0.0, "real zero should stay 0.0"
+    assert result["ndmi"]["min_value"] == 0.0
+    assert result["ndmi"]["max_value"] == 0.0
+    assert result["ndmi"]["std_value"] == 0.0
+    assert result["ndmi"]["p10_value"] == 0.0
+    assert result["ndmi"]["p90_value"] == 0.0
+    assert result["ndmi"]["valid_pixels_pct"] == 100.0, "100% valid pixels"
+    print("OK test_test_c_valid_zero_interval_accepted")
+
+
+def test_test_d_valid_pixels_pct_formula():
+    """valid_pixels_pct uses (sampleCount - noDataCount) / sampleCount * 100."""
+    mock = {
+        "data": [
+            {
+                "interval": {"from": "2026-06-10T00:00:00Z", "to": "2026-06-15T00:00:00Z"},
+                "outputs": {
+                    "ndre": {
+                        "bands": {
+                            "B0": {
+                                "stats": {
+                                    "sampleCount": 100,
+                                    "noDataCount": 25,
+                                    "mean": "0.35",
+                                    "min": "0.10",
+                                    "max": "0.60",
+                                    "stDev": "0.04",
+                                    "percentiles": {"10.0": "0.18", "90.0": "0.52"},
+                                }
+                            }
+                        }
+                    },
+                },
+            }
+        ]
+    }
+    result = parse_multi_index_stats_response(mock, ["ndre"])
+    assert "ndre" in result, "ndre should be returned"
+    assert result["ndre"]["valid_pixels_pct"] == 75.0, \
+        f"expected 75.0, got {result['ndre']['valid_pixels_pct']}"
+    print("OK test_test_d_valid_pixels_pct_formula")
+
+
+def test_is_finite_stat():
+    """_is_finite_stat correctly distinguishes valid from non-finite."""
+    assert _is_finite_stat(0.0) is True
+    assert _is_finite_stat("0.0") is True
+    assert _is_finite_stat(-1.5) is True
+    assert _is_finite_stat(float("nan")) is False
+    assert _is_finite_stat(float("inf")) is False
+    assert _is_finite_stat("NaN") is False
+    assert _is_finite_stat("Infinity") is False
+    assert _is_finite_stat(None) is False
+    assert _is_finite_stat("garbage") is False
+    print("OK test_is_finite_stat")
+
+
 def main():
     tests = [
         test_index_definitions,
@@ -296,6 +603,13 @@ def main():
         test_quality_gate_edge_cases,
         test_normalize_index_code,
         test_unknown_index_evalscript,
+        # NaN / interval validity tests (TASK_059C)
+        test_is_finite_stat,
+        test_interval_is_valid_for_index,
+        test_test_a_nan_interval_skipped_older_valid_selected,
+        test_test_b_all_intervals_nan_returns_no_fake_record,
+        test_test_c_valid_zero_interval_accepted,
+        test_test_d_valid_pixels_pct_formula,
     ]
     failures = 0
     for test in tests:

@@ -38,6 +38,7 @@ from services.satellite_indices import (
     normalize_index_code,
     parse_multi_index_stats_response,
     validate_index_quality,
+    _interval_is_valid_for_index,
 )
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
@@ -242,20 +243,14 @@ def _print_debug_raw(response_data: dict, index_codes: list[str]) -> None:
     for code in index_codes:
         valid_idxs = []
         for i_idx, interval in enumerate(intervals):
-            outputs = interval.get("outputs", {})
-            bands = outputs.get(code, {}).get("bands", {})
-            sc = 0
-            try:
-                sc = int(bands.get("B0", {}).get("stats", {}).get("sampleCount", 0))
-            except (TypeError, ValueError):
-                pass
-            if sc > 0:
+            ok, _ = _interval_is_valid_for_index(interval, code)
+            if ok:
                 valid_idxs.append(i_idx)
         if valid_idxs:
             latest = valid_idxs[-1]
             print(f"    {code}: valid intervals = {valid_idxs}, selected = interval[{latest}]")
         else:
-            print(f"    {code}: NO valid intervals (all sampleCount <= 0 or missing)")
+            print(f"    {code}: NO valid intervals (NaN/noData or missing)")
     print("--- END DEBUG RAW RESPONSE ---")
     print()
 

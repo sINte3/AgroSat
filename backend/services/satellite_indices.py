@@ -177,8 +177,23 @@ function evaluatePixel(sample) {{
 
 # ─── Response Parser ───────────────────────────────────────────────────────────
 
-def safe_float(v, default=0.0):
-    """Convert to float, returning default for None/invalid."""
+def _is_finite_stat(v) -> bool:
+    """Return True if v is a finite (not NaN/Inf) number. Accepts str, float, int, None."""
+    if v is None:
+        return False
+    try:
+        val = float(v)
+        return math.isfinite(val)
+    except (TypeError, ValueError):
+        return False
+
+
+def safe_float(v, default=None):
+    """Convert to float, returning default (None) for None/invalid/NaN/Inf.
+
+    Use this for parsed satellite statistics — a real zero stays 0.0;
+    NaN/Inf/None becomes None.
+    """
     try:
         val = float(v)
         if math.isnan(val) or math.isinf(val):
@@ -190,11 +205,44 @@ def safe_float(v, default=0.0):
 
 def safe_int(v, default=0):
     """Convert to int, returning default for None/invalid."""
-    # Sentinel Hub may return numeric values as strings.
     try:
         return int(float(v))
     except (TypeError, ValueError):
         return default
+
+
+def _interval_is_valid_for_index(interval: dict, code: str) -> tuple[bool, str]:
+    """Check whether an interval has usable stats for the given index code.
+
+    Returns (True, "") if valid, (False, reason) if invalid.
+    """
+    try:
+        stats = interval["outputs"][code]["bands"]["B0"]["stats"]
+    except KeyError:
+        return False, "missing output bands/stats"
+
+    sample_count = safe_int(stats.get("sampleCount", 0))
+    no_data_count = safe_int(stats.get("noDataCount", 0))
+
+    if sample_count <= 0:
+        return False, f"sampleCount={sample_count} <= 0"
+    if no_data_count >= sample_count:
+        return False, f"noDataCount={no_data_count} >= sampleCount={sample_count}"
+
+    # Check that all required numeric stats are present and finite
+    for stat_key in ("mean", "min", "max", "stDev"):
+        if not _is_finite_stat(stats.get(stat_key)):
+            return False, f"stat '{stat_key}' missing or non-finite"
+
+    percentiles = stats.get("percentiles", {})
+    # Sentinel Hub may use "10.0" or "10" as the key
+    for p_key in ("10.0", "10", "90.0", "90"):
+        if p_key in percentiles:
+            if not _is_finite_stat(percentiles[p_key]):
+                return False, f"percentile '{p_key}' non-finite"
+            break  # found a valid key for this percentile
+
+    return True, ""
 
 
 def parse_multi_index_stats_response(
@@ -211,6 +259,9 @@ def parse_multi_index_stats_response(
     Returns:
         Dict keyed by index code, each value a dict with captured_date,
         index_code, mean/min/max/std/p10/p90, valid_pixels_pct, etc.
+
+    Intervals with NaN stats, full noData, or missing outputs are skipped.
+    When multiple valid intervals exist, the latest (chronologically) is chosen.
     """
     codes = [normalize_index_code(c) for c in index_codes]
     results: dict[str, dict] = {}
@@ -226,10 +277,11 @@ def parse_multi_index_stats_response(
         return results
 
     for code in codes:
-        valid_intervals = [
-            i for i in intervals
-            if safe_int(i.get("outputs", {}).get(code, {}).get("bands", {}).get("B0", {}).get("stats", {}).get("sampleCount", 0)) > 0
-        ]
+        valid_intervals = []
+        for i in intervals:
+            ok, reason = _interval_is_valid_for_index(i, code)
+            if ok:
+                valid_intervals.append(i)
 
         if not valid_intervals:
             logger.info(f"No valid intervals for index '{code}'")
@@ -238,22 +290,28 @@ def parse_multi_index_stats_response(
         latest = valid_intervals[-1]
         interval_date = latest["interval"]["to"][:10]
         stats = latest["outputs"][code]["bands"]["B0"]["stats"]
+        percentiles = stats.get("percentiles", {})
 
         sample_count = safe_int(stats.get("sampleCount", 0))
         no_data_count = safe_int(stats.get("noDataCount", 0))
-        total = sample_count + no_data_count
-        valid_pct = (sample_count / total * 100) if total > 0 else 0
-        percentiles = stats.get("percentiles", {})
+
+        # valid_pixels_pct = (sampleCount - noDataCount) / sampleCount * 100
+        # Guaranteed sample_count > 0 and no_data_count < sample_count by validity check.
+        valid_pct = ((sample_count - no_data_count) / sample_count) * 100
+
+        # Percentile keys: Sentinel Hub may use "10.0" or "10"; same for "90.0"/"90"
+        p10_val = safe_float(percentiles.get("10.0") or percentiles.get("10"))
+        p90_val = safe_float(percentiles.get("90.0") or percentiles.get("90"))
 
         results[code] = {
             "captured_date": interval_date,
             "index_code": code,
-            "mean_value": round(safe_float(stats.get("mean", 0)), 4),
-            "min_value": round(safe_float(stats.get("min", 0)), 4),
-            "max_value": round(safe_float(stats.get("max", 0)), 4),
-            "std_value": round(safe_float(stats.get("stDev", 0)), 4),
-            "p10_value": round(safe_float(percentiles.get("10.0", 0)), 4),
-            "p90_value": round(safe_float(percentiles.get("90.0", 0)), 4),
+            "mean_value": round(safe_float(stats.get("mean")), 4),
+            "min_value": round(safe_float(stats.get("min")), 4),
+            "max_value": round(safe_float(stats.get("max")), 4),
+            "std_value": round(safe_float(stats.get("stDev")), 4),
+            "p10_value": round(p10_val, 4) if p10_val is not None else None,
+            "p90_value": round(p90_val, 4) if p90_val is not None else None,
             "valid_pixels_pct": round(valid_pct, 1),
             "cloud_cover_pct": None,
             "satellite": "Sentinel-2",
