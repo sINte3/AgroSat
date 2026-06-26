@@ -16,6 +16,13 @@ import time
 from datetime import date, timedelta
 from typing import Optional
 
+# Safe stdout/stderr for Windows CMD and redirected logs
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 import httpx
 from shapely import wkt
 from shapely.geometry import mapping
@@ -40,7 +47,7 @@ STATISTICAL_API_URL = "https://services.sentinel-hub.com/api/v1/statistics"
 TOKEN_URL = "https://services.sentinel-hub.com/auth/realms/main/protocol/openid-connect/token"
 
 
-# ── Sentinel Hub OAuth2 (local helper, does not modify satellite.py) ──────────
+# -- Sentinel Hub OAuth2 (local helper, does not modify satellite.py) --
 
 
 def _get_access_token(client_id: str, client_secret: str) -> str:
@@ -64,7 +71,7 @@ def _get_access_token(client_id: str, client_secret: str) -> str:
     return data["access_token"]
 
 
-# ── CLI ───────────────────────────────────────────────────────────────────────
+# -- CLI --
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
@@ -88,7 +95,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-# ── Payload builder (testable helper) ────────────────────────────────────────
+# -- Payload builder (testable helper) --
 
 
 def build_statistical_payload(
@@ -145,7 +152,7 @@ def build_statistical_payload(
     }
 
 
-# ── Self-test ──────────────────────────────────────────────────────────────────
+# -- Self-test --
 
 
 def _mock_multi_index_response() -> dict:
@@ -224,6 +231,25 @@ def _mock_multi_index_response() -> dict:
 def run_self_test() -> None:
     """Offline validation: no DB, no network, no credentials."""
     errors = []
+
+    # --- Static check: no box-drawing Unicode characters in this file ---
+    # Represented as code points so the source stays ASCII and doesn't trip on itself.
+    _box_drawing = {0x2500, 0x2501, 0x2502, 0x2503, 0x250C, 0x2510, 0x2514, 0x2518,
+                    0x251C, 0x2524, 0x252C, 0x2534, 0x253C, 0x2550, 0x2551, 0x2554,
+                    0x2557, 0x255A, 0x255D}
+    try:
+        with open(__file__, "r", encoding="utf-8") as _fh:
+            for _lineno, _line in enumerate(_fh, 1):
+                for _ch in _line:
+                    if ord(_ch) in _box_drawing:
+                        errors.append(
+                            f"Box-drawing character U+{ord(_ch):04X} found at line {_lineno} "
+                            f"-- use ASCII only for Windows portability"
+                        )
+    except Exception as e:
+        errors.append(f"Static scan failed: {e}")
+    if errors:
+        _fail_self_test(errors)
     codes = ["savi", "evi", "ndmi", "ndre"]
 
     # --- Evalscript ---
@@ -357,7 +383,7 @@ def _fail_self_test(errors: list[str]) -> None:
     sys.exit(1)
 
 
-# ── Main dry-run ──────────────────────────────────────────────────────────────
+# -- Main dry-run --
 
 
 def dry_run(args: argparse.Namespace) -> None:
@@ -489,7 +515,7 @@ def dry_run(args: argparse.Namespace) -> None:
         sys.exit(0)
 
     for code in index_codes:
-        print(f"  ── {code.upper()} ──")
+        print(f"  -- {code.upper()} --")
         if code not in parsed:
             print(f"    No data returned")
             continue
@@ -519,7 +545,7 @@ def dry_run(args: argparse.Namespace) -> None:
     print(f"  DRY-RUN RESULT: {'DATA AVAILABLE' if any(code in parsed for code in index_codes) else 'NO DATA'}")
 
 
-# ── Entry point ────────────────────────────────────────────────────────────────
+# -- Entry point --
 
 
 def main() -> None:
