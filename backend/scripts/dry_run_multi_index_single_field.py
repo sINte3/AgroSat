@@ -92,6 +92,15 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument("--resolution", type=int, default=20, help="Resolution in meters (default: 20)")
     parser.add_argument("--max-cloud-coverage", type=int, default=80, help="Max cloud coverage %% (default: 80)")
     parser.add_argument("--self-test", action="store_true", help="Run offline self-test (no DB, no network)")
+    parser.add_argument("--debug-raw", action="store_true", help="Print raw API response diagnostic section")
+    parser.add_argument(
+        "--dump-raw-json", type=str, default=None,
+        help="Write raw API response JSON to PATH (no credentials)",
+    )
+    parser.add_argument(
+        "--print-payload-summary", action="store_true",
+        help="Print sanitized request payload summary",
+    )
     return parser.parse_args(argv)
 
 
@@ -150,6 +159,105 @@ def build_statistical_payload(
             for code in index_codes
         },
     }
+
+
+# -- Diagnostic helpers --
+
+
+def _sanitize_geometry_type(geom: dict) -> str:
+    """Return geometry type string without exposing coordinates."""
+    return geom.get("type", "unknown")
+
+
+def _print_payload_summary(payload: dict, index_codes: list[str]) -> None:
+    """Print a sanitized summary of the request payload (no credentials, no full coords)."""
+    print()
+    print("--- PAYLOAD SUMMARY ---")
+    data_list = payload.get("input", {}).get("data", [])
+    if data_list:
+        print(f"  collection:       {data_list[0].get('type', 'N/A')}")
+        df = data_list[0].get("dataFilter", {})
+        tr = df.get("timeRange", {})
+        print(f"  date_from:        {tr.get('from', 'N/A')}")
+        print(f"  date_to:          {tr.get('to', 'N/A')}")
+        print(f"  maxCloudCoverage: {df.get('maxCloudCoverage', 'N/A')}")
+    agg = payload.get("aggregation", {})
+    print(f"  aggregation_int:  {agg.get('aggregationInterval', {}).get('of', 'N/A')}")
+    print(f"  resx:             {agg.get('resx', 'N/A')}")
+    print(f"  resy:             {agg.get('resy', 'N/A')}")
+    bounds = payload.get("input", {}).get("bounds", {})
+    print(f"  geometry_type:    {_sanitize_geometry_type(bounds.get('geometry', {}))}")
+    calc = payload.get("calculations", {})
+    print(f"  requested_indices:{', '.join(sorted(calc.keys()))}")
+    for code in index_codes:
+        if code in calc:
+            stats = calc[code].get("statistics", {})
+            default_stats = stats.get("default", {})
+            pcts = default_stats.get("percentiles", {})
+            print(f"    {code}: percentiles k={pcts.get('k', [])}")
+    evalscript = agg.get("evalscript", "")
+    print(f"  evalscript_len:   {len(evalscript)} chars")
+    print(f"  evalscript_hash:  {hash(evalscript) % (10**8):08x}")
+    print("--- END PAYLOAD SUMMARY ---")
+    print()
+
+
+def _print_debug_raw(response_data: dict, index_codes: list[str]) -> None:
+    """Print a detailed diagnostic breakdown of the raw API response."""
+    print()
+    print("--- DEBUG RAW RESPONSE ---")
+    print(f"  top-level JSON keys: {list(response_data.keys())}")
+    intervals = response_data.get("data", [])
+    print(f"  intervals count:     {len(intervals)}")
+    for i_idx, interval in enumerate(intervals):
+        i_from = interval.get("interval", {}).get("from", "N/A")
+        i_to = interval.get("interval", {}).get("to", "N/A")
+        print(f"  interval[{i_idx}]: {i_from} -> {i_to}")
+        outputs = interval.get("outputs", {})
+        print(f"    output keys: {list(outputs.keys())}")
+        for code in index_codes:
+            if code not in outputs:
+                print(f"    [{code}]: MISSING in this interval")
+                continue
+            bands = outputs[code].get("bands", {})
+            print(f"    [{code}] bands keys: {list(bands.keys())}")
+            band = bands.get("B0", {})
+            stats = band.get("stats", {})
+            if not stats:
+                print(f"    [{code}] stats: EMPTY or missing")
+                continue
+            print(f"    [{code}] stats keys: {list(stats.keys())}")
+            print(f"      sampleCount:  {stats.get('sampleCount', 'N/A')}")
+            print(f"      noDataCount:  {stats.get('noDataCount', 'N/A')}")
+            print(f"      mean:         {stats.get('mean', 'N/A')}")
+            print(f"      min:          {stats.get('min', 'N/A')}")
+            print(f"      max:          {stats.get('max', 'N/A')}")
+            print(f"      stDev:        {stats.get('stDev', 'N/A')}")
+            pcts = stats.get("percentiles", {})
+            if pcts:
+                print(f"      percentiles:  {pcts}")
+    # Show which interval the parser would select for each index
+    print()
+    print("  Parser selection per index (latest valid interval):")
+    for code in index_codes:
+        valid_idxs = []
+        for i_idx, interval in enumerate(intervals):
+            outputs = interval.get("outputs", {})
+            bands = outputs.get(code, {}).get("bands", {})
+            sc = 0
+            try:
+                sc = int(bands.get("B0", {}).get("stats", {}).get("sampleCount", 0))
+            except (TypeError, ValueError):
+                pass
+            if sc > 0:
+                valid_idxs.append(i_idx)
+        if valid_idxs:
+            latest = valid_idxs[-1]
+            print(f"    {code}: valid intervals = {valid_idxs}, selected = interval[{latest}]")
+        else:
+            print(f"    {code}: NO valid intervals (all sampleCount <= 0 or missing)")
+    print("--- END DEBUG RAW RESPONSE ---")
+    print()
 
 
 # -- Self-test --
@@ -372,6 +480,70 @@ def run_self_test() -> None:
     if errors:
         _fail_self_test(errors)
 
+    # --- Diagnostic helpers smoke-test ---
+    try:
+        _print_payload_summary(payload, codes)
+    except Exception as e:
+        errors.append(f"_print_payload_summary crashed: {e}")
+
+    try:
+        _print_debug_raw(mock, codes)
+    except Exception as e:
+        errors.append(f"_print_debug_raw crashed: {e}")
+
+    # --- Mock a zero-value response for debug-raw coverage ---
+    zero_mock = {
+        "data": [
+            {
+                "interval": {"from": "2026-06-10T00:00:00Z", "to": "2026-06-15T00:00:00Z"},
+                "outputs": {
+                    "savi": {
+                        "bands": {
+                            "B0": {
+                                "stats": {
+                                    "sampleCount": 500,
+                                    "noDataCount": 0,
+                                    "mean": "0.0",
+                                    "min": "0.0",
+                                    "max": "0.0",
+                                    "stDev": "0.0",
+                                    "percentiles": {"10.0": "0.0", "90.0": "0.0"},
+                                }
+                            }
+                        }
+                    },
+                },
+            },
+            {
+                "interval": {"from": "2026-06-05T00:00:00Z", "to": "2026-06-10T00:00:00Z"},
+                "outputs": {
+                    "savi": {
+                        "bands": {
+                            "B0": {
+                                "stats": {
+                                    "sampleCount": 800,
+                                    "noDataCount": 0,
+                                    "mean": "0.45",
+                                    "min": "0.10",
+                                    "max": "0.80",
+                                    "stDev": "0.05",
+                                    "percentiles": {"10.0": "0.20", "90.0": "0.70"},
+                                }
+                            }
+                        }
+                    },
+                },
+            },
+        ]
+    }
+    try:
+        _print_debug_raw(zero_mock, ["savi", "evi"])
+    except Exception as e:
+        errors.append(f"_print_debug_raw(zero_mock) crashed: {e}")
+
+    if errors:
+        _fail_self_test(errors)
+
     print("SELF TEST PASSED")
     sys.exit(0)
 
@@ -485,6 +657,24 @@ def dry_run(args: argparse.Namespace) -> None:
     except httpx.RequestError as e:
         print(f"ERROR: Sentinel Hub request failed: {e}")
         sys.exit(1)
+
+    # --- Diagnostic mode: payload summary ---
+    if args.print_payload_summary:
+        _print_payload_summary(payload, index_codes)
+
+    # --- Diagnostic mode: raw JSON dump ---
+    if args.dump_raw_json:
+        try:
+            dump_path = args.dump_raw_json
+            with open(dump_path, "w", encoding="utf-8") as fh:
+                json.dump(response_data, fh, indent=2, ensure_ascii=False)
+            print(f"  Raw JSON dumped to: {dump_path}")
+        except Exception as e:
+            print(f"  WARNING: Failed to dump raw JSON: {e}")
+
+    # --- Diagnostic mode: debug-raw ---
+    if args.debug_raw:
+        _print_debug_raw(response_data, index_codes)
 
     # --- Parse ---
     parsed = parse_multi_index_stats_response(response_data, index_codes)
