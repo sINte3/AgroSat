@@ -88,7 +88,118 @@ def _cloud_filter(include_cloudy: bool) -> tuple[str, str]:
 
 # ─── Endpoints ───────────────────────────────────────────────────────────────
 
-@router.get("/{field_id}/latest")
+_LATEST_OK_EXAMPLE = {
+    "field_id": 4,
+    "field_name": "1361 Гарден галла 2026",
+    "index_code": "savi",
+    "record": {
+        "id": 1,
+        "field_id": 4,
+        "captured_date": "2026-06-22",
+        "index_code": "savi",
+        "mean_value": 0.3229,
+        "min_value": 0.3229,
+        "max_value": 0.3229,
+        "std_value": 0.0,
+        "p10_value": 0.3229,
+        "p90_value": 0.3229,
+        "valid_pixels_pct": 100.0,
+        "cloud_cover_pct": None,
+        "satellite": "Sentinel-2",
+        "created_at": "2026-06-27T04:50:27.439756",
+    },
+}
+
+_LATEST_NODATA_EXAMPLE = {
+    "field_id": 4,
+    "field_name": "1361 Гарден галла 2026",
+    "index_code": "savi",
+    "record": None,
+}
+
+_HISTORY_OK_EXAMPLE = {
+    "field_id": 4,
+    "field_name": "1361 Гарден галла 2026",
+    "index_code": "savi",
+    "days": 30,
+    "include_cloudy": False,
+    "records": [
+        {
+            "id": 1,
+            "field_id": 4,
+            "captured_date": "2026-06-22",
+            "index_code": "savi",
+            "mean_value": 0.3229,
+            "min_value": 0.3229,
+            "max_value": 0.3229,
+            "std_value": 0.0,
+            "p10_value": 0.3229,
+            "p90_value": 0.3229,
+            "valid_pixels_pct": 100.0,
+            "cloud_cover_pct": None,
+            "satellite": "Sentinel-2",
+            "created_at": "2026-06-27T04:50:27.439756",
+        },
+    ],
+    "count": 1,
+}
+
+_HISTORY_EMPTY_EXAMPLE = {
+    "field_id": 4,
+    "field_name": "1361 Гарден галла 2026",
+    "index_code": "savi",
+    "days": 30,
+    "include_cloudy": False,
+    "records": [],
+    "count": 0,
+}
+
+_NOT_FOUND_EXAMPLE = {"detail": "Field not found"}
+
+_UNSUPPORTED_CODE_EXAMPLE = {
+    "detail": "Unsupported index_code 'ndvi'. Supported: evi, ndmi, ndre, savi",
+}
+
+
+@router.get(
+    "/{field_id}/latest",
+    summary="Latest satellite index record for a field",
+    description=(
+        "Returns the most recent satellite index record for a given field and "
+        "index code. The record is nested under a `record` key. "
+        "If no matching record exists, `record` is `null`. "
+        "Supported index codes: savi, evi, ndmi, ndre."
+    ),
+    responses={
+        200: {
+            "description": "Latest record (record may be null if no data)",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "Has data": {"value": _LATEST_OK_EXAMPLE},
+                        "No data": {"value": _LATEST_NODATA_EXAMPLE},
+                    },
+                },
+            },
+        },
+        404: {
+            "description": "Field not found",
+            "content": {
+                "application/json": {
+                    "example": _NOT_FOUND_EXAMPLE,
+                },
+            },
+        },
+        422: {
+            "description": "Unsupported index_code",
+            "content": {
+                "application/json": {
+                    "example": _UNSUPPORTED_CODE_EXAMPLE,
+                },
+            },
+        },
+    },
+)
 async def get_latest(
     field_id: int,
     index_code: str,
@@ -122,7 +233,45 @@ async def get_latest(
     return result
 
 
-@router.get("/{field_id}/history")
+@router.get(
+    "/{field_id}/history",
+    summary="Historical satellite index records for a field",
+    description=(
+        "Returns satellite index records over a lookback window for a given "
+        "field and index code. Records are in the `records` list; `count` is "
+        "the number of records returned. "
+        "Supported index codes: savi, evi, ndmi, ndre."
+    ),
+    responses={
+        200: {
+            "description": "Historical records (records may be empty)",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "Has data": {"value": _HISTORY_OK_EXAMPLE},
+                        "Empty history": {"value": _HISTORY_EMPTY_EXAMPLE},
+                    },
+                },
+            },
+        },
+        404: {
+            "description": "Field not found",
+            "content": {
+                "application/json": {
+                    "example": _NOT_FOUND_EXAMPLE,
+                },
+            },
+        },
+        422: {
+            "description": "Unsupported index_code",
+            "content": {
+                "application/json": {
+                    "example": _UNSUPPORTED_CODE_EXAMPLE,
+                },
+            },
+        },
+    },
+)
 async def get_history(
     field_id: int,
     index_code: str,
