@@ -3,7 +3,7 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, ReferenceLine
 } from 'recharts';
-import apiClient from '../../api/client';
+import apiClient, { getSatelliteIndexLatest, getSatelliteIndexHistory } from '../../api/client';
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 const getNdviColor = (v) => {
@@ -99,17 +99,17 @@ export default function FieldDetailPanel({ field, onBack, onNavigate }) {
     setMultiError(null);
 
     Promise.allSettled([
-      apiClient.get(`/api/satellite-indices/${field.id}/latest?index_code=${code}&include_cloudy=false`),
-      apiClient.get(`/api/satellite-indices/${field.id}/history?index_code=${code}&days=${dayRange}&include_cloudy=false`),
+      getSatelliteIndexLatest(field.id, code, { includeCloudy: false }),
+      getSatelliteIndexHistory(field.id, code, { days: dayRange, includeCloudy: false }),
     ]).then(([latestRes, histRes]) => {
       if (cancelled) return;
       if (latestRes.status === 'fulfilled') {
-        setMultiLatest(latestRes.value.data?.record ?? null);
+        setMultiLatest(latestRes.value?.record ?? null);
       } else {
         setMultiError('Ошибка загрузки последних данных');
       }
       if (histRes.status === 'fulfilled') {
-        const records = histRes.value.data?.records || [];
+        const records = histRes.value?.records || [];
         setMultiHistory(
           records
             .map(r => ({
