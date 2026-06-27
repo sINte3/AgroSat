@@ -49,7 +49,7 @@ export default function FieldDetail({ fieldId, onBack }) {
   }, []);
 
   useEffect(() => {
-    if (fieldId && activeTab === 'ndvi') {
+    if (fieldId && activeTab === 'indices') {
       fetchMultiIndex(typeof fieldId === 'string' ? parseInt(fieldId) : fieldId, activeIndex);
     }
   }, [fieldId, activeTab, activeIndex, fetchMultiIndex]);
@@ -113,7 +113,7 @@ export default function FieldDetail({ fieldId, onBack }) {
 
   const tabs = [
     { key: 'info', label: 'Инфо' },
-    { key: 'ndvi', label: 'Индексы' },
+    { key: 'indices', label: 'Индексы' },
     { key: 'weather', label: 'Погода' },
     { key: 'alerts', label: `Алерты (${alerts.length})` },
   ];
@@ -221,7 +221,7 @@ export default function FieldDetail({ fieldId, onBack }) {
           </div>
         )}
 
-        {activeTab === 'ndvi' && (
+        {activeTab === 'indices' && (
           <div style={{ padding: '12px 0' }} className="space-y-4">
             {/* Sub-selector: NDVI + multi-indices */}
             <div className="flex flex-wrap gap-2">
