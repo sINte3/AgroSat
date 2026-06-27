@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { getField, getFieldAlerts, acknowledgeAlert } from '../../api/client';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { getField, getFieldAlerts, acknowledgeAlert, getSatelliteIndexLatest, getSatelliteIndexHistory } from '../../api/client';
 import NDVIChart from './NDVIChart';
 import WeatherWidget from './WeatherWidget';
 
@@ -9,6 +9,50 @@ export default function FieldDetail({ fieldId, onBack }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [activeTab, setActiveTab] = useState('info');
+
+  // Multi-index state (SAVI, EVI, NDMI, NDRE)
+  const MULTI_INDICES = ['savi', 'evi', 'ndmi', 'ndre'];
+  const INDEX_LABELS = { savi: 'SAVI', evi: 'EVI', ndmi: 'NDMI', ndre: 'NDRE' };
+  const [activeIndex, setActiveIndex] = useState('ndvi');
+  const [latestIndex, setLatestIndex] = useState(null);
+  const [indexHistory, setIndexHistory] = useState([]);
+  const [indexLoading, setIndexLoading] = useState(false);
+  const [indexError, setIndexError] = useState(null);
+  const indexMounted = useRef(true);
+
+  const fetchMultiIndex = useCallback(async (fid, code) => {
+    if (!fid || code === 'ndvi') { setLatestIndex(null); setIndexHistory([]); return; }
+    setIndexLoading(true);
+    setIndexError(null);
+    try {
+      const [latestRes, historyRes] = await Promise.all([
+        getSatelliteIndexLatest(fid, code),
+        getSatelliteIndexHistory(fid, code, { days: 30 }),
+      ]);
+      if (!indexMounted.current) return;
+      setLatestIndex(latestRes);
+      setIndexHistory(Array.isArray(historyRes?.records) ? historyRes.records : []);
+    } catch (err) {
+      if (!indexMounted.current) return;
+      setIndexError('Ошибка загрузки индекса');
+      setLatestIndex(null);
+      setIndexHistory([]);
+      console.error(err);
+    } finally {
+      if (indexMounted.current) setIndexLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    indexMounted.current = true;
+    return () => { indexMounted.current = false; };
+  }, []);
+
+  useEffect(() => {
+    if (fieldId && activeTab === 'ndvi') {
+      fetchMultiIndex(typeof fieldId === 'string' ? parseInt(fieldId) : fieldId, activeIndex);
+    }
+  }, [fieldId, activeTab, activeIndex, fetchMultiIndex]);
 
   useEffect(() => {
     if (fieldId) loadField();
@@ -69,7 +113,7 @@ export default function FieldDetail({ fieldId, onBack }) {
 
   const tabs = [
     { key: 'info', label: 'Инфо' },
-    { key: 'ndvi', label: 'NDVI' },
+    { key: 'ndvi', label: 'Индексы' },
     { key: 'weather', label: 'Погода' },
     { key: 'alerts', label: `Алерты (${alerts.length})` },
   ];
@@ -178,8 +222,119 @@ export default function FieldDetail({ fieldId, onBack }) {
         )}
 
         {activeTab === 'ndvi' && (
-          <div style={{ padding: '12px 0' }}>
-            <NDVIChart fieldId={typeof fieldId === 'string' ? parseInt(fieldId) : fieldId} />
+          <div style={{ padding: '12px 0' }} className="space-y-4">
+            {/* Sub-selector: NDVI + multi-indices */}
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={() => setActiveIndex('ndvi')}
+                className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+                  activeIndex === 'ndvi'
+                    ? 'bg-agro-accent text-white'
+                    : 'bg-agro-surface2 text-agro-muted hover:text-agro-text'
+                }`}
+              >
+                NDVI
+              </button>
+              {MULTI_INDICES.map(code => (
+                <button
+                  key={code}
+                  onClick={() => setActiveIndex(code)}
+                  className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+                    activeIndex === code
+                      ? 'bg-agro-accent text-white'
+                      : 'bg-agro-surface2 text-agro-muted hover:text-agro-text'
+                  }`}
+                >
+                  {INDEX_LABELS[code]}
+                </button>
+              ))}
+            </div>
+
+            {activeIndex === 'ndvi' ? (
+              <NDVIChart fieldId={typeof fieldId === 'string' ? parseInt(fieldId) : fieldId} />
+            ) : (
+              <div className="space-y-3">
+                {/* Latest value card */}
+                {indexLoading && (
+                  <div className="card animate-pulse h-20 bg-agro-surface2 rounded" />
+                )}
+                {!indexLoading && indexError && (
+                  <div className="card text-sm text-red-400">{indexError}</div>
+                )}
+                {!indexLoading && !indexError && latestIndex && latestIndex.record && (
+                  <div className="card flex items-center justify-between">
+                    <div>
+                      <p className="text-xs text-agro-muted">
+                        Последний {INDEX_LABELS[latestIndex.index_code]} ({latestIndex.index_code.toUpperCase()})
+                      </p>
+                      <p className="text-2xl font-bold text-agro-accent">
+                        {latestIndex.record.mean_value?.toFixed(4) ?? '—'}
+                      </p>
+                      <p className="text-xs text-agro-muted">{latestIndex.record.captured_date || '—'}</p>
+                    </div>
+                    <div className="text-right text-xs text-agro-muted space-y-1">
+                      {latestIndex.record.valid_pixels_pct != null && (
+                        <p>Пиксели: {latestIndex.record.valid_pixels_pct.toFixed(1)}%</p>
+                      )}
+                      {latestIndex.record.cloud_cover_pct != null && (
+                        <p>Облачность: {latestIndex.record.cloud_cover_pct.toFixed(1)}%</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {!indexLoading && !indexError && (!latestIndex || !latestIndex.record) && (
+                  <div className="card text-sm text-agro-muted text-center py-6">
+                    Нет данных для {INDEX_LABELS[activeIndex]}
+                  </div>
+                )}
+
+                {/* History table */}
+                {!indexLoading && indexHistory.length > 0 && (
+                  <div className="card">
+                    <h4 className="text-xs font-semibold text-agro-muted uppercase tracking-wide mb-2">
+                      История {INDEX_LABELS[activeIndex]} ({indexHistory.length} записей)
+                    </h4>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs text-left">
+                        <thead>
+                          <tr className="border-b border-agro-surface2">
+                            <th className="py-1.5 pr-3 text-agro-muted">Дата</th>
+                            <th className="py-1.5 pr-3 text-agro-muted">Mean</th>
+                            <th className="py-1.5 pr-3 text-agro-muted">Min</th>
+                            <th className="py-1.5 pr-3 text-agro-muted">Max</th>
+                            <th className="py-1.5 text-agro-muted">Облачность</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {[...indexHistory].reverse().map((r, i) => (
+                            <tr key={r.id || i} className="border-b border-agro-surface2/50">
+                              <td className="py-1.5 pr-3 text-agro-text">{r.captured_date}</td>
+                              <td className="py-1.5 pr-3 text-agro-accent font-medium">
+                                {r.mean_value?.toFixed(4) ?? '—'}
+                              </td>
+                              <td className="py-1.5 pr-3 text-agro-muted">
+                                {r.min_value?.toFixed(4) ?? '—'}
+                              </td>
+                              <td className="py-1.5 pr-3 text-agro-muted">
+                                {r.max_value?.toFixed(4) ?? '—'}
+                              </td>
+                              <td className="py-1.5 text-agro-muted">
+                                {r.cloud_cover_pct != null ? `${r.cloud_cover_pct.toFixed(1)}%` : '—'}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+                {!indexLoading && !indexError && activeIndex !== 'ndvi' && indexHistory.length === 0 && (
+                  <div className="card text-sm text-agro-muted text-center py-6">
+                    Нет исторических данных для {INDEX_LABELS[activeIndex]}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 

@@ -202,6 +202,23 @@ export async function getLocationWeather(lat, lon) {
   return data;
 }
 
+// Satellite Indices (SAVI, EVI, NDMI, NDRE)
+// Read-only. Uses /api/satellite-indices/* (not /api/ndvi/*).
+
+export async function getSatelliteIndexLatest(fieldId, indexCode, options = {}) {
+  const { data } = await client.get(`satellite-indices/${fieldId}/latest`, {
+    params: { index_code: indexCode, include_cloudy: options.includeCloudy ?? false },
+  });
+  return data;
+}
+
+export async function getSatelliteIndexHistory(fieldId, indexCode, options = {}) {
+  const { data } = await client.get(`satellite-indices/${fieldId}/history`, {
+    params: { index_code: indexCode, days: options.days ?? 30, include_cloudy: options.includeCloudy ?? false },
+  });
+  return data;
+}
+
 // ─── Auth ────────────────────────────────────────────────────────────────────
 
 export async function loginWithPassword(email, password) {
