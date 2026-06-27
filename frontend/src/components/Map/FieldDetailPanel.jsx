@@ -36,7 +36,20 @@ export default function FieldDetailPanel({ field, onBack, onNavigate }) {
   const [weather, setWeather] = useState(null);
   const [loading, setLoading] = useState(true);
   const [dayRange, setDayRange] = useState(90);
+  const [activeIndex, setActiveIndex] = useState('NDVI');
+  const [multiLatest, setMultiLatest] = useState(null);
+  const [multiHistory, setMultiHistory] = useState([]);
+  const [multiLoading, setMultiLoading] = useState(false);
+  const [multiError, setMultiError] = useState(null);
 
+  const INDEX_CODES = ['NDVI', 'SAVI', 'EVI', 'NDMI', 'NDRE'];
+
+  // Reset active index when field changes
+  useEffect(() => {
+    setActiveIndex('NDVI');
+  }, [field?.id]);
+
+  // Fetch NDVI + alerts + weather (always runs)
   useEffect(() => {
     if (!field?.id) return;
     setLoading(true);
@@ -70,6 +83,49 @@ export default function FieldDetailPanel({ field, onBack, onNavigate }) {
       setLoading(false);
     });
   }, [field?.id, dayRange]);
+
+  // Fetch multi-index data when a non-NDVI index is active
+  useEffect(() => {
+    if (!field?.id || activeIndex === 'NDVI') {
+      setMultiLatest(null);
+      setMultiHistory([]);
+      setMultiError(null);
+      setMultiLoading(false);
+      return;
+    }
+    let cancelled = false;
+    const code = activeIndex.toLowerCase();
+    setMultiLoading(true);
+    setMultiError(null);
+
+    Promise.allSettled([
+      apiClient.get(`/api/satellite-indices/${field.id}/latest?index_code=${code}&include_cloudy=false`),
+      apiClient.get(`/api/satellite-indices/${field.id}/history?index_code=${code}&days=${dayRange}&include_cloudy=false`),
+    ]).then(([latestRes, histRes]) => {
+      if (cancelled) return;
+      if (latestRes.status === 'fulfilled') {
+        setMultiLatest(latestRes.value.data?.record ?? null);
+      } else {
+        setMultiError('Ошибка загрузки последних данных');
+      }
+      if (histRes.status === 'fulfilled') {
+        const records = histRes.value.data?.records || [];
+        setMultiHistory(
+          records
+            .map(r => ({
+              date: r.captured_date,
+              value: r.mean_value,
+              min: r.min_value,
+              max: r.max_value,
+              cloud: r.cloud_cover_pct,
+            }))
+            .sort((a, b) => a.date.localeCompare(b.date))
+        );
+      }
+      setMultiLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [field?.id, activeIndex, dayRange]);
 
   if (!field) return null;
 
@@ -132,12 +188,25 @@ export default function FieldDetailPanel({ field, onBack, onNavigate }) {
           </div>
         </div>
 
-        {/* ── NDVI History Chart ──────────────────────────────────── */}
+        {/* -- Multi-Index History ------------------------------------- */}
         <div className="p-3 border-b border-gray-100">
+          {/* Index selector */}
           <div className="flex items-center justify-between mb-2">
-            <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wide">
-              История NDVI
-            </h4>
+            <div className="flex gap-1 flex-wrap">
+              {INDEX_CODES.map(code => (
+                <button
+                  key={code}
+                  onClick={() => setActiveIndex(code)}
+                  className={`text-xs px-2 py-0.5 rounded font-medium ${
+                    activeIndex === code
+                      ? 'bg-green-600 text-white'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  }`}
+                >
+                  {code}
+                </button>
+              ))}
+            </div>
             <div className="flex gap-1">
               {[30, 60, 90].map(d => (
                 <button
@@ -155,57 +224,154 @@ export default function FieldDetailPanel({ field, onBack, onNavigate }) {
             </div>
           </div>
 
-          {loading ? (
-            <div className="h-32 flex items-center justify-center text-xs text-gray-400">
-              Загрузка графика...
-            </div>
-          ) : ndviHistory.length === 0 ? (
-            <div className="h-32 flex items-center justify-center text-xs text-gray-400">
-              Нет данных за период
-            </div>
+          {activeIndex === 'NDVI' ? (
+            /* NDVI — existing chart */
+            loading ? (
+              <div className="h-32 flex items-center justify-center text-xs text-gray-400">
+                Загрузка графика...
+              </div>
+            ) : ndviHistory.length === 0 ? (
+              <div className="h-32 flex items-center justify-center text-xs text-gray-400">
+                Нет данных за период
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height={140}>
+                <LineChart data={ndviHistory} margin={{ top: 5, right: 5, bottom: 5, left: -15 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+                  <XAxis
+                    dataKey="date"
+                    tick={{ fontSize: 9, fill: '#9ca3af' }}
+                    tickFormatter={d => {
+                      const parts = d.split('-');
+                      return `${parts[2]}/${parts[1]}`;
+                    }}
+                    interval="preserveStartEnd"
+                  />
+                  <YAxis
+                    domain={[0, 1]}
+                    tick={{ fontSize: 9, fill: '#9ca3af' }}
+                    tickCount={5}
+                  />
+                  <Tooltip
+                    contentStyle={{
+                      fontSize: 11,
+                      borderRadius: 8,
+                      border: '1px solid #e5e7eb',
+                      boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
+                    }}
+                    formatter={(value, name) => {
+                      if (name === 'ndvi') return [value?.toFixed(4), 'NDVI'];
+                      return [value, name];
+                    }}
+                    labelFormatter={d => `Дата: ${d}`}
+                  />
+                  <ReferenceLine y={0.2} stroke="#f97316" strokeDasharray="3 3" strokeOpacity={0.5} />
+                  <ReferenceLine y={0.5} stroke="#84cc16" strokeDasharray="3 3" strokeOpacity={0.5} />
+                  <Line
+                    type="monotone"
+                    dataKey="ndvi"
+                    stroke="#16a34a"
+                    strokeWidth={2}
+                    dot={{ r: 2.5, fill: '#16a34a' }}
+                    activeDot={{ r: 4, strokeWidth: 2 }}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            )
           ) : (
-            <ResponsiveContainer width="100%" height={140}>
-              <LineChart data={ndviHistory} margin={{ top: 5, right: 5, bottom: 5, left: -15 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-                <XAxis
-                  dataKey="date"
-                  tick={{ fontSize: 9, fill: '#9ca3af' }}
-                  tickFormatter={d => {
-                    const parts = d.split('-');
-                    return `${parts[2]}/${parts[1]}`;
-                  }}
-                  interval="preserveStartEnd"
-                />
-                <YAxis
-                  domain={[0, 1]}
-                  tick={{ fontSize: 9, fill: '#9ca3af' }}
-                  tickCount={5}
-                />
-                <Tooltip
-                  contentStyle={{
-                    fontSize: 11,
-                    borderRadius: 8,
-                    border: '1px solid #e5e7eb',
-                    boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
-                  }}
-                  formatter={(value, name) => {
-                    if (name === 'ndvi') return [value?.toFixed(4), 'NDVI'];
-                    return [value, name];
-                  }}
-                  labelFormatter={d => `Дата: ${d}`}
-                />
-                <ReferenceLine y={0.2} stroke="#f97316" strokeDasharray="3 3" strokeOpacity={0.5} />
-                <ReferenceLine y={0.5} stroke="#84cc16" strokeDasharray="3 3" strokeOpacity={0.5} />
-                <Line
-                  type="monotone"
-                  dataKey="ndvi"
-                  stroke="#16a34a"
-                  strokeWidth={2}
-                  dot={{ r: 2.5, fill: '#16a34a' }}
-                  activeDot={{ r: 4, strokeWidth: 2 }}
-                />
-              </LineChart>
-            </ResponsiveContainer>
+            /* SAVI / EVI / NDMI / NDRE */
+            <>
+              {/* Latest value card */}
+              {multiLoading ? (
+                <div className="h-16 flex items-center justify-center text-xs text-gray-400">
+                  Загрузка...
+                </div>
+              ) : multiError ? (
+                <div className="text-xs text-red-500 py-2">{multiError}</div>
+              ) : multiLatest ? (
+                <div className="bg-gray-50 rounded-lg p-2 mb-2 text-xs space-y-1">
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Значение ({activeIndex}):</span>
+                    <span className="font-semibold text-gray-900">
+                      {multiLatest.mean_value?.toFixed(4) ?? '—'}
+                    </span>
+                  </div>
+                  {multiLatest.min_value != null && (
+                    <div className="flex justify-between">
+                      <span className="text-gray-500">Мин/Макс:</span>
+                      <span className="text-gray-700">{multiLatest.min_value.toFixed(4)} / {multiLatest.max_value.toFixed(4)}</span>
+                    </div>
+                  )}
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Дата съёмки:</span>
+                    <span className="text-gray-700">{multiLatest.captured_date || '—'}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Валидные пиксели:</span>
+                    <span className="text-gray-700">{multiLatest.valid_pixels_pct != null ? `${multiLatest.valid_pixels_pct.toFixed(1)}%` : '—'}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-500">Облачность:</span>
+                    <span className="text-gray-700">{multiLatest.cloud_cover_pct != null ? `${multiLatest.cloud_cover_pct.toFixed(1)}%` : '—'}</span>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-xs text-gray-400 py-2">Нет данных</div>
+              )}
+
+              {/* History chart */}
+              {multiLoading ? (
+                <div className="h-32 flex items-center justify-center text-xs text-gray-400">
+                  Загрузка графика...
+                </div>
+              ) : multiHistory.length === 0 ? (
+                <div className="h-32 flex items-center justify-center text-xs text-gray-400">
+                  Нет исторических данных
+                </div>
+              ) : (
+                <ResponsiveContainer width="100%" height={140}>
+                  <LineChart data={multiHistory} margin={{ top: 5, right: 5, bottom: 5, left: -15 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+                    <XAxis
+                      dataKey="date"
+                      tick={{ fontSize: 9, fill: '#9ca3af' }}
+                      tickFormatter={d => {
+                        const parts = d.split('-');
+                        return `${parts[2]}/${parts[1]}`;
+                      }}
+                      interval="preserveStartEnd"
+                    />
+                    <YAxis
+                      type="number"
+                      domain={['auto', 'auto']}
+                      tick={{ fontSize: 9, fill: '#9ca3af' }}
+                      tickCount={5}
+                    />
+                    <Tooltip
+                      contentStyle={{
+                        fontSize: 11,
+                        borderRadius: 8,
+                        border: '1px solid #e5e7eb',
+                        boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
+                      }}
+                      formatter={(value, name) => {
+                        if (name === 'value') return [value?.toFixed(4), activeIndex];
+                        return [value, name];
+                      }}
+                      labelFormatter={d => `Дата: ${d}`}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="value"
+                      stroke="#8b5cf6"
+                      strokeWidth={2}
+                      dot={{ r: 2.5, fill: '#8b5cf6' }}
+                      activeDot={{ r: 4, strokeWidth: 2 }}
+                    />
+                  </LineChart>
+                </ResponsiveContainer>
+              )}
+            </>
           )}
         </div>
 
