@@ -1,5 +1,9 @@
+from pathlib import Path
+
 from pydantic_settings import BaseSettings
 from functools import lru_cache
+
+BACKEND_DIR = Path(__file__).resolve().parent
 
 
 class Settings(BaseSettings):
@@ -38,7 +42,7 @@ class Settings(BaseSettings):
     telegram_notifications_enabled: bool = False
 
     class Config:
-        env_file = ".env"
+        env_file = BACKEND_DIR / ".env"
         case_sensitive = False
         extra = "ignore"
 
