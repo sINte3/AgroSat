@@ -38,12 +38,13 @@ export default function AlertsPage({ onFieldClick, onFieldHighlight }) {
     setAlerts(prev => prev.filter(a => a.id !== alertId));
   };
 
-  const activeCounts = useMemo(() => {
-    const counts = { critical: 0, warning: 0, info: 0 };
+  const counts = useMemo(() => {
+    const total = alerts.length;
+    const bySeverity = { critical: 0, warning: 0, info: 0 };
     alerts.forEach((a) => {
-      if (counts[a.severity] !== undefined) counts[a.severity]++;
+      if (bySeverity[a.severity] !== undefined) bySeverity[a.severity]++;
     });
-    return counts;
+    return { total, ...bySeverity };
   }, [alerts]);
 
   if (error) {
@@ -63,17 +64,54 @@ export default function AlertsPage({ onFieldClick, onFieldHighlight }) {
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-3">
           <h2 className="text-xl font-bold text-agro-text">Предупреждения</h2>
-          <span className="bg-agro-accent/20 text-agro-accent text-sm font-medium px-2.5 py-0.5 rounded-full">
-            {alerts.length}
-          </span>
+          {!loading && (
+            <span className="bg-agro-accent/20 text-agro-accent text-sm font-medium px-2.5 py-0.5 rounded-full">
+              {counts.total}
+            </span>
+          )}
         </div>
       </div>
+
+      {/* Сводка */}
+      {!loading && counts.total > 0 && (
+        <div className="flex items-center gap-3 mb-4 flex-wrap text-sm">
+          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gray-50 border border-agro-border">
+            <span className="font-medium text-agro-text">{counts.total}</span>
+            <span className="text-agro-muted">всего</span>
+          </div>
+          {counts.critical > 0 && (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-50 border border-red-200">
+              <span className="w-2 h-2 rounded-full bg-red-500" />
+              <span className="font-medium text-red-700">{counts.critical}</span>
+              <span className="text-red-500">критичных</span>
+            </div>
+          )}
+          {counts.warning > 0 && (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-200">
+              <span className="w-2 h-2 rounded-full bg-amber-500" />
+              <span className="font-medium text-amber-700">{counts.warning}</span>
+              <span className="text-amber-500">важных</span>
+            </div>
+          )}
+          {counts.info > 0 && (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-50 border border-blue-200">
+              <span className="w-2 h-2 rounded-full bg-blue-500" />
+              <span className="font-medium text-blue-700">{counts.info}</span>
+              <span className="text-blue-500">информационных</span>
+            </div>
+          )}
+          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-green-50 border border-green-200">
+            <span className="w-2 h-2 rounded-full bg-green-500" />
+            <span className="font-medium text-green-700">Активные</span>
+          </div>
+        </div>
+      )}
 
       {/* Фильтры */}
       <div className="flex items-center gap-3 mb-4 flex-wrap">
         {FILTERS.map((f) => {
           const isActive = severityFilter === f.key;
-          const count = f.key ? activeCounts[f.key] : alerts.length;
+          const count = f.key ? counts[f.key] : counts.total;
           return (
             <button
               key={f.key ?? 'all'}
