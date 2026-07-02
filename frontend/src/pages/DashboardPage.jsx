@@ -98,7 +98,7 @@ export default function DashboardPage({ onNavigate, onFieldClick, onFieldHighlig
   return (
     <div className="flex flex-col h-full">
       {/* Верхняя фиксированная часть */}
-      <div className="p-4 lg:p-6 pb-0 space-y-4">
+      <div className="p-4 lg:p-6 pt-16 pb-0 space-y-4">
         <div>
           <p className="text-sm text-agro-muted">
             Бухоро Агрокластер
