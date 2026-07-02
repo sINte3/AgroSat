@@ -22,6 +22,14 @@ export default function SummaryCards({ summary, loading }) {
       color: 'text-agro-accent',
     },
     {
+      label: 'Всего гектаров',
+      value: summary.total_area_ha != null
+        ? Number(summary.total_area_ha).toLocaleString('ru-RU', { maximumFractionDigits: 1 }) + ' га'
+        : '—',
+      icon: AreaIcon,
+      color: 'text-agro-accent',
+    },
+    {
       label: 'Активные алерты',
       value: summary.active_alerts,
       icon: AlertIcon,
@@ -34,6 +42,18 @@ export default function SummaryCards({ summary, loading }) {
       color: 'text-agro-danger',
     },
     {
+      label: 'Высокий риск',
+      value: summary.warning_alerts,
+      icon: WarningIcon,
+      color: 'text-agro-warning',
+    },
+    {
+      label: 'Полей без данных',
+      value: summary.fields_no_data,
+      icon: NoDataIcon,
+      color: 'text-agro-muted',
+    },
+    {
       label: 'Средний NDVI',
       value: summary.avg_ndvi != null ? summary.avg_ndvi.toFixed(3) : '—',
       icon: NDVIIcon,
@@ -42,7 +62,7 @@ export default function SummaryCards({ summary, loading }) {
   ];
 
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+    <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
       {cards.map((card, idx) => (
         <div key={idx} className="card flex items-center gap-4">
           <div className={`p-2.5 rounded-lg bg-agro-surface2 ${card.color}`}>
@@ -68,6 +88,16 @@ function FieldIcon({ className }) {
   );
 }
 
+function AreaIcon({ className }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+        d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"
+      />
+    </svg>
+  );
+}
+
 function AlertIcon({ className }) {
   return (
     <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -83,6 +113,26 @@ function CriticalIcon({ className }) {
     <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
         d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+      />
+    </svg>
+  );
+}
+
+function WarningIcon({ className }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+        d="M12 9v2m0 4h.01M10.29 3.86l-8.1 14c-.6 1.04.15 2.14 1.21 2.14h17.2c1.06 0 1.81-1.1 1.21-2.14l-8.1-14c-.6-1.04-2.12-1.04-2.72 0z"
+      />
+    </svg>
+  );
+}
+
+function NoDataIcon({ className }) {
+  return (
+    <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+        d="M18.364 5.636a9 9 0 11-12.728 0m12.728 0a9 9 0 00-12.728 0"
       />
     </svg>
   );
