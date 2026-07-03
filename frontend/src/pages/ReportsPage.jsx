@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { getManagementReportSummary } from '../api/client';
+import { getManagementReportSummary, getManagementSatelliteIndicesSummary } from '../api/client';
 
 // ─── Severity count extraction helper ─────────────────────────────────────
 
@@ -136,6 +136,9 @@ export default function ReportsPage() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [satelliteData, setSatelliteData] = useState(null);
+  const [satelliteLoading, setSatelliteLoading] = useState(true);
+  const [satelliteError, setSatelliteError] = useState(null);
   const [sortKey, setSortKey] = useState('name');
   const [sortDir, setSortDir] = useState('asc');
   const [searchQuery, setSearchQuery] = useState('');
@@ -160,9 +163,31 @@ export default function ReportsPage() {
     }
   }, []);
 
+  const loadSatelliteData = useCallback(async () => {
+    setSatelliteLoading(true);
+    setSatelliteError(null);
+    try {
+      const result = await getManagementSatelliteIndicesSummary();
+      setSatelliteData(result);
+    } catch (err) {
+      if (err?.response?.status === 404) {
+        setSatelliteError('Спутниковые индексы пока недоступны (эндпоинт не найден).');
+      } else {
+        setSatelliteError('Ошибка загрузки спутниковых индексов.');
+      }
+      console.error(err);
+    } finally {
+      setSatelliteLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  useEffect(() => {
+    loadSatelliteData();
+  }, [loadSatelliteData]);
 
   // ─── Enterprise sort/search ────────────────────────────────────────────
 
@@ -209,6 +234,35 @@ export default function ReportsPage() {
     if (sortKey !== columnKey) return <span className="ml-1 text-agro-muted opacity-30">↕</span>;
     return <span className="ml-1">{sortDir === 'asc' ? '↑' : '↓'}</span>;
   };
+
+  // ─── Satellite index helpers ────────────────────────────────────────────
+
+  const INDEX_LABELS = { savi: 'SAVI', evi: 'EVI', ndmi: 'NDMI', ndre: 'NDRE' };
+
+  function formatIndexValue(v) {
+    if (v == null) return '—';
+    if (typeof v === 'number') return v.toFixed(4);
+    return v;
+  }
+
+  function getSatelliteClusterIndices() {
+    if (!satelliteData?.cluster) return [];
+    return Object.entries(satelliteData.cluster).filter(
+      ([code]) => INDEX_LABELS[code]
+    ).map(([code, values]) => ({ code, label: INDEX_LABELS[code], values }));
+  }
+
+  function getEnterpriseIndexValue(enterprise, code) {
+    const idx = enterprise?.indices?.[code];
+    if (!idx) return '—';
+    return idx.avg_mean_value != null ? idx.avg_mean_value.toFixed(4) : '—';
+  }
+
+  function getEnterpriseIndexLatestDate(enterprise, code) {
+    const idx = enterprise?.indices?.[code];
+    if (!idx?.latest_captured_date) return '—';
+    return new Date(idx.latest_captured_date).toLocaleDateString('ru-RU');
+  }
 
   // ─── Error state ───────────────────────────────────────────────────────
 
@@ -723,7 +777,7 @@ export default function ReportsPage() {
       {limitations && Array.isArray(limitations) && limitations.length > 0 && (
         <section className="mb-8">
           <div className="card p-5 border border-amber-200 bg-amber-50/30">
-            <h2 className="text-base font-semibold text-agro-text mb-3">Ограничения отчёта</h2>
+            <h2 className="text-base font-semibold text-agro-text mb-3">Ограничения основной сводки</h2>
             <ul className="space-y-2">
               {limitations.map((lim, idx) => (
                 <li key={idx} className="flex items-start gap-2 text-sm text-agro-muted">
@@ -762,6 +816,195 @@ export default function ReportsPage() {
             </div>
           </div>
         </div>
+      </section>
+
+      {/* ═══════════════════════════════════════════════════════════
+          Section 5: Satellite Indices
+         ═══════════════════════════════════════════════════════════ */}
+      <section className="mb-8">
+        <div className="mb-4">
+          <h2 className="text-xl font-bold text-agro-text">Спутниковые индексы</h2>
+          <p className="text-sm text-agro-muted mt-1">
+            Агрегированные показатели SAVI / EVI / NDMI / NDRE
+          </p>
+          {satelliteData?.date_range?.from && satelliteData?.date_range?.to && (
+            <p className="text-xs text-agro-muted mt-1">
+              Период: {new Date(satelliteData.date_range.from).toLocaleDateString('ru-RU')} — {new Date(satelliteData.date_range.to).toLocaleDateString('ru-RU')}
+            </p>
+          )}
+        </div>
+
+        {/* ── 5.1 Cluster summary ───────────────────────────────────── */}
+        {satelliteLoading ? (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+            {[...Array(4)].map((_, i) => (
+              <div key={i} className="card animate-pulse p-4">
+                <div className="h-5 bg-agro-surface2 rounded w-16 mb-4" />
+                <div className="space-y-2">
+                  <div className="h-3 bg-agro-surface2 rounded w-24" />
+                  <div className="h-3 bg-agro-surface2 rounded w-20" />
+                  <div className="h-3 bg-agro-surface2 rounded w-20" />
+                  <div className="h-3 bg-agro-surface2 rounded w-16" />
+                  <div className="h-3 bg-agro-surface2 rounded w-16" />
+                  <div className="h-3 bg-agro-surface2 rounded w-28" />
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : satelliteError ? (
+          <div className="card p-5 mb-6 border border-red-200 bg-red-50/30">
+            <div className="flex items-center gap-2">
+              <svg className="w-5 h-5 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                  d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                />
+              </svg>
+              <p className="text-sm text-red-600">{satelliteError}</p>
+            </div>
+          </div>
+        ) : !satelliteData ? null : (
+          <>
+            {/* Cluster index cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+              {getSatelliteClusterIndices().map(({ code, label, values }) => (
+                <div key={code} className="card p-4">
+                  <h3 className="text-base font-bold text-agro-text mb-3">{label}</h3>
+                  <div className="space-y-1.5 text-sm">
+                    <div className="flex justify-between">
+                      <span className="text-agro-muted">Среднее</span>
+                      <span className="font-medium text-agro-text">{formatIndexValue(values.avg_mean_value)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-agro-muted">Мин.</span>
+                      <span className="font-medium text-agro-text">{formatIndexValue(values.min_mean_value)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-agro-muted">Макс.</span>
+                      <span className="font-medium text-agro-text">{formatIndexValue(values.max_mean_value)}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-agro-muted">Записей</span>
+                      <span className="font-medium text-agro-text">{values.record_count ?? '—'}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-agro-muted">Полей</span>
+                      <span className="font-medium text-agro-text">{values.field_count ?? '—'}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-agro-muted">Последний снимок</span>
+                      <span className="font-medium text-agro-text text-xs">
+                        {values.latest_captured_date
+                          ? new Date(values.latest_captured_date).toLocaleDateString('ru-RU')
+                          : '—'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* ── 5.2 Enterprise comparison ──────────────────────────── */}
+            {Array.isArray(satelliteData.enterprises) && satelliteData.enterprises.length > 0 && (
+              <div className="card p-5 mb-6">
+                <h3 className="text-base font-semibold text-agro-text mb-4">Сравнение спутниковых индексов по предприятиям</h3>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-agro-border">
+                        <th className="text-left py-2.5 pr-4 text-agro-muted font-medium whitespace-nowrap">Предприятие</th>
+                        <th className="text-right py-2.5 px-3 text-agro-muted font-medium whitespace-nowrap">SAVI</th>
+                        <th className="text-right py-2.5 px-3 text-agro-muted font-medium whitespace-nowrap">EVI</th>
+                        <th className="text-right py-2.5 px-3 text-agro-muted font-medium whitespace-nowrap">NDMI</th>
+                        <th className="text-right py-2.5 px-3 text-agro-muted font-medium whitespace-nowrap">NDRE</th>
+                        <th className="text-right py-2.5 pl-3 text-agro-muted font-medium whitespace-nowrap">Последний снимок</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {satelliteData.enterprises.map((ent, idx) => (
+                        <tr key={ent.enterprise_id || idx}
+                          className={`border-b border-agro-border/50 ${
+                            idx % 2 === 0 ? 'bg-transparent' : 'bg-agro-surface2/30'
+                          } hover:bg-agro-hover/50 transition-colors`}
+                        >
+                          <td className="py-2.5 pr-4 font-medium text-agro-text">
+                            {ent.enterprise_name || '—'}
+                          </td>
+                          <td className="py-2.5 px-3 text-right font-medium text-agro-text">
+                            {getEnterpriseIndexValue(ent, 'savi')}
+                          </td>
+                          <td className="py-2.5 px-3 text-right font-medium text-agro-text">
+                            {getEnterpriseIndexValue(ent, 'evi')}
+                          </td>
+                          <td className="py-2.5 px-3 text-right font-medium text-agro-text">
+                            {getEnterpriseIndexValue(ent, 'ndmi')}
+                          </td>
+                          <td className="py-2.5 px-3 text-right font-medium text-agro-text">
+                            {getEnterpriseIndexValue(ent, 'ndre')}
+                          </td>
+                          <td className="py-2.5 pl-3 text-right text-agro-muted text-xs">
+                            {getEnterpriseIndexLatestDate(ent, 'savi')}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {/* ── 5.3 Data freshness / limitations ──────────────────── */}
+            {satelliteData.data_freshness && (
+              <div className="card p-5 mb-6">
+                <div className="flex items-center gap-2 mb-4">
+                  <FreshnessIcon className="w-5 h-5 text-agro-accent" />
+                  <h3 className="text-base font-semibold text-agro-text">Свежесть спутниковых данных</h3>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  {satelliteData.data_freshness.latest_satellite_index_date != null && (
+                    <div className="p-4 rounded-lg bg-agro-surface2">
+                      <p className="text-xs text-agro-muted mb-1">Последний спутниковый индекс</p>
+                      <p className="text-lg font-semibold text-agro-text">
+                        {new Date(satelliteData.data_freshness.latest_satellite_index_date).toLocaleDateString('ru-RU')}
+                      </p>
+                    </div>
+                  )}
+                  {satelliteData.data_freshness.note && (
+                    <div className="p-4 rounded-lg bg-agro-surface2">
+                      <p className="text-xs text-agro-muted mb-1">Примечание</p>
+                      <p className="text-sm text-agro-text">{satelliteData.data_freshness.note}</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {Array.isArray(satelliteData.limitations) && satelliteData.limitations.length > 0 && (
+              <div className="card p-5 mb-6 border border-amber-200 bg-amber-50/30">
+                <h3 className="text-base font-semibold text-agro-text mb-3">Ограничения агрегации спутниковых индексов</h3>
+                <ul className="space-y-2">
+                  {satelliteData.limitations.map((lim, idx) => (
+                    <li key={idx} className="flex items-start gap-2 text-sm text-agro-muted">
+                      <svg className="w-4 h-4 mt-0.5 flex-shrink-0 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                          d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                        />
+                      </svg>
+                      <span>{lim.limitation || lim.message || lim}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* ── Separator: note re deferred limitation ──────────────── */}
+            <div className="card p-4 mb-6 border border-green-200 bg-green-50/30">
+              <p className="text-sm text-agro-text">
+                <span className="font-semibold">Агрегация спутниковых индексов подключена отдельным endpoint.</span>
+                {' '}SAVI/EVI/NDMI/NDRE данные загружены независимо от основной сводки.
+              </p>
+            </div>
+          </>
+        )}
       </section>
 
     </div>

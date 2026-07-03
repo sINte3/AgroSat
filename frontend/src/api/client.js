@@ -197,6 +197,11 @@ export async function getManagementReportSummary() {
   return data;
 }
 
+export async function getManagementSatelliteIndicesSummary(params = {}) {
+  const { data } = await client.get('reports/management/satellite-indices/summary', { params });
+  return data;
+}
+
 // ─── Weather ────────────────────────────────────────────────────────────────
 
 export async function getFieldWeather(fieldId) {
