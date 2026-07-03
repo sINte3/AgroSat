@@ -190,6 +190,13 @@ export async function getEnterpriseDashboard(enterpriseId) {
   return data;
 }
 
+// ─── Reports ────────────────────────────────────────────────────────────────
+
+export async function getManagementReportSummary() {
+  const { data } = await client.get('reports/management/summary');
+  return data;
+}
+
 // ─── Weather ────────────────────────────────────────────────────────────────
 
 export async function getFieldWeather(fieldId) {

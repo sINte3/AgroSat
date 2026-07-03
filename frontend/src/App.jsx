@@ -10,6 +10,7 @@ import FieldDetailPage from './pages/FieldDetailPage';
 import AlertsPage from './pages/AlertsPage';
 import EnterprisesPage from './pages/EnterprisesPage';
 import EnterpriseDetailPage from './pages/EnterpriseDetailPage';
+import ReportsPage from './pages/ReportsPage';
 import LoginPage from './pages/LoginPage';
 import UnauthorizedPage from './pages/UnauthorizedPage';
 import { getCachedEnterprises } from './api/client';
@@ -19,6 +20,7 @@ const PATH_VIEW_MAP = {
   '/fields': 'fields',
   '/alerts': 'alerts',
   '/enterprises': 'enterprises',
+  '/reports': 'reports',
 };
 
 function AppLayout() {
@@ -92,6 +94,12 @@ function AppLayout() {
         setSelectedEnterpriseId(id);
         setView('enterprise-detail');
         break;
+      case 'reports':
+        setView('reports');
+        setSelectedFieldId(null);
+        setSelectedEnterpriseId(null);
+        navigate('/reports', { replace: true });
+        break;
       default:
         setView('dashboard');
     }
@@ -103,6 +111,7 @@ function AppLayout() {
       case 'fields':      return { title: 'Поля' };
       case 'field-detail': return { title: 'Поле', subtitle: selectedFieldId ? `#${selectedFieldId}` : null };
       case 'alerts':      return { title: 'Предупреждения' };
+      case 'reports':     return { title: 'Отчёты' };
       case 'enterprise-detail': return { title: 'Предприятие', subtitle: selectedEnterpriseId ? `#${selectedEnterpriseId}` : null };
       default:            return { title: 'AgroSat' };
     }
@@ -110,6 +119,7 @@ function AppLayout() {
 
   const activeView = view === 'field-detail' ? 'fields'
     : view === 'enterprise-detail' ? 'enterprises'
+    : view === 'reports' ? 'reports'
     : view;
 
   const renderContent = () => {
@@ -134,6 +144,8 @@ function AppLayout() {
             onBack={() => { setSelectedEnterpriseId(null); setView('enterprises'); }}
           />
         );
+      case 'reports':
+        return <ReportsPage />;
       case 'dashboard':
       default:
         return (
