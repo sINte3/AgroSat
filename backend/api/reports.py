@@ -4,6 +4,7 @@ API для отчётов AgroSat.
 Эндпоинты:
     GET /api/reports/enterprise/{enterprise_id}/pdf — скачать PDF отчёт
     GET /api/reports/management/summary — JSON management report read model
+    GET /api/reports/management/satellite-indices/summary — SAVI/EVI/NDMI/NDRE aggregation
 """
 
 import logging
@@ -306,6 +307,260 @@ def get_management_summary(
         "summary": summary,
         "enterprises": enterprises,
         "alerts": alerts_summary,
+        "data_freshness": data_freshness,
+        "limitations": limitations,
+    }
+
+
+# ─── Satellite index aggregation endpoint ────────────────────────────────────
+
+SUPPORTED_SATELLITE_INDEX_CODES = frozenset({"savi", "evi", "ndmi", "ndre"})
+
+
+@router.get(
+    "/management/satellite-indices/summary",
+    summary="SAVI/EVI/NDMI/NDRE aggregation for management reports",
+    description=(
+        "Returns cluster-wide and per-enterprise aggregated SAVI/EVI/NDMI/NDRE "
+        "values from satellite_index_records. Uses a single CTE query with "
+        "json_agg for enterprise breakdown — no N+1. "
+        "Tenant-scoped: admin/manager see all enterprises, "
+        "agronomist/viewer see only their own enterprise. "
+        "NDVI is excluded from this endpoint (use /api/ndvi/*)."
+    ),
+)
+def get_satellite_indices_summary(
+    date_from: str = Query(None, description="Start date (ISO format, optional)"),
+    date_to: str = Query(None, description="End date (ISO format, optional)"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+    effective_eid: int = Depends(require_enterprise_scope),
+):
+    """SAVI/EVI/NDMI/NDRE aggregation for management reports.
+    All aggregations run in SQL — no lazy loading, no N+1, no loop-per-enterprise.
+    """
+    # ── Parse / default date range ──────────────────────────────────────────
+    now = datetime.utcnow()
+    to_date = now
+    if date_to:
+        try:
+            to_date = datetime.fromisoformat(date_to)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Invalid date_to format (use ISO 8601)")
+
+    from_date = to_date - timedelta(days=7)
+    if date_from:
+        try:
+            from_date = datetime.fromisoformat(date_from)
+        except ValueError:
+            raise HTTPException(status_code=422, detail="Invalid date_from format (use ISO 8601)")
+
+    generated_at = now.isoformat()
+    date_range = {
+        "from": from_date.isoformat(),
+        "to": to_date.isoformat(),
+    }
+
+    # ── Tenant scope ────────────────────────────────────────────────────────
+    params = {
+        "from_date": from_date.date(),
+        "to_date": to_date.date(),
+    }
+    tenant_clause = ""
+    enterprise_join_clause = ""
+    if effective_eid is not None:
+        tenant_clause = "AND f.enterprise_id = :eid"
+        enterprise_join_clause = "AND e.id = :eid"
+        params["eid"] = effective_eid
+
+    # ── Validate no NDVI leaks in satellite_index_records ──────────────────
+    ndvi_count = db.execute(
+        text("""
+            SELECT COUNT(*) AS cnt
+            FROM satellite_index_records
+            WHERE LOWER(index_code) = 'ndvi'
+              AND captured_date BETWEEN :from_date AND :to_date
+        """),
+        {"from_date": from_date.date(), "to_date": to_date.date()},
+    ).scalar() or 0
+
+    # ── Single CTE query: cluster + per-enterprise json_agg ────────────────
+    # Aggregates SAVI/EVI/NDMI/NDRE mean_value statistics.
+    # Uses explicit joins — no lazy loading, no N+1.
+    sql = text(f"""
+        WITH
+        active_fields AS (
+            SELECT f.id, f.enterprise_id
+            FROM fields f
+            WHERE f.is_active = true {tenant_clause}
+        ),
+        index_agg AS (
+            SELECT
+                sir.index_code,
+                COUNT(sir.id) AS record_count,
+                COUNT(DISTINCT sir.field_id) AS field_count,
+                AVG(sir.mean_value) AS avg_mean_value,
+                MIN(sir.mean_value) AS min_mean_value,
+                MAX(sir.mean_value) AS max_mean_value,
+                AVG(sir.valid_pixels_pct) AS avg_valid_pixels_pct,
+                AVG(sir.cloud_cover_pct) AS avg_cloud_cover_pct,
+                AVG(sir.std_value) AS avg_std_value,
+                MAX(sir.captured_date) AS latest_captured_date
+            FROM satellite_index_records sir
+            JOIN active_fields af ON af.id = sir.field_id
+            WHERE sir.index_code IN ('savi', 'evi', 'ndmi', 'ndre')
+              AND sir.captured_date BETWEEN :from_date AND :to_date
+            GROUP BY sir.index_code
+        ),
+        enterprise_agg AS (
+            SELECT
+                e.id AS enterprise_id,
+                e.name AS enterprise_name,
+                sir.index_code,
+                COUNT(sir.id) AS record_count,
+                COUNT(DISTINCT sir.field_id) AS field_count,
+                AVG(sir.mean_value) AS avg_mean_value,
+                MIN(sir.mean_value) AS min_mean_value,
+                MAX(sir.mean_value) AS max_mean_value,
+                MAX(sir.captured_date) AS latest_captured_date
+            FROM enterprises e
+            JOIN fields f ON f.enterprise_id = e.id AND f.is_active = true {enterprise_join_clause.replace('f.', 'f.')}
+            JOIN satellite_index_records sir ON sir.field_id = f.id
+            WHERE sir.index_code IN ('savi', 'evi', 'ndmi', 'ndre')
+              AND sir.captured_date BETWEEN :from_date AND :to_date
+            GROUP BY e.id, e.name, sir.index_code
+            ORDER BY e.name, sir.index_code
+        )
+        SELECT
+            COALESCE(json_agg(
+                json_build_object(
+                    'index_code', ia.index_code,
+                    'avg_mean_value', ia.avg_mean_value,
+                    'min_mean_value', ia.min_mean_value,
+                    'max_mean_value', ia.max_mean_value,
+                    'record_count', ia.record_count,
+                    'field_count', ia.field_count,
+                    'latest_captured_date', CASE
+                        WHEN ia.latest_captured_date IS NOT NULL THEN ia.latest_captured_date::text
+                        ELSE NULL END,
+                    'avg_valid_pixels_pct', ia.avg_valid_pixels_pct,
+                    'avg_cloud_cover_pct', ia.avg_cloud_cover_pct,
+                    'avg_std_value', ia.avg_std_value
+                )
+                ORDER BY ia.index_code
+            ) FILTER (WHERE ia.index_code IS NOT NULL), '[]'::json) AS cluster_json,
+            COALESCE(json_agg(
+                json_build_object(
+                    'enterprise_id', ea.enterprise_id,
+                    'enterprise_name', ea.enterprise_name,
+                    'index_code', ea.index_code,
+                    'avg_mean_value', ea.avg_mean_value,
+                    'min_mean_value', ea.min_mean_value,
+                    'max_mean_value', ea.max_mean_value,
+                    'record_count', ea.record_count,
+                    'field_count', ea.field_count,
+                    'latest_captured_date', CASE
+                        WHEN ea.latest_captured_date IS NOT NULL THEN ea.latest_captured_date::text
+                        ELSE NULL END
+                )
+                ORDER BY ea.enterprise_name, ea.index_code
+            ) FILTER (WHERE ea.enterprise_id IS NOT NULL), '[]'::json) AS enterprises_json
+        FROM index_agg ia
+        FULL JOIN enterprise_agg ea ON false
+    """)
+
+    row = db.execute(sql, params).fetchone()
+
+    # ── Build cluster dict keyed by index_code ──────────────────────────────
+    cluster_indices = {}
+    for item in row.cluster_json if row and row.cluster_json else []:
+        code = item["index_code"]
+        cluster_indices[code] = {
+            "avg_mean_value": _safe_float(item["avg_mean_value"]),
+            "min_mean_value": _safe_float(item["min_mean_value"]),
+            "max_mean_value": _safe_float(item["max_mean_value"]),
+            "record_count": _coalesce_int(item["record_count"]),
+            "field_count": _coalesce_int(item["field_count"]),
+            "latest_captured_date": item["latest_captured_date"],
+        }
+
+    cluster = {}
+    for code in sorted(SUPPORTED_SATELLITE_INDEX_CODES):
+        if code in cluster_indices:
+            cluster[code] = cluster_indices[code]
+        else:
+            cluster[code] = {
+                "avg_mean_value": None,
+                "min_mean_value": None,
+                "max_mean_value": None,
+                "record_count": 0,
+                "field_count": 0,
+                "latest_captured_date": None,
+            }
+
+    # ── Build enterprise list ───────────────────────────────────────────────
+    # Group by enterprise, then nest indices under each enterprise
+    enterprise_map = {}
+    for item in row.enterprises_json if row and row.enterprises_json else []:
+        eid = item["enterprise_id"]
+        if eid not in enterprise_map:
+            enterprise_map[eid] = {
+                "enterprise_id": eid,
+                "enterprise_name": item["enterprise_name"],
+                "indices": {},
+            }
+        code = item["index_code"]
+        enterprise_map[eid]["indices"][code] = {
+            "avg_mean_value": _safe_float(item["avg_mean_value"]),
+            "min_mean_value": _safe_float(item["min_mean_value"]),
+            "max_mean_value": _safe_float(item["max_mean_value"]),
+            "record_count": _coalesce_int(item["record_count"]),
+            "field_count": _coalesce_int(item["field_count"]),
+            "latest_captured_date": item["latest_captured_date"],
+        }
+
+    enterprises = sorted(enterprise_map.values(), key=lambda x: x["enterprise_name"])
+
+    # ── Data freshness ──────────────────────────────────────────────────────
+    data_freshness = {}
+    latest_rec = db.execute(
+        text("""
+            SELECT MAX(captured_date) AS latest_date
+            FROM satellite_index_records
+            WHERE index_code IN ('savi', 'evi', 'ndmi', 'ndre')
+        """),
+    ).fetchone()
+    if latest_rec and latest_rec.latest_date:
+        data_freshness["latest_satellite_index_date"] = str(latest_rec.latest_date)
+    else:
+        data_freshness["latest_satellite_index_date"] = None
+        data_freshness["note"] = "No satellite index data found"
+
+    # ── Limitations ─────────────────────────────────────────────────────────
+    limitations = []
+    if ndvi_count > 0:
+        limitations.append(
+            f"Unsupported NDVI records found in satellite_index_records: {ndvi_count}; "
+            "these are excluded from aggregation."
+        )
+    has_enterprise_data = any(
+        e["indices"] for e in enterprises
+    )
+    if not has_enterprise_data and effective_eid is None:
+        if not any(v["record_count"] > 0 for v in cluster.values()):
+            limitations.append("No satellite index data found for the current date range.")
+        else:
+            limitations.append(
+                "Enterprise-level breakdown is empty; enterprises may lack active fields "
+                "or satellite index records in the requested date range."
+            )
+
+    return {
+        "generated_at": generated_at,
+        "date_range": date_range,
+        "index_codes": sorted(SUPPORTED_SATELLITE_INDEX_CODES),
+        "cluster": cluster,
+        "enterprises": enterprises,
         "data_freshness": data_freshness,
         "limitations": limitations,
     }
