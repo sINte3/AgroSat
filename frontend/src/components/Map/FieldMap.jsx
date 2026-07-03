@@ -4,6 +4,7 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import MapboxDraw from '@mapbox/mapbox-gl-draw';
 import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css';
 import apiClient from '../../api/client';
+import MapLegend from './MapLegend';
 
 const CROP_COLORS = {
   wheat:        '#EAB308',
@@ -107,6 +108,7 @@ export default function FieldMap({
 }) {
   const [activeStyle, setActiveStyle] = useState('satellite');
   const [activeColorMode, setActiveColorMode] = useState('crop');
+  const [showLegend, setShowLegend] = useState(false);
   const mapContainerRef = useRef(null);
   const mapRef = useRef(null);
   const drawRef = useRef(null);
@@ -683,28 +685,27 @@ export default function FieldMap({
         </button>
       </div>
 
-      {/* NDVI legend */}
-      {activeColorMode === 'ndvi' && (
-        <div className="absolute bottom-20 right-3 z-10 bg-white/90 backdrop-blur-sm rounded-lg p-2.5 shadow-lg border border-slate-200 text-xs">
-          <div className="font-medium text-slate-700 mb-1.5 text-center">NDVI</div>
-          <div className="flex flex-col gap-1">
-            {[
-              { color: '#006400', label: '0.80+' },
-              { color: '#228B22', label: '0.65' },
-              { color: '#9ACD32', label: '0.50' },
-              { color: '#FFD700', label: '0.35' },
-              { color: '#FF4500', label: '0.20' },
-              { color: '#8B0000', label: '0.00' },
-              { color: '#4b5563', label: 'Р В ССљР В Р’ВµР РЋРІР‚С™' },
-            ].map(({ color, label }) => (
-              <div key={label} className="flex items-center gap-2">
-                <div className="w-4 h-3 rounded-sm" style={{ backgroundColor: color }} />
-                <span className="text-slate-600">{label}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+      {/* Legend toggle button */}
+      <div className="absolute bottom-20 right-3 z-10 flex flex-col items-end gap-2">
+        <button
+          onClick={() => setShowLegend(!showLegend)}
+          className={`px-2.5 py-1.5 text-xs rounded-lg font-medium shadow border transition-colors ${
+            showLegend
+              ? 'bg-blue-600 text-white border-blue-600'
+              : 'bg-white/90 backdrop-blur-sm text-slate-600 hover:text-slate-900 border-slate-200'
+          }`}
+          title="Легенда карты"
+        >
+          {showLegend ? '✕ Легенда' : '✓ Легенда'}
+        </button>
+
+        {showLegend && (
+          <MapLegend
+            activeColorMode={activeColorMode}
+            onClose={() => setShowLegend(false)}
+          />
+        )}
+      </div>
 
       {/* Re-center button */}
       <button
