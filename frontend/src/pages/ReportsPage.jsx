@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
-import { getManagementReportSummary, getManagementSatelliteIndicesSummary } from '../api/client';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { getManagementReportSummary, getManagementSatelliteIndicesSummary, downloadManagementReportPdf } from '../api/client';
 
 // ─── Severity count extraction helper ─────────────────────────────────────
 
@@ -142,6 +142,9 @@ export default function ReportsPage() {
   const [sortKey, setSortKey] = useState('name');
   const [sortDir, setSortDir] = useState('asc');
   const [searchQuery, setSearchQuery] = useState('');
+  const [pdfDownloading, setPdfDownloading] = useState(false);
+  const [pdfError, setPdfError] = useState(null);
+  const pdfDownloadRef = useRef(false);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -178,6 +181,59 @@ export default function ReportsPage() {
       console.error(err);
     } finally {
       setSatelliteLoading(false);
+    }
+  }, []);
+
+  // ─── PDF download handler ──────────────────────────────────────────────
+
+  const handleDownloadPdf = useCallback(async () => {
+    if (pdfDownloadRef.current) return;
+    pdfDownloadRef.current = true;
+    setPdfDownloading(true);
+    setPdfError(null);
+
+    try {
+      const response = await downloadManagementReportPdf();
+
+      if (!response || !response.data || response.data.size === 0) {
+        throw new Error('empty_response');
+      }
+
+      const contentType = response.headers?.['content-type'] || '';
+      if (!contentType.includes('pdf') && !response.data.type?.includes('pdf')) {
+        throw new Error('not_pdf');
+      }
+
+      // Parse filename from Content-Disposition
+      let filename = 'agrosat-management-report.pdf';
+      const disposition = response.headers?.['content-disposition'] || '';
+      const filenameMatch = disposition.match(/filename\*?=(?:UTF-8'')?([^;\s]+)/i);
+      if (filenameMatch) {
+        const raw = filenameMatch[1];
+        filename = raw.startsWith("'") ? raw.split("'").pop() : raw;
+        filename = decodeURIComponent(filename.replace(/"/g, ''));
+      }
+
+      const blob = new Blob([response.data], { type: 'application/pdf' });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      if (err?.response?.status === 401 || err?.response?.status === 403) {
+        setPdfError('Нет доступа к скачиванию PDF. Проверьте права.');
+      } else if (err?.response?.status === 404) {
+        setPdfError('Эндпоинт PDF-экспорта недоступен.');
+      } else {
+        setPdfError('Ошибка скачивания PDF. Сервер временно недоступен.');
+      }
+    } finally {
+      setPdfDownloading(false);
+      pdfDownloadRef.current = false;
     }
   }, []);
 
@@ -795,7 +851,7 @@ export default function ReportsPage() {
       )}
 
       {/* ═══════════════════════════════════════════════════════════
-          Section 4.7: Export Placeholder
+          Section 4.7: Export
          ═══════════════════════════════════════════════════════════ */}
       <section className="mb-8">
         <div className="card p-5 border border-dashed border-agro-border bg-agro-surface2/50">
@@ -803,12 +859,23 @@ export default function ReportsPage() {
             <div>
               <h2 className="text-base font-semibold text-agro-text">Экспорт</h2>
               <p className="text-xs text-agro-muted mt-1">
-                Экспорт PDF/Excel будет добавлен отдельной задачей.
+                PDF-экспорт доступен. Excel будет добавлен отдельной задачей.
               </p>
             </div>
-            <div className="flex gap-2">
-              <button disabled className="px-4 py-2 rounded-lg text-sm bg-gray-200 text-gray-400 cursor-not-allowed">
-                PDF
+            <div className="flex gap-2 items-center">
+              {pdfError && (
+                <span className="text-xs text-red-500 mr-2">{pdfError}</span>
+              )}
+              <button
+                onClick={handleDownloadPdf}
+                disabled={pdfDownloading}
+                className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  pdfDownloading
+                    ? 'bg-agro-accent/50 text-white cursor-wait'
+                    : 'bg-agro-accent text-white hover:bg-agro-accent/90'
+                }`}
+              >
+                {pdfDownloading ? 'Скачивание...' : 'Скачать PDF'}
               </button>
               <button disabled className="px-4 py-2 rounded-lg text-sm bg-gray-200 text-gray-400 cursor-not-allowed">
                 Excel

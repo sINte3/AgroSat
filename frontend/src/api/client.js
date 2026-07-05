@@ -202,6 +202,13 @@ export async function getManagementSatelliteIndicesSummary(params = {}) {
   return data;
 }
 
+export async function downloadManagementReportPdf() {
+  const response = await client.get('reports/management/pdf', {
+    responseType: 'blob',
+  });
+  return response;
+}
+
 // ─── Weather ────────────────────────────────────────────────────────────────
 
 export async function getFieldWeather(fieldId) {
