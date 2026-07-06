@@ -83,6 +83,7 @@ from api.reports import router as reports_router
 from api.auth import router as auth_router
 from api.satellite_indices import router as satellite_indices_router
 from api.satellite_data_quality import router as satellite_data_quality_router
+from api.agronomic_risk import router as agronomic_risk_router
 
 app.include_router(auth_router)
 app.include_router(enterprises_router)
@@ -96,6 +97,7 @@ app.include_router(telegram_router)
 app.include_router(reports_router)
 app.include_router(satellite_indices_router)
 app.include_router(satellite_data_quality_router)
+app.include_router(agronomic_risk_router)
 
 
 # ─── Базовые эндпоинты ───────────────────────────────────────────────────────
