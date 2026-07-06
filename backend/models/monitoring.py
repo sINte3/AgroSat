@@ -87,6 +87,10 @@ class Alert(Base):
     acknowledged_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     is_active = Column(Boolean, default=True)
 
+    # Idempotency metadata for satellite-generated alerts (TASK_138)
+    source = Column(String(64), nullable=True)
+    source_key = Column(String(64), nullable=True)
+
     # Relationships
     field = relationship("Field", back_populates="alerts", lazy="raise_on_sql")
 
