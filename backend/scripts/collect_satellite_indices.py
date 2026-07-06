@@ -5,6 +5,12 @@ Hardened CLI entrypoint for satellite data collection.
 Safe, production-grade CLI for collecting Sentinel Hub satellite indices.
 Runs as a standalone process -- never imported or started by FastAPI/web workers.
 
+Idempotency and locking:
+  - File-based lock prevents concurrent runs.
+  - Idempotency helpers check existing records before writing.
+  - --skip-existing mode skips fields/indexes with existing data.
+  - --force flag overrides skip logic.
+
 Dry-run mode: no Sentinel Hub calls, no DB writes.
 NDVI routes to legacy ndvi_records path only. New indices routed to
 satellite_index_records only.
@@ -19,6 +25,7 @@ Usage:
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -34,6 +41,18 @@ sys.path.insert(0, "backend")
 
 from config import settings
 from database import SessionLocal
+from services.collector_idempotency import (
+    IdempotencyMode,
+    count_existing_ndvi,
+    count_existing_satellite_index,
+    has_db_level_uniqueness,
+    plan_actions,
+)
+from services.collector_locking import (
+    DEFAULT_LOCK_FILE,
+    acquire_lock,
+    release_lock,
+)
 from services.satellite_indices import (
     SUPPORTED_INDEX_CODES as MULTI_INDEX_CODES,
     build_multi_index_evalscript,
@@ -268,7 +287,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     # Safety guards
     parser.add_argument(
         "--force", action="store_true", default=False,
-        help="Explicit opt-in for real collection (enables Sentinel Hub calls and DB writes).",
+        help="Explicit opt-in for real collection (enables Sentinel Hub calls and DB writes). "
+             "Also overrides skip-existing in idempotency checks.",
     )
     parser.add_argument(
         "--skip-existing", action="store_true", default=False,
@@ -281,6 +301,20 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--output-log", type=str, default=None,
         help="Optional path to write JSON run summary outside the repo.",
+    )
+
+    # Locking flags
+    parser.add_argument(
+        "--lock-file", type=str, default=None,
+        help="Path to lock file. Default: %%TEMP%%\\agrosat_satellite_collector.lock",
+    )
+    parser.add_argument(
+        "--force-lock", action="store_true", default=False,
+        help="Break stale lock and acquire fresh lock.",
+    )
+    parser.add_argument(
+        "--break-stale-lock", action="store_true", default=False,
+        help="Alias for --force-lock.",
     )
 
     return parser.parse_args(argv)
@@ -374,15 +408,25 @@ def run_dry_run(args: argparse.Namespace) -> None:
 
     # Determine scope guard
     if args.field_id is None and args.enterprise_id is None and (args.max_fields is None or args.max_fields <= 0):
-        # Default to max-fields=5 to prevent accidental all-fields
         max_fields = 5
         print("NOTE: No --field-id or --enterprise-id set. Defaulting --max-fields=5 to prevent all-fields run.")
     else:
         max_fields = args.max_fields
 
-    if args.field_id is not None and max_fields is not None and max_fields > 0:
-        # field-id already limits to 1; max-fields still applies as upper bound
+    # Lock check (dry-run mode: just check lock status)
+    lock_path = None
+    if not args.dry_run:
+        # Lock check only attempted in non-dry-run; but since we're in dry-run,
+        # we report lock status
         pass
+
+    # Acquire/dry-run lock
+    force_lock = args.force_lock or args.break_stale_lock
+    lock_path = acquire_lock(
+        lock_file=args.lock_file,
+        force=force_lock,
+        dry_run=True,
+    )
 
     # Fetch fields
     fields = _query_fields(args.field_id, args.enterprise_id, max_fields)
@@ -391,6 +435,25 @@ def run_dry_run(args: argparse.Namespace) -> None:
     if not fields:
         print("ERROR: No active fields found matching criteria", file=sys.stderr)
         sys.exit(1)
+
+    # Idempotency mode determination
+    idempotency_mode = IdempotencyMode.PLANNED_ONLY
+    if args.skip_existing:
+        idempotency_mode = IdempotencyMode.SKIP_EXISTING
+    elif args.force:
+        idempotency_mode = IdempotencyMode.FORCE
+
+    # Existing records count per index across all fields
+    existing_count_by_index: dict[str, int] = {}
+    for code in codes:
+        total_existing = 0
+        for field in fields:
+            fid = field["id"]
+            if is_ndvi:
+                total_existing += count_existing_ndvi(fid, date_from, date_to)
+            else:
+                total_existing += count_existing_satellite_index(fid, code, date_from, date_to)
+        existing_count_by_index[code] = total_existing
 
     # Plan per field
     plans = []
@@ -425,9 +488,26 @@ def run_dry_run(args: argparse.Namespace) -> None:
     print(f"  Fields with geometry: {total_fields - total_no_geom}")
     print(f"  Fields no geometry:   {total_no_geom}")
     print(f"  Skip existing:        {args.skip_existing}")
+    print(f"  Force:                {args.force}")
     print(f"  Planned writes:       {total_planned_writes}")
     print(f"  Skipped (existing):   {total_skipped}")
     print()
+    # Idempotency section
+    print(f"  Idempotency mode:     {idempotency_mode}")
+    for code in codes:
+        ec = existing_count_by_index.get(code, 0)
+        uni = has_db_level_uniqueness(code)
+        uni_str = "DB UNIQUE" if uni else "SCRIPT-LEVEL (no DB unique constraint — migration deferred)"
+        print(f"    {code}: {ec} existing records — {uni_str}")
+    print()
+    # Lock status
+    if args.lock_file:
+        print(f"  Lock file:            {args.lock_file}")
+    else:
+        print(f"  Lock file:            {DEFAULT_LOCK_FILE} (default)")
+    print(f"  Lock acquired:        dry-run check only")
+    print()
+
     print("  Per-field plan:")
     print()
 
@@ -467,6 +547,10 @@ def run_dry_run(args: argparse.Namespace) -> None:
             "fields_with_geometry": total_fields - total_no_geom,
             "planned_writes": total_planned_writes,
             "skipped_existing": total_skipped,
+            "idempotency_mode": idempotency_mode,
+            "existing_count_by_index": existing_count_by_index,
+            "lock_file": args.lock_file or DEFAULT_LOCK_FILE,
+            "lock_acquired": False,
             "sentinel_hub_calls": 0,
             "db_writes": 0,
             "success_count": 0,
@@ -480,21 +564,53 @@ def run_dry_run(args: argparse.Namespace) -> None:
     sys.exit(0)
 
 
-# -- Real-run planner (stub for future implementation) --
+# -- Real-run planner --
 
 
 def run_real(args: argparse.Namespace) -> None:
     """
-    Execute real collection mode.
-    This stub exists for future implementation when the CLI structure is ready.
+    Execute real collection mode stub.
+    For future implementation of actual Sentinel Hub collection.
     """
+    # Multi-field write-mode guard
+    if args.field_id is None and args.enterprise_id is None and (args.max_fields is None or args.max_fields <= 0):
+        print(
+            "ERROR: Real collection requires --field-id, --enterprise-id, or "
+            "--max-fields to prevent accidental all-fields run.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    started_at = datetime.now(timezone.utc).replace(microsecond=0)
+    codes = _parse_indexes(args.index, args.indices)
+    is_ndvi = codes == [LEGACY_NDVI_CODE] or (len(codes) == 1 and codes[0] == LEGACY_NDVI_CODE)
+
+    date_from = _validate_date(args.date_from or (date.today() - timedelta(days=30)).isoformat(), "--date-from")
+    date_to = _validate_date(args.date_to or date.today().isoformat(), "--date-to")
+
+    # Acquire lock for real mode
+    force_lock = args.force_lock or args.break_stale_lock
+    lock_path = acquire_lock(
+        lock_file=args.lock_file,
+        force=force_lock,
+        dry_run=False,
+    )
+
     print()
     print("=" * 60)
     print("  REAL COLLECTION MODE")
     print("=" * 60)
+    target_table = "ndvi_records (legacy NDVI)" if is_ndvi else "satellite_index_records"
+    print(f"  Target table:     {target_table}")
+    print(f"  Indices:          {', '.join(codes)}")
+    print(f"  Lock file:        {lock_path or args.lock_file or DEFAULT_LOCK_FILE}")
+    print()
     print("  This mode is not fully implemented yet.")
     print("  Use --dry-run for validation.")
     print("=" * 60)
+
+    # Release lock before exit
+    release_lock(lock_path)
     sys.exit(0)
 
 
@@ -503,7 +619,6 @@ def run_real(args: argparse.Namespace) -> None:
 
 def json_output(path: str, data: dict) -> None:
     """Write a JSON summary to the given path. No secrets included."""
-    # Ensure no secrets leak
     safe = {k: v for k, v in data.items() if k not in ("token", "access_token", "credentials")}
     try:
         with open(path, "w", encoding="utf-8") as f:
@@ -531,7 +646,6 @@ def main() -> None:
                 file=sys.stderr,
             )
             sys.exit(2)
-        # Dry-run safe: default to max-fields=5 handled inside run_dry_run
 
     # Parse and validate index codes early
     _parse_indexes(args.index, args.indices)
