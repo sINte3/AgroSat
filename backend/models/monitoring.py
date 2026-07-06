@@ -10,6 +10,10 @@ from database import Base
 class NDVIRecord(Base):
     """Снимок NDVI поля с конкретной даты."""
     __tablename__ = "ndvi_records"
+    __table_args__ = (
+        UniqueConstraint("field_id", "captured_date",
+                         name="uq_ndvi_records_field_captured_date"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     field_id = Column(Integer, ForeignKey("fields.id"), nullable=False)
