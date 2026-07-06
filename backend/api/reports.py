@@ -6,6 +6,7 @@ API для отчётов AgroSat.
     GET /api/reports/management/summary — JSON management report read model
     GET /api/reports/management/satellite-indices/summary — SAVI/EVI/NDMI/NDRE aggregation
     GET /api/reports/management/pdf — скачать PDF управленческого отчёта
+    GET /api/reports/management/excel — скачать Excel управленческого отчёта
 """
 
 import logging
@@ -15,6 +16,9 @@ import urllib.parse
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, PatternFill
+from openpyxl.utils import get_column_letter
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from database import get_db
@@ -610,6 +614,235 @@ def download_management_pdf(
     return StreamingResponse(
         io.BytesIO(pdf_bytes),
         media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded}"},
+    )
+
+
+# ─── Excel helper ──────────────────────────────────────────────────────────────
+
+
+def _safe_str(val):
+    """Render value as string; missing/null as em-dash."""
+    if val is None:
+        return "—"
+    return str(val)
+
+
+def _bold_header(ws, row, max_col):
+    """Style a header row bold with fill."""
+    fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+    font = Font(bold=True)
+    for c in range(1, max_col + 1):
+        cell = ws.cell(row=row, column=c)
+        cell.font = font
+        cell.fill = fill
+        cell.alignment = Alignment(horizontal="center", wrap_text=True)
+
+
+def _auto_width(ws, min_width=10, max_width=40):
+    """Set column widths based on header content."""
+    for col_cells in ws.columns:
+        length = min_width
+        for i, cell in enumerate(col_cells):
+            if cell.value:
+                length = max(length, min(len(str(cell.value)) + 2, max_width))
+        ws.column_dimensions[get_column_letter(col_cells[0].column)].width = length
+
+
+# ─── Management Excel endpoint ───────────────────────────────────────────────
+
+
+@router.get(
+    "/management/excel",
+    summary="Download management report Excel",
+    description=(
+        "Generates and returns an XLSX management report with multiple worksheets: "
+        "Summary, Enterprises, Satellite Indices (cluster & enterprise), Alerts, and Limitations. "
+        "Tenant-scoped: admin/manager see all enterprises, "
+        "agronomist/viewer see only their own enterprise."
+    ),
+)
+def download_management_excel(
+    date_from: str = Query(None, description="Start date (ISO format, optional)"),
+    date_to: str = Query(None, description="End date (ISO format, optional)"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+    effective_eid: int = Depends(require_enterprise_scope),
+):
+    """Generate and return a management-level XLSX report."""
+
+    mgmt_data = _fetch_management_summary_data(db, date_from, date_to, current_user, effective_eid)
+    si_data = _fetch_satellite_indices_data(db, date_from, date_to, current_user, effective_eid)
+
+    wb = Workbook()
+
+    # ── Summary ──────────────────────────────────────────────────────────────
+    ws_summary = wb.active
+    ws_summary.title = "Summary"
+    s = mgmt_data["summary"]
+    dr = mgmt_data["date_range"]
+    df = mgmt_data["data_freshness"]
+
+    summary_rows = [
+        ("Generated At", mgmt_data["generated_at"]),
+        ("Date Range From", dr.get("from", "")),
+        ("Date Range To", dr.get("to", "")),
+        ("Total Fields", s["total_fields"]),
+        ("Total Hectares", s["total_hectares"]),
+        ("Fields With Data", s["fields_with_data"]),
+        ("Fields Without Data", s["fields_without_data"]),
+        ("Average NDVI", _safe_str(s.get("avg_ndvi"))),
+        ("Active Alerts", s["active_alerts"]),
+        ("Latest NDVI Date", _safe_str(df.get("latest_ndvi_date"))),
+        ("Latest Satellite Index Date", _safe_str(df.get("latest_satellite_index_date"))),
+    ]
+    for i, (label, value) in enumerate(summary_rows, 1):
+        ws_summary.cell(row=i, column=1, value=label)
+        ws_summary.cell(row=i, column=2, value=value)
+    _bold_header(ws_summary, 1, 2)
+    _auto_width(ws_summary)
+
+    # ── Enterprises ──────────────────────────────────────────────────────────
+    ws_ent = wb.create_sheet("Enterprises")
+    headers_ent = [
+        "Enterprise", "Field Count", "Total Hectares", "Active Alerts",
+        "Critical Alerts", "Fields With Data", "Fields Without Data",
+        "Average NDVI", "Latest Data Date",
+    ]
+    for c, h in enumerate(headers_ent, 1):
+        ws_ent.cell(row=1, column=c, value=h)
+    _bold_header(ws_ent, 1, len(headers_ent))
+
+    enterprises = mgmt_data.get("enterprises", [])
+    if enterprises:
+        for r, ent in enumerate(enterprises, 2):
+            ws_ent.cell(row=r, column=1, value=ent.get("name", ""))
+            ws_ent.cell(row=r, column=2, value=ent.get("field_count", 0))
+            ws_ent.cell(row=r, column=3, value=ent.get("total_hectares", 0))
+            ws_ent.cell(row=r, column=4, value=ent.get("active_alerts", 0))
+            ws_ent.cell(row=r, column=5, value=ent.get("critical_alerts", 0))
+            ws_ent.cell(row=r, column=6, value=ent.get("fields_with_data", 0))
+            ws_ent.cell(row=r, column=7, value=ent.get("fields_without_data", 0))
+            ws_ent.cell(row=r, column=8, value=_safe_str(ent.get("avg_ndvi")))
+            ws_ent.cell(row=r, column=9, value=_safe_str(ent.get("latest_data_date")))
+    else:
+        ws_ent.cell(row=2, column=1, value="No enterprise data available.")
+    _auto_width(ws_ent)
+
+    # ── Satellite Cluster ────────────────────────────────────────────────────
+    ws_si = wb.create_sheet("Satellite Cluster")
+    headers_si = [
+        "Index Code", "Average", "Minimum", "Maximum",
+        "Record Count", "Field Count", "Latest Captured Date",
+    ]
+    for c, h in enumerate(headers_si, 1):
+        ws_si.cell(row=1, column=c, value=h)
+    _bold_header(ws_si, 1, len(headers_si))
+
+    cluster = si_data.get("cluster", {})
+    for r, code in enumerate(sorted(cluster.keys()), 2):
+        idx = cluster[code]
+        ws_si.cell(row=r, column=1, value=code.upper())
+        ws_si.cell(row=r, column=2, value=_safe_str(idx.get("avg_mean_value")))
+        ws_si.cell(row=r, column=3, value=_safe_str(idx.get("min_mean_value")))
+        ws_si.cell(row=r, column=4, value=_safe_str(idx.get("max_mean_value")))
+        ws_si.cell(row=r, column=5, value=idx.get("record_count", 0))
+        ws_si.cell(row=r, column=6, value=idx.get("field_count", 0))
+        ws_si.cell(row=r, column=7, value=_safe_str(idx.get("latest_captured_date")))
+    _auto_width(ws_si)
+
+    # ── Satellite Enterprises ─────────────────────────────────────────────────
+    ws_se = wb.create_sheet("Satellite Enterprises")
+    headers_se = [
+        "Enterprise", "SAVI Avg", "EVI Avg", "NDMI Avg", "NDRE Avg",
+        "Latest Snapshot Date",
+    ]
+    for c, h in enumerate(headers_se, 1):
+        ws_se.cell(row=1, column=c, value=h)
+    _bold_header(ws_se, 1, len(headers_se))
+
+    si_enterprises = si_data.get("enterprises", [])
+    if si_enterprises:
+        for r, ent in enumerate(si_enterprises, 2):
+            ws_se.cell(row=r, column=1, value=ent.get("enterprise_name", ""))
+            indices = ent.get("indices", {})
+            ws_se.cell(row=r, column=2, value=_safe_str(indices.get("savi", {}).get("avg_mean_value")))
+            ws_se.cell(row=r, column=3, value=_safe_str(indices.get("evi", {}).get("avg_mean_value")))
+            ws_se.cell(row=r, column=4, value=_safe_str(indices.get("ndmi", {}).get("avg_mean_value")))
+            ws_se.cell(row=r, column=5, value=_safe_str(indices.get("ndre", {}).get("avg_mean_value")))
+            ws_se.cell(row=r, column=6, value=_safe_str(ent.get("latest_snapshot_date")))
+    else:
+        ws_se.cell(row=2, column=1, value="No enterprise satellite index data available.")
+    _auto_width(ws_se)
+
+    # ── Alerts ───────────────────────────────────────────────────────────────
+    ws_alerts = wb.create_sheet("Alerts")
+    alerts = mgmt_data.get("alerts", {})
+    alert_summary_rows = [
+        ("Total Active Alerts", alerts.get("total_active", 0)),
+        ("Critical", alerts.get("critical", 0)),
+        ("High / Warning", alerts.get("high", 0)),
+        ("Info", alerts.get("info", 0)),
+    ]
+    for i, (label, value) in enumerate(alert_summary_rows, 1):
+        ws_alerts.cell(row=i, column=1, value=label)
+        ws_alerts.cell(row=i, column=2, value=value)
+    _bold_header(ws_alerts, 1, 2)
+
+    latest_items = alerts.get("latest_items", [])
+    if latest_items:
+        # blank row
+        blank_row = len(alert_summary_rows) + 2
+        ws_alerts.cell(row=blank_row, column=1, value="Latest Alert Items")
+        ws_alerts.cell(row=blank_row, column=1).font = Font(bold=True)
+        headers_alert_items = ["ID", "Title", "Severity", "Field", "Enterprise", "Triggered At"]
+        hr = blank_row + 1
+        for c, h in enumerate(headers_alert_items, 1):
+            ws_alerts.cell(row=hr, column=c, value=h)
+        _bold_header(ws_alerts, hr, len(headers_alert_items))
+        for r, item in enumerate(latest_items, hr + 1):
+            ws_alerts.cell(row=r, column=1, value=item.get("id", ""))
+            ws_alerts.cell(row=r, column=2, value=_safe_str(item.get("title")))
+            ws_alerts.cell(row=r, column=3, value=_safe_str(item.get("severity")))
+            ws_alerts.cell(row=r, column=4, value=_safe_str(item.get("field_name")))
+            ws_alerts.cell(row=r, column=5, value=_safe_str(item.get("enterprise_name")))
+            ws_alerts.cell(row=r, column=6, value=_safe_str(item.get("triggered_at")))
+    _auto_width(ws_alerts)
+
+    # ── Limitations ──────────────────────────────────────────────────────────
+    ws_lim = wb.create_sheet("Limitations")
+    headers_lim = ["Limitation"]
+    ws_lim.cell(row=1, column=1, value="Limitation")
+    _bold_header(ws_lim, 1, 1)
+
+    all_limitations = mgmt_data.get("limitations", []) + si_data.get("limitations", [])
+    if all_limitations:
+        for r, lim in enumerate(all_limitations, 2):
+            ws_lim.cell(row=r, column=1, value=lim)
+    else:
+        ws_lim.cell(row=2, column=1, value="No limitations.")
+    _auto_width(ws_lim, max_width=80)
+
+    # ── Generate XLSX bytes ──────────────────────────────────────────────────
+    try:
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        xlsx_bytes = buf.getvalue()
+    except Exception as e:
+        logger.error(f"Excel generation failed: {type(e).__name__}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Ошибка генерации Excel управленческого отчёта: {str(e)[:200]}",
+        )
+
+    date_str = datetime.utcnow().strftime("%Y-%m-%d")
+    filename = f"agrosat-management-report-{date_str}.xlsx"
+    encoded = urllib.parse.quote(filename)
+
+    return StreamingResponse(
+        io.BytesIO(xlsx_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded}"},
     )
 
