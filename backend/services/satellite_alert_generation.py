@@ -4,20 +4,21 @@ Satellite alert candidate generation from agronomic risk facts.
 Read-only by default. Converts agronomic risk engine output (TASK_136)
 into controlled satellite alert candidates.
 
-Idempotency is computed client-side: candidates carry a deterministic
-idempotency_key based on (field_id, alert_type, source, index_code,
-captured_date, reason_code). Persistent apply is deferred until the
-alerts table has a dedicated idempotency column (TASK_137B).
+Protected apply mode (TASK_139): explicit --apply required for persistence.
+Dry-run is always the default. Apply uses source/source_key idempotency.
 
-No DB writes. No Sentinel Hub calls. No scheduler.
+No DB writes without --apply. No Sentinel Hub calls. No scheduler.
 """
 import logging
 from datetime import datetime, date
 from hashlib import md5
 from typing import Any
 
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from models.monitoring import Alert
 from services.agronomic_risk_engine import (
     build_agronomic_risk_summary,
     DEFAULT_FRESH_DAYS,
@@ -239,3 +240,293 @@ def generate_alert_candidates(
         "candidates": candidates,
         "limitations": list(set(limitations)),
     }
+
+
+# ─── Protected apply mode (TASK_139) ───────────────────────────────────
+
+
+def build_alert_from_candidate(candidate: dict) -> dict:
+    """
+    Map candidate dict to Alert insert payload.
+
+    Returns dict matching Alert columns. Use deterministic Russian text.
+    """
+    reason_code = candidate.get("reason_code", "")
+    alert_type = candidate.get("alert_type", "")
+    severity = candidate.get("severity", "medium")
+    current_value = candidate.get("current_value")
+    previous_value = candidate.get("previous_value")
+    delta = candidate.get("delta")
+    captured_date = candidate.get("captured_date")
+    field_name = candidate.get("field_name", "")
+    index_code = candidate.get("index_code")
+    idempotency_key = candidate.get("idempotency_key", "")
+    now_utc = datetime.utcnow()
+
+    # Title mapping
+    title_map: dict[str, str] = {
+        "vegetation_low_ndvi": "Спутниковый риск: снижение NDVI",
+        "vegetation_ndvi_decline": "Спутниковый риск: падение NDVI",
+        "water_stress_low_ndmi": "Спутниковый риск: водный стресс NDMI",
+        "water_stress_ndmi_decline": "Спутниковый риск: ухудшение NDMI",
+        "satellite_missing_data": "Спутниковый риск: нет данных",
+        "satellite_stale_data": "Спутниковый риск: устаревшие данные",
+        "satellite_cloudy_observation": "Спутниковый риск: облачность",
+        "satellite_low_valid_pixels": "Спутниковый риск: качество снимка",
+        "satellite_suspicious_value": "Спутниковый риск: аномальное значение",
+    }
+    title = title_map.get(alert_type, f"Спутниковый риск: {alert_type}")
+
+    # Description: field name, index, reason code, values, captured date
+    desc_parts = [f"Поле: {field_name}"]
+    if index_code:
+        desc_parts.append(f"Индекс: {index_code}")
+    desc_parts.append(f"Причина: {reason_code}")
+    if current_value is not None:
+        desc_parts.append(f"Значение: {current_value}")
+    if previous_value is not None:
+        desc_parts.append(f"Предыдущее: {previous_value}")
+    if delta is not None:
+        desc_parts.append(f"Дельта: {delta}")
+    if captured_date:
+        desc_parts.append(f"Дата снимка: {captured_date}")
+    description = " | ".join(desc_parts)
+
+    # Recommendation
+    if reason_code in ("missing_data", "stale_data"):
+        recommendation = (
+            "Проверить поступление спутниковых данных "
+            "и при необходимости повторить сбор через CLI."
+        )
+    elif reason_code in ("cloudy_observation", "low_valid_pixels"):
+        recommendation = (
+            "Не принимать агрономическое решение только по этому снимку; "
+            "дождаться снимка лучшего качества."
+        )
+    else:
+        recommendation = (
+            "Проверить поле агрономом и сопоставить "
+            "со свежими снимками/осмотром."
+        )
+
+    # Triggered value: prefer current_value
+    triggered_value = current_value
+    if triggered_value is None and previous_value is not None:
+        triggered_value = previous_value
+
+    # Timestamp
+    if captured_date:
+        try:
+            triggered_at = datetime.strptime(
+                captured_date, "%Y-%m-%d"
+            )
+        except ValueError:
+            triggered_at = now_utc
+    else:
+        triggered_at = now_utc
+
+    return {
+        "field_id": candidate.get("field_id"),
+        "alert_type": alert_type,
+        "severity": severity,
+        "title": title,
+        "description": description,
+        "recommendation": recommendation,
+        "triggered_value": triggered_value,
+        "threshold_value": None,
+        "triggered_at": triggered_at,
+        "is_active": True,
+        "source": ALERT_SOURCE,
+        "source_key": idempotency_key,
+        "ndvi_record_id": None,
+    }
+
+
+def apply_alert_candidates(
+    db: Session,
+    candidates: list[dict],
+    rollback: bool = False,
+) -> dict[str, Any]:
+    """
+    Persist alert candidates to the alerts table.
+
+    Idempotent: checks existing active (source, source_key) in bulk,
+    inserts only non-duplicates, relies on DB partial unique index for
+    race safety.
+
+    Args:
+        db: DB session.
+        candidates: list of candidate dicts from generate_alert_candidates.
+        rollback: if True, perform inserts inside transaction then rollback.
+
+    Returns:
+        dict with mode, rollback flag, summary, per-result list, limitations.
+    """
+    now = datetime.utcnow()
+    limitations: list[str] = []
+    result: dict[str, Any] = {
+        "generated_at": now.isoformat(),
+        "mode": "apply",
+        "rollback": rollback,
+        "summary": {
+            "candidates_total": len(candidates),
+            "inserted": 0,
+            "skipped_existing": 0,
+            "blocked": 0,
+        },
+        "results": [],
+        "limitations": [],
+    }
+
+    # Guard: no candidates → early return
+    if not candidates:
+        result["limitations"].append("No candidates to apply.")
+        return result
+
+    # 1. Bulk fetch existing active source_keys for all candidate keys
+    candidate_keys = [
+        c.get("idempotency_key", "") for c in candidates
+    ]
+    existing_keys: set[str] = set()
+    try:
+        rows = db.execute(
+            text(
+                "SELECT source_key FROM alerts "
+                "WHERE source = :source "
+                "AND source_key = ANY(:keys) "
+                "AND is_active = true"
+            ),
+            {
+                "source": ALERT_SOURCE,
+                "keys": candidate_keys,
+            },
+        ).fetchall()
+        # Distinguish column access style
+        for r in rows:
+            val = r.source_key if hasattr(r, "source_key") else r[0]
+            if val:
+                existing_keys.add(val)
+    except Exception as exc:
+        result["limitations"].append(
+            f"Bulk existence check error: {exc}"
+        )
+        # Fall back to empty set → will catch duplicates via IntegrityError
+        existing_keys = set()
+
+    # 2. Process candidates
+    inserted_count = 0
+    skipped_count = 0
+    blocked_count = 0
+    results_list: list[dict[str, Any]] = []
+
+    for c in candidates:
+        sk = c.get("idempotency_key", "")
+        fid = c.get("field_id")
+        atype = c.get("alert_type", "")
+        pair = {
+            "field_id": fid,
+            "alert_type": atype,
+            "source": ALERT_SOURCE,
+            "source_key": sk,
+        }
+
+        if sk in existing_keys:
+            pair["action"] = "skipped_existing"
+            pair["reason"] = "Active alert with same source_key already exists"
+            results_list.append(pair)
+            skipped_count += 1
+            continue
+
+        payload = build_alert_from_candidate(c)
+
+        try:
+            # Use savepoint per row so a single IntegrityError
+            # does not abort the whole batch.
+            # WHERE NOT EXISTS provides reliable rowcount;
+            # ON CONFLICT DO NOTHING is race-safety net between
+            # check and insert.
+            with db.begin_nested():
+                insert_result = db.execute(
+                    text(
+                        """INSERT INTO alerts
+                        (field_id, alert_type, severity, title, description,
+                         recommendation, triggered_value, threshold_value,
+                         triggered_at, is_active, source, source_key,
+                         ndvi_record_id)
+                        SELECT
+                        :field_id, :alert_type, :severity, :title, :description,
+                        :recommendation, :triggered_value, :threshold_value,
+                        :triggered_at, :is_active, :source, :source_key,
+                        :ndvi_record_id
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM alerts
+                            WHERE source = :w_source
+                            AND source_key = :w_source_key
+                            AND is_active = true
+                        )
+                        ON CONFLICT DO NOTHING"""
+                    ),
+                    {
+                        **payload,
+                        "w_source": ALERT_SOURCE,
+                        "w_source_key": sk,
+                    },
+                )
+            affected = insert_result.rowcount or 0
+            if affected == 1:
+                pair["action"] = "inserted"
+                pair["reason"] = "New alert persisted"
+                results_list.append(pair)
+                inserted_count += 1
+            else:
+                pair["action"] = "skipped_existing"
+                pair["reason"] = (
+                    f"INSERT/SELECT rowcount={affected}; "
+                    "existing row matched, not inserted"
+                )
+                results_list.append(pair)
+                skipped_count += 1
+        except IntegrityError:
+            pair["action"] = "skipped_existing"
+            pair["reason"] = (
+                "IntegrityError — duplicate source_key caught "
+                "by partial unique index"
+            )
+            results_list.append(pair)
+            skipped_count += 1
+        except Exception as exc:
+            pair["action"] = "blocked"
+            pair["reason"] = f"Insert error: {exc}"
+            results_list.append(pair)
+            blocked_count += 1
+
+    result["summary"]["inserted"] = inserted_count
+    result["summary"]["skipped_existing"] = skipped_count
+    result["summary"]["blocked"] = blocked_count
+    result["results"] = results_list
+    result["limitations"] = limitations
+
+    # ─── Commit/rollback semantics ──────────────────────────────────
+    # Use flush() for intra-transaction visibility (callers see rows);
+    # use commit() only when the caller explicitly wants persistence
+    # (CLI calls db.commit() after apply returns).
+    # This allows callers (including validation tests) to wrap in a
+    # savepoint and rollback without leaking writes.
+    committed = False
+    rolled_back = False
+    if rollback:
+        db.rollback()
+        rolled_back = True
+    elif blocked_count > 0:
+        db.rollback()
+        rolled_back = True
+    else:
+        db.flush()
+        # NOTE: Caller must db.commit() if persistence is desired.
+        # The CLI does this after apply_alert_candidates returns.
+        committed = True
+
+    result["committed"] = committed
+    result["rolled_back"] = rolled_back
+
+    return result
