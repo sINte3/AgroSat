@@ -44,3 +44,4 @@ pydantic==2.13.4
 # Utils
 python-dateutil==2.9.0
 reportlab==4.5.1
+openpyxl==3.1.5
