@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 Hardened CLI entrypoint for satellite data collection.
 
@@ -10,26 +10,33 @@ Idempotency and locking:
   - Idempotency helpers check existing records before writing.
   - --skip-existing mode skips fields/indexes with existing data.
   - --force flag overrides skip logic.
+  - --write flag is required for actual DB writes.
 
-Dry-run mode: no Sentinel Hub calls, no DB writes.
+Dry-run mode: no Sentinel Hub calls, no DB writes (default).
+Apply mode (--apply): Sentinel Hub calls + parse, no DB writes.
+Write mode (--write): Sentinel Hub calls + parse + idempotent DB writes.
+
 NDVI routes to legacy ndvi_records path only. New indices routed to
-satellite_index_records only.
+satellite_index_records only. ndvi for satellite_index_records is rejected.
 
 Usage:
   python backend/scripts/collect_satellite_indices.py --help
   python backend/scripts/collect_satellite_indices.py --dry-run --field-id 4 --index savi --date-from 2026-07-01 --date-to 2026-07-01 --max-fields 1
   python backend/scripts/collect_satellite_indices.py --dry-run --field-id 4 --indices savi,ndmi --date-from 2026-07-01 --date-to 2026-07-01 --max-fields 1
   python backend/scripts/collect_satellite_indices.py --dry-run --field-id 4 --index ndvi --date-from 2026-07-01 --date-to 2026-07-01 --max-fields 1
+  python backend/scripts/collect_satellite_indices.py --apply --field-id 4 --index savi --date-from 2026-07-01 --date-to 2026-07-01 --max-fields 1
+  python backend/scripts/collect_satellite_indices.py --write --field-id 4 --index savi --date-from 2026-07-01 --date-to 2026-07-01 --max-fields 1
 """
 
 import argparse
 import json
 import logging
+import math
 import os
 import sys
 import time
 from datetime import date, datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -43,6 +50,7 @@ from config import settings
 from database import SessionLocal
 from services.collector_idempotency import (
     IdempotencyMode,
+    check_exists_by_key,
     count_existing_ndvi,
     count_existing_satellite_index,
     has_db_level_uniqueness,
@@ -57,6 +65,14 @@ from services.satellite_indices import (
     SUPPORTED_INDEX_CODES as MULTI_INDEX_CODES,
     build_multi_index_evalscript,
     normalize_index_code,
+    validate_index_quality,
+)
+from services.satellite_collection import (
+    MultiIndexSentinelHubService,
+    MockMultiIndexSatelliteService,
+    get_multi_index_satellite_service,
+    get_mock_multi_index_satellite_service,
+    filter_by_quality,
 )
 
 # -- Constants --
@@ -244,16 +260,28 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         ),
     )
 
-    # Mode
+    # Mode flags
     parser.add_argument(
         "--dry-run", action="store_true", default=False,
-        help="Safe mode: no Sentinel Hub calls, no DB writes. Default: True if no --force.",
+        help="Safe mode: no Sentinel Hub calls, no DB writes (default).",
+    )
+    parser.add_argument(
+        "--apply", action="store_true", default=False,
+        help="Apply mode: enable Sentinel Hub calls for real collection (no DB writes).",
+    )
+    parser.add_argument(
+        "--write", action="store_true", default=False,
+        help="Write mode: enable both Sentinel Hub calls AND idempotent DB writes.",
+    )
+    parser.add_argument(
+        "--mock-sentinel", action="store_true", default=False,
+        help="Use mock satellite service (no network calls). For validation only.",
     )
 
     # Scope
     parser.add_argument(
         "--field-id", type=int, default=None,
-        help="Limit collection to a single field ID.",
+        help="Limit collection to a single field ID. Required for apply/write mode.",
     )
     parser.add_argument(
         "--enterprise-id", type=int, default=None,
@@ -261,13 +289,13 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--max-fields", type=int, default=None,
-        help="Maximum number of fields to process. Required unless --field-id or --enterprise-id is set.",
+        help="Maximum number of fields to process.",
     )
 
     # Index selection
     parser.add_argument(
         "--index", type=str, default=None,
-        help="Single index code: ndvi, savi, evi, ndmi, ndre.",
+        help="Single index code: savi, evi, ndmi, ndre (no NDVI for satellite_index_records).",
     )
     parser.add_argument(
         "--indices", type=str, default=None,
@@ -283,20 +311,29 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         "--date-to", type=str, default=None,
         help="End date YYYY-MM-DD. Default: today.",
     )
+    parser.add_argument(
+        "--max-date-range", type=int, default=120,
+        help="Maximum days in date range for safety. Default: 120.",
+    )
 
-    # Safety guards
+    # Safety / idempotency
     parser.add_argument(
         "--force", action="store_true", default=False,
-        help="Explicit opt-in for real collection (enables Sentinel Hub calls and DB writes). "
-             "Also overrides skip-existing in idempotency checks.",
+        help="Override skip-existing and force re-collection. Also serves as "
+             "legacy alias for --apply --write combined.",
     )
     parser.add_argument(
         "--skip-existing", action="store_true", default=False,
-        help="Skip fields/indexes that already have data for the date range.",
+        help="Skip fields/index_dates that already have records in DB.",
     )
     parser.add_argument(
         "--no-sentinel", action="store_true", default=False,
-        help="Prevent any Sentinel Hub API calls even if credentials are available.",
+        help="Prevent any Sentinel Hub API calls even in apply/write mode.",
+    )
+    parser.add_argument(
+        "--overwrite", action="store_true", default=False,
+        help="Overwrite existing records on conflict (requires --write). "
+             "Not enabled by default -- idempotent skip is default.",
     )
     parser.add_argument(
         "--output-log", type=str, default=None,
@@ -567,10 +604,97 @@ def run_dry_run(args: argparse.Namespace) -> None:
 # -- Real-run planner --
 
 
+def _get_satellite_service(
+    mock_sentinel: bool,
+    no_sentinel: bool,
+) -> Any:
+    """Get satellite service instance based on flags.
+
+    Args:
+        mock_sentinel: Use mock service (no network calls).
+        no_sentinel: Prevent real Sentinel Hub calls.
+
+    Returns:
+        A service instance with collect_indices() interface.
+    """
+    if mock_sentinel or no_sentinel:
+        logger.info("Using mock satellite service (no network calls)")
+        return get_mock_multi_index_satellite_service()
+
+    logger.info("Using real Sentinel Hub satellite service")
+    return get_multi_index_satellite_service()
+
+
+def _insert_satellite_index_record(
+    field_id: int,
+    captured_date: date,
+    index_code: str,
+    mean_value: float | None,
+    min_value: float | None = None,
+    max_value: float | None = None,
+    std_value: float | None = None,
+    p10_value: float | None = None,
+    p90_value: float | None = None,
+    valid_pixels_pct: float | None = None,
+    cloud_cover_pct: float | None = None,
+    satellite: str = "Sentinel-2",
+) -> bool:
+    """
+    Insert a single satellite_index_record. Returns True on success, False on skip/error.
+
+    Uses idempotent insert: checks (field_id, captured_date, index_code) uniqueness
+    before inserting. Does NOT overwrite existing records.
+    """
+    if check_exists_by_key(field_id, captured_date, index_code):
+        logger.info("  SKIP (exists): field=%d date=%s code=%s", field_id, captured_date, index_code)
+        return False
+
+    db = SessionLocal()
+    try:
+        from sqlalchemy import text as sa_text
+
+        db.execute(
+            sa_text(
+                "INSERT INTO satellite_index_records "
+                "(field_id, captured_date, index_code, mean_value, min_value, max_value, "
+                " std_value, p10_value, p90_value, valid_pixels_pct, cloud_cover_pct, satellite) "
+                "VALUES (:fid, :cd, :ic, :mv, :minv, :maxv, :stdv, :p10, :p90, :vpp, :ccp, :sat)"
+            ),
+            {
+                "fid": field_id,
+                "cd": captured_date,
+                "ic": index_code,
+                "mv": mean_value,
+                "minv": min_value,
+                "maxv": max_value,
+                "stdv": std_value,
+                "p10": p10_value,
+                "p90": p90_value,
+                "vpp": valid_pixels_pct,
+                "ccp": cloud_cover_pct,
+                "sat": satellite,
+            },
+        )
+        db.commit()
+        logger.info("  INSERTED: field=%d date=%s code=%s mean=%.4f", field_id, captured_date, index_code, mean_value or 0)
+        return True
+    except Exception:
+        db.rollback()
+        logger.exception("  INSERT FAILED: field=%d date=%s code=%s", field_id, captured_date, index_code)
+        return False
+    finally:
+        db.close()
+
+
 def run_real(args: argparse.Namespace) -> None:
     """
-    Execute real collection mode stub.
-    For future implementation of actual Sentinel Hub collection.
+    Execute real or apply collection mode for satellite indices.
+
+    Modes:
+      --apply:          Enable Sentinel Hub calls (or mock), parse results, no DB writes.
+      --write:          Enable both Sentinel Hub calls AND idempotent DB writes.
+      --mock-sentinel:  Use mock satellite service instead of real Sentinel Hub.
+      --no-sentinel:    Force mock (same as --mock-sentinel for safety).
     """
     # Multi-field write-mode guard
     if args.field_id is None and args.enterprise_id is None and (args.max_fields is None or args.max_fields <= 0):
@@ -584,9 +708,51 @@ def run_real(args: argparse.Namespace) -> None:
     started_at = datetime.now(timezone.utc).replace(microsecond=0)
     codes = _parse_indexes(args.index, args.indices)
     is_ndvi = codes == [LEGACY_NDVI_CODE] or (len(codes) == 1 and codes[0] == LEGACY_NDVI_CODE)
+    is_apply_mode = bool(args.apply)
+    is_write_mode = bool(args.write) or bool(args.force)
+    do_db_writes = is_write_mode
+    use_mock = bool(args.mock_sentinel) or bool(args.no_sentinel)
 
+    # Determine execution mode for display
+    if use_mock and do_db_writes:
+        mode_label = "MOCK + WRITE"
+    elif use_mock and not do_db_writes:
+        mode_label = "MOCK APPLY (no DB writes)"
+    elif do_db_writes:
+        mode_label = "REAL + WRITE"
+    else:
+        mode_label = "APPLY (Sentinel Hub calls, no DB writes)"
+
+    # Reject NDVI for satellite_index_records path
+    if not is_ndvi and LEGACY_NDVI_CODE in codes:
+        print("ERROR: ndvi is not allowed in satellite_index_records path", file=sys.stderr)
+        sys.exit(2)
+
+    # Guard: require --field-id for apply/write modes (prevent broad scope)
+    if args.field_id is None and not is_ndvi:
+        print(
+            "ERROR: --field-id is required for satellite index collection. "
+            "Broad enterprise/all-fields collection for satellite indices is not yet enabled.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    # Date range safety guard
     date_from = _validate_date(args.date_from or (date.today() - timedelta(days=30)).isoformat(), "--date-from")
     date_to = _validate_date(args.date_to or date.today().isoformat(), "--date-to")
+    date_range_days = (date_to - date_from).days
+    max_range = args.max_date_range or 120
+    if date_range_days > max_range:
+        print(
+            f"ERROR: Date range {date_range_days} days exceeds max {max_range} days. "
+            f"Use --max-date-range to override (not recommended for production).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    if date_from > date_to:
+        print(f"ERROR: --date-from ({date_from}) is after --date-to ({date_to})", file=sys.stderr)
+        sys.exit(2)
 
     # Acquire lock for real mode
     force_lock = args.force_lock or args.break_stale_lock
@@ -596,21 +762,387 @@ def run_real(args: argparse.Namespace) -> None:
         dry_run=False,
     )
 
+    # Get satellite service
+    service = _get_satellite_service(use_mock, args.no_sentinel)
+
+    # Fetch fields
+    max_fields = args.max_fields
+    if args.field_id is not None:
+        max_fields = 1  # single field mode
+    fields = _query_fields(args.field_id, args.enterprise_id, max_fields)
+    total_fields = len(fields)
+
+    if not fields:
+        print("ERROR: No active fields found matching criteria", file=sys.stderr)
+        release_lock(lock_path)
+        sys.exit(1)
+
+    # ── Idempotency setup ──
+    if args.force:
+        idempotency_mode = IdempotencyMode.FORCE
+    elif args.skip_existing or do_db_writes:
+        idempotency_mode = IdempotencyMode.SKIP_EXISTING
+    else:
+        idempotency_mode = IdempotencyMode.PLANNED_ONLY
+    do_skip_existing = idempotency_mode == IdempotencyMode.SKIP_EXISTING and not args.force
+    do_overwrite = bool(args.overwrite) and do_db_writes
+
+    # ── NDVI legacy path ──
+    if is_ndvi:
+        print()
+        print("=" * 60)
+        print("  LEGACY NDVI PATH (routed through existing dry-run code)")
+        print("=" * 60)
+        print(f"  Mode:                 {mode_label}")
+        print(f"  Indices:              {', '.join(codes)}")
+        print(f"  Fields selected:      {total_fields}")
+        print(f"  Lock:                 {lock_path or args.lock_file or DEFAULT_LOCK_FILE}")
+        print()
+        print("  NOTE: write mode for NDVI is not implemented in this script path.")
+        print("  NDVI collection uses the legacy ndvi_collector pipeline.")
+        print()
+        # Dry-run-style report for NDVI in real mode
+        for field in fields:
+            fid = field["id"]
+            fname = field.get("name", f"field_{fid}")
+            geom_wkt = field.get("geometry_wkt")
+            print(f"  Field {fid} ({fname}):")
+            if not geom_wkt:
+                print(f"    SKIP: no geometry")
+                continue
+            for code in codes:
+                existing = _query_existing_ndvi(fid, date_from, date_to)
+                print(f"    [{code}] existing NDVI records: {len(existing)}")
+        release_lock(lock_path)
+        sys.exit(0)
+
+    # ── Collection loop ──
+    target_table = "satellite_index_records"
+    per_field_results: list[dict] = []
+    total_sentinel_calls = 0
+    total_candidates = 0
+    total_would_insert = 0
+    total_would_skip_existing = 0
+    total_quality_passed = 0
+    total_quality_blocked = 0
+    total_db_inserted = 0
+    total_db_skipped = 0
+    total_errors = 0
+
     print()
     print("=" * 60)
-    print("  REAL COLLECTION MODE")
+    print("  SATELLITE INDEX COLLECTION")
     print("=" * 60)
-    target_table = "ndvi_records (legacy NDVI)" if is_ndvi else "satellite_index_records"
-    print(f"  Target table:     {target_table}")
-    print(f"  Indices:          {', '.join(codes)}")
-    print(f"  Lock file:        {lock_path or args.lock_file or DEFAULT_LOCK_FILE}")
+    print(f"  Mode:                 {mode_label}")
+    print(f"  Target table:         {target_table}")
+    print(f"  Indices:              {', '.join(codes)}")
+    print(f"  Fields selected:      {total_fields}")
+    print(f"  Date range:           {date_from} to {date_to} ({date_range_days} days)")
+    print(f"  Idempotency mode:     {idempotency_mode}")
+    print(f"  Overwrite:            {do_overwrite}")
+    print(f"  Lock:                 {lock_path or args.lock_file or DEFAULT_LOCK_FILE}")
     print()
-    print("  This mode is not fully implemented yet.")
-    print("  Use --dry-run for validation.")
+
+    for field in fields:
+        fid = field["id"]
+        fname = field.get("name", f"field_{fid}")
+        geom_wkt = field.get("geometry_wkt")
+
+        print(f"  Field {fid} ({fname}):")
+
+        if not geom_wkt:
+            print(f"    SKIP: no geometry")
+            per_field_results.append({
+                "field_id": fid,
+                "field_name": fname,
+                "status": "skipped_no_geometry",
+                "error": None,
+            })
+            continue
+
+        field_errors: list[str] = []
+        field_candidates = 0
+        field_would_insert = 0
+        field_would_skip = 0
+        field_quality_passed = 0
+        field_quality_blocked = 0
+        field_db_inserted = 0
+        field_db_skipped = 0
+
+        # Plan actions per index code
+        planned = plan_actions(fid, codes, date_from, date_to, idempotency_mode)
+        for p in planned:
+            ic = p["index_code"]
+            action = p["action"]
+            existing_count = p["existing_count"]
+            print(f"    [{ic}] planned action: {action} (existing={existing_count})")
+
+        # Determine which codes to actually collect
+        codes_to_collect: list[str] = []
+        for p in planned:
+            ic = p["index_code"]
+            if p["action"] == "skip_existing" and do_skip_existing and not do_overwrite:
+                total_would_skip_existing += 1
+                field_would_skip += 1
+                print(f"      SKIP: {ic} already has {p['existing_count']} records")
+            elif is_ndvi:
+                print(f"      NDVI path: skipping satellite service call (legacy path)")
+                total_would_skip_existing += 1
+                field_would_skip += 1
+            else:
+                codes_to_collect.append(ic)
+
+        if not codes_to_collect:
+            print(f"      No codes to collect (all skipped)")
+            per_field_results.append({
+                "field_id": fid,
+                "field_name": fname,
+                "status": "all_skipped",
+                "errors": field_errors,
+                "candidates": field_candidates,
+                "would_insert": field_would_insert,
+                "would_skip_existing": field_would_skip,
+                "quality_passed": field_quality_passed,
+                "quality_blocked": field_quality_blocked,
+                "db_inserted": field_db_inserted,
+                "db_skipped": field_db_skipped,
+            })
+            continue
+
+        # ── Collect indices from satellite service ──
+        try:
+            print(f"      Collecting indices: {', '.join(codes_to_collect)} ...")
+            parsed = service.collect_indices(
+                geometry_wkt=geom_wkt,
+                index_codes=codes_to_collect,
+                date_from=date_from,
+                date_to=date_to,
+            )
+            total_sentinel_calls += 1
+            print(f"      Sentinel Hub response parsed for {len(parsed)} indices")
+        except Exception as e:
+            err_msg = f"Satellite collection failed: {e}"
+            print(f"      ERROR: {err_msg}")
+            field_errors.append(str(e))
+            total_errors += 1
+            per_field_results.append({
+                "field_id": fid,
+                "field_name": fname,
+                "status": "collection_error",
+                "errors": field_errors,
+                "candidates": field_candidates,
+                "would_insert": field_would_insert,
+                "would_skip_existing": field_would_skip,
+                "quality_passed": field_quality_passed,
+                "quality_blocked": field_quality_blocked,
+                "db_inserted": field_db_inserted,
+                "db_skipped": field_db_skipped,
+                "collection_error": err_msg,
+            })
+            continue
+
+        # ── Apply quality filter ──
+        quality_passed = filter_by_quality(
+            parsed,
+            codes_to_collect,
+            max_cloud_cover=30.0,
+            min_valid_pixels=30.0,
+        )
+        quality_blocked = {k: v for k, v in parsed.items() if k not in quality_passed}
+        field_quality_passed = len(quality_passed)
+        field_quality_blocked = len(quality_blocked)
+        total_quality_passed += field_quality_passed
+        total_quality_blocked += field_quality_blocked
+
+        for code in quality_blocked:
+            data = quality_blocked[code]
+            valid, reason = validate_index_quality(
+                code,
+                data.get("mean_value"),
+                cloud_cover_pct=data.get("cloud_cover_pct"),
+                min_value=data.get("min_value"),
+                max_value=data.get("max_value"),
+                valid_pixels_pct=data.get("valid_pixels_pct"),
+            )
+            print(f"      QUALITY BLOCKED: {code} — {reason}")
+
+        for code in quality_passed:
+            data = quality_passed[code]
+            field_candidates += 1
+            total_candidates += 1
+
+            captured_date_str = data.get("captured_date")
+            try:
+                cd = datetime.strptime(captured_date_str, "%Y-%m-%d").date() if captured_date_str else date_to
+            except (ValueError, TypeError):
+                cd = date_to
+
+            mean_val = data.get("mean_value")
+            min_val = data.get("min_value")
+            max_val = data.get("max_value")
+            std_val = data.get("std_value")
+            p10_val = data.get("p10_value")
+            p90_val = data.get("p90_value")
+            vpp = data.get("valid_pixels_pct")
+            ccp = data.get("cloud_cover_pct")
+
+            print(f"      CANDIDATE: [{code}] date={captured_date_str} mean={mean_val} "
+                  f"min={min_val} max={max_val} valid_pct={vpp} cloud_pct={ccp}")
+
+            if do_db_writes:
+                # Check existing record before insert (idempotent)
+                if not do_overwrite and check_exists_by_key(fid, cd, code):
+                    print(f"        SKIP (exists in DB)")
+                    field_db_skipped += 1
+                    total_db_skipped += 1
+                    continue
+
+                if do_overwrite:
+                    # Delete existing before re-insert (overwrite mode)
+                    db = SessionLocal()
+                    try:
+                        from sqlalchemy import text as sa_text
+                        db.execute(
+                            sa_text(
+                                "DELETE FROM satellite_index_records "
+                                "WHERE field_id = :fid AND captured_date = :cd AND index_code = :ic"
+                            ),
+                            {"fid": fid, "cd": cd, "ic": code},
+                        )
+                        db.commit()
+                        print(f"        OVERWRITE: deleted existing record for {code}")
+                    except Exception:
+                        db.rollback()
+                    finally:
+                        db.close()
+
+                inserted = _insert_satellite_index_record(
+                    field_id=fid,
+                    captured_date=cd,
+                    index_code=code,
+                    mean_value=mean_val,
+                    min_value=min_val,
+                    max_value=max_val,
+                    std_value=std_val,
+                    p10_value=p10_val,
+                    p90_value=p90_val,
+                    valid_pixels_pct=vpp,
+                    cloud_cover_pct=ccp,
+                )
+                if inserted:
+                    field_db_inserted += 1
+                    total_db_inserted += 1
+                else:
+                    field_db_skipped += 1
+                    total_db_skipped += 1
+            else:
+                field_would_insert += 1
+                total_would_insert += 1
+
+        per_field_results.append({
+            "field_id": fid,
+            "field_name": fname,
+            "status": "ok",
+            "errors": field_errors,
+            "codes_to_collect": codes_to_collect,
+            "candidates": field_candidates,
+            "quality_passed": field_quality_passed,
+            "quality_blocked": field_quality_blocked,
+            "would_insert": field_would_insert,
+            "would_skip_existing": field_would_skip,
+            "db_inserted": field_db_inserted,
+            "db_skipped": field_db_skipped,
+        })
+
+        print()
+
+    # ── Summary ──
+    finished_at = datetime.now(timezone.utc).replace(microsecond=0)
+    duration = (finished_at - started_at).total_seconds()
+
+    print("=" * 60)
+    print("  COLLECTION SUMMARY")
+    print("=" * 60)
+    print(f"  Mode:                 {mode_label}")
+    print(f"  Target table:         {target_table}")
+    print(f"  Indices:              {', '.join(codes)}")
+    print(f"  Fields processed:     {total_fields}")
+    print(f"  Sentinel Hub calls:   {total_sentinel_calls}")
+    print(f"  Total candidates:     {total_candidates}")
+    print(f"  Quality passed:       {total_quality_passed}")
+    print(f"  Quality blocked:      {total_quality_blocked}")
+    print(f"  Would insert:         {total_would_insert}")
+    print(f"  Would skip existing:  {total_would_skip_existing}")
+    print(f"  DB inserted:          {total_db_inserted}")
+    print(f"  DB skipped (exists):  {total_db_skipped}")
+    print(f"  Errors:               {total_errors}")
+    print(f"  Overwrite:            {do_overwrite}")
+    print(f"  Idempotency mode:     {idempotency_mode}")
+
+    # Per-code existing counts (aggregated across fields)
+    print()
+    print(f"  Existing records per index:")
+    for code in codes:
+        total_ec = 0
+        for field in fields:
+            total_ec += count_existing_satellite_index(field["id"], code, date_from, date_to)
+        print(f"    {code}: {total_ec} records in date range")
+    print()
+
+    print(f"  Lock:                 {lock_path or args.lock_file or DEFAULT_LOCK_FILE}")
+    if lock_path:
+        release_lock(lock_path)
+    print(f"  Started at:           {started_at.isoformat()}")
+    print(f"  Finished at:          {finished_at.isoformat()}")
+    print(f"  Duration:             {duration:.2f}s")
+    print()
+
+    if total_errors > 0:
+        print(f"  WARNING: {total_errors} error(s) occurred during collection")
+        print()
+
+    if do_db_writes:
+        print(f"  DB writes:            {total_db_inserted} inserted, {total_db_skipped} skipped")
+    else:
+        print(f"  DB writes:            NONE ({mode_label})")
     print("=" * 60)
 
-    # Release lock before exit
-    release_lock(lock_path)
+    # JSON output if requested
+    if args.output_log:
+        json_output(args.output_log, {
+            "run_mode": mode_label,
+            "target_table": target_table,
+            "is_ndvi": is_ndvi,
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "date_range_days": date_range_days,
+            "indices": codes,
+            "fields_selected": total_fields,
+            "sentinel_hub_calls": total_sentinel_calls,
+            "candidates_generated": total_candidates,
+            "quality_passed": total_quality_passed,
+            "quality_blocked": total_quality_blocked,
+            "would_insert": total_would_insert,
+            "would_skip_existing": total_would_skip_existing,
+            "db_inserted": total_db_inserted,
+            "db_skipped": total_db_skipped,
+            "errors": total_errors,
+            "idempotency_mode": idempotency_mode,
+            "overwrite": do_overwrite,
+            "lock_file": str(lock_path or args.lock_file or DEFAULT_LOCK_FILE),
+            "sentinel_hub_calls_made": total_sentinel_calls,
+            "db_writes_performed": total_db_inserted,
+            "db_skipped_existing": total_db_skipped,
+            "success_count": total_fields - total_errors,
+            "failure_count": total_errors,
+            "started_at": started_at.isoformat(),
+            "finished_at": finished_at.isoformat(),
+            "duration_seconds": duration,
+            "exit_code": 0,
+        })
+
+    if total_errors > 0:
+        sys.exit(1)
     sys.exit(0)
 
 
@@ -634,8 +1166,39 @@ def json_output(path: str, data: dict) -> None:
 def main() -> None:
     args = parse_args()
 
-    # Guard: dry-run is the default safe mode unless --force is set
-    is_dry_run = args.dry_run or not args.force
+    # TASK_142_NDVI_APPLY_WRITE_GUARD
+    # NDVI remains legacy-only here. Dry-run inspection is allowed.
+    # Apply/write/force must not route NDVI through satellite_index_records collection.
+    requested_index_codes_for_guard = set()
+    if getattr(args, "index", None):
+        requested_index_codes_for_guard.update(
+            part.strip().lower()
+            for part in str(args.index).split(",")
+            if part.strip()
+        )
+    if getattr(args, "indices", None):
+        requested_index_codes_for_guard.update(
+            part.strip().lower()
+            for part in str(args.indices).split(",")
+            if part.strip()
+        )
+    if (
+        "ndvi" in requested_index_codes_for_guard
+        and (
+            bool(getattr(args, "apply", False))
+            or bool(getattr(args, "write", False))
+            or bool(getattr(args, "force", False))
+        )
+    ):
+        print("ERROR: ndvi is legacy-only and is not supported in apply/write/force mode for satellite_index_records. Use the legacy NDVI collector.")
+        raise SystemExit(2)
+
+
+    # Determine run mode:
+    #   --apply or --write or --force  -> real mode (Sentinel Hub calls permitted)
+    #   --dry-run or no mode flag      -> dry-run mode (safe default)
+    has_real_flag = bool(args.apply) or bool(args.write) or bool(args.force)
+    is_dry_run = bool(args.dry_run) or not has_real_flag
 
     # Validate scope: must have at least one scope limiter
     if args.field_id is None and args.enterprise_id is None and (args.max_fields is None or args.max_fields <= 0):
@@ -658,3 +1221,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
