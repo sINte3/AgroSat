@@ -9,6 +9,7 @@ import json
 import logging
 import math
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -261,7 +262,12 @@ def parse_multi_index_stats_response(
         index_code, mean/min/max/std/p10/p90, valid_pixels_pct, etc.
 
     Intervals with NaN stats, full noData, or missing outputs are skipped.
-    When multiple valid intervals exist, the latest (chronologically) is chosen.
+    When multiple valid intervals exist, the last non-ambiguous interval is
+    chosen (or the last interval overall if all are ambiguous).
+
+    captured_date is derived from the interval metadata ``from`` timestamp
+    (not from the CLI request ``date_to``), ensuring historical backfill
+    correctness.
     """
     codes = [normalize_index_code(c) for c in index_codes]
     results: dict[str, dict] = {}
@@ -277,47 +283,180 @@ def parse_multi_index_stats_response(
         return results
 
     for code in codes:
-        valid_intervals = []
-        for i in intervals:
-            ok, reason = _interval_is_valid_for_index(i, code)
-            if ok:
-                valid_intervals.append(i)
+        latest_entry: Optional[dict] = None
 
-        if not valid_intervals:
-            logger.info(f"No valid intervals for index '{code}'")
-            continue
+        for interval in intervals:
+            ok, reason = _interval_is_valid_for_index(interval, code)
+            if not ok:
+                continue
 
-        latest = valid_intervals[-1]
-        interval_date = latest["interval"]["to"][:10]
-        stats = latest["outputs"][code]["bands"]["B0"]["stats"]
-        percentiles = stats.get("percentiles", {})
+            interval_from_str = interval.get("interval", {}).get("from", "")
+            interval_to_str = interval.get("interval", {}).get("to", "")
 
-        sample_count = safe_int(stats.get("sampleCount", 0))
-        no_data_count = safe_int(stats.get("noDataCount", 0))
+            if not interval_from_str:
+                logger.info("Skipping interval for '%s': missing interval.from", code)
+                continue
 
-        # valid_pixels_pct = (sampleCount - noDataCount) / sampleCount * 100
-        # Guaranteed sample_count > 0 and no_data_count < sample_count by validity check.
-        valid_pct = ((sample_count - no_data_count) / sample_count) * 100
+            # ── Detect ambiguous multi-day intervals ──
+            interval_is_ambiguous, ambiguous_reason = _classify_interval_ambiguity(
+                interval_from_str, interval_to_str,
+            )
 
-        # Percentile keys: Sentinel Hub may use "10.0" or "10"; same for "90.0"/"90"
-        p10_val = safe_float(percentiles.get("10.0") or percentiles.get("10"))
-        p90_val = safe_float(percentiles.get("90.0") or percentiles.get("90"))
+            # Ambiguous check: if we already have a non-ambiguous entry and
+            # this one is ambiguous, skip.
+            if interval_is_ambiguous and latest_entry is not None and not latest_entry.get("interval_ambiguous", True):
+                continue
 
-        results[code] = {
-            "captured_date": interval_date,
-            "index_code": code,
-            "mean_value": round(safe_float(stats.get("mean")), 4),
-            "min_value": round(safe_float(stats.get("min")), 4),
-            "max_value": round(safe_float(stats.get("max")), 4),
-            "std_value": round(safe_float(stats.get("stDev")), 4),
-            "p10_value": round(p10_val, 4) if p10_val is not None else None,
-            "p90_value": round(p90_val, 4) if p90_val is not None else None,
-            "valid_pixels_pct": round(valid_pct, 1),
-            "cloud_cover_pct": None,
-            "satellite": "Sentinel-2",
-        }
+            captured_date_str = interval_from_str[:10]
+
+            stats = interval["outputs"][code]["bands"]["B0"]["stats"]
+            percentiles = stats.get("percentiles", {})
+            sample_count = safe_int(stats.get("sampleCount", 0))
+            no_data_count = safe_int(stats.get("noDataCount", 0))
+            valid_pct = ((sample_count - no_data_count) / sample_count) * 100
+            p10_val = safe_float(percentiles.get("10.0") or percentiles.get("10"))
+            p90_val = safe_float(percentiles.get("90.0") or percentiles.get("90"))
+
+            entry = {
+                "captured_date": captured_date_str,
+                "index_code": code,
+                "mean_value": round(safe_float(stats.get("mean")), 4),
+                "min_value": round(safe_float(stats.get("min")), 4),
+                "max_value": round(safe_float(stats.get("max")), 4),
+                "std_value": round(safe_float(stats.get("stDev")), 4),
+                "p10_value": round(p10_val, 4) if p10_val is not None else None,
+                "p90_value": round(p90_val, 4) if p90_val is not None else None,
+                "valid_pixels_pct": round(valid_pct, 1),
+                "cloud_cover_pct": None,
+                "satellite": "Sentinel-2",
+                "interval_from": interval_from_str,
+                "interval_to": interval_to_str,
+                "interval_ambiguous": interval_is_ambiguous,
+                "interval_ambiguous_reason": ambiguous_reason,
+            }
+
+            # Prefer later interval; prefer non-ambiguous over ambiguous.
+            if latest_entry is None:
+                latest_entry = entry
+            elif not interval_is_ambiguous and latest_entry.get("interval_ambiguous", True):
+                latest_entry = entry  # non-ambiguous replaces ambiguous
+            elif interval_is_ambiguous == latest_entry.get("interval_ambiguous", True):
+                # Same ambiguity class — later interval wins
+                if interval_from_str > latest_entry.get("interval_from", ""):
+                    latest_entry = entry
+
+        if latest_entry is not None:
+            results[code] = latest_entry
 
     return results
+
+
+def _classify_interval_ambiguity(
+    interval_from_str: str,
+    interval_to_str: str,
+) -> tuple[bool, Optional[str]]:
+    """Determine if a Sentinel Hub interval represents an ambiguous multi-day aggregate.
+
+    A P1D (daily) interval has ``from`` at T00:00:00Z and ``to`` at T+1T00:00:00Z,
+    spanning exactly 24 hours. Spans longer than 28 hours are treated as ambiguous
+    multi-day aggregates.
+
+    Returns (is_ambiguous, reason_string_or_None).
+    """
+    if not interval_to_str or not interval_from_str:
+        return True, "missing interval boundaries"
+
+    try:
+        dt_from = datetime.fromisoformat(interval_from_str.replace("Z", "+00:00"))
+        dt_to = datetime.fromisoformat(interval_to_str.replace("Z", "+00:00"))
+        span_hours = (dt_to - dt_from).total_seconds() / 3600
+        if span_hours > 28:
+            return True, f"multi-day span ({span_hours:.0f}h): {interval_from_str} .. {interval_to_str}"
+        return False, None
+    except (ValueError, TypeError):
+        return True, f"unparseable interval: {interval_from_str} .. {interval_to_str}"
+
+
+def extract_intervals_metadata(
+    response_data: dict,
+    index_codes: list[str],
+) -> list[dict]:
+    """Extract sanitized interval metadata from a Sentinel Hub response for audit.
+
+    Unlike ``parse_multi_index_stats_response``, this function returns ALL
+    intervals with their metadata, not just one per code.  Useful for
+    ``--debug-raw-intervals`` and output-log diagnostics.
+
+    Fields returned per interval entry:
+      - interval_from, interval_to
+      - interval_ambiguous, interval_ambiguous_reason
+      - derived_captured_date
+      - indices (list of codes present in this interval)
+      - per_index: dict of index_code -> {mean, min, max, stats_fields}
+
+    No secrets (credentials, tokens, geometry) are included.
+    """
+    codes = [normalize_index_code(c) for c in index_codes]
+
+    try:
+        intervals = response_data.get("data", [])
+    except (TypeError, AttributeError):
+        return []
+
+    result: list[dict] = []
+    seen_keys: set[str] = set()  # dedup by interval_from + interval_to
+
+    for interval in intervals:
+        interval_from_str = (interval.get("interval") or {}).get("from", "")
+        interval_to_str = (interval.get("interval") or {}).get("to", "")
+
+        if not interval_from_str or not interval_to_str:
+            continue
+
+        dedup_key = f"{interval_from_str}|{interval_to_str}"
+        if dedup_key in seen_keys:
+            continue
+        seen_keys.add(dedup_key)
+
+        interval_is_ambiguous, ambiguous_reason = _classify_interval_ambiguity(
+            interval_from_str, interval_to_str,
+        )
+        derived_date = interval_from_str[:10]
+
+        per_index: dict[str, dict] = {}
+        indices_in_interval: list[str] = []
+
+        for code in codes:
+            ok, _ = _interval_is_valid_for_index(interval, code)
+            if not ok:
+                continue
+            indices_in_interval.append(code)
+            stats_raw = interval.get("outputs", {}).get(code, {}).get("bands", {}).get("B0", {}).get("stats", {})
+            per_index[code] = {
+                "mean": safe_float(stats_raw.get("mean")),
+                "min": safe_float(stats_raw.get("min")),
+                "max": safe_float(stats_raw.get("max")),
+                "sample_count": safe_int(stats_raw.get("sampleCount")),
+                "no_data_count": safe_int(stats_raw.get("noDataCount")),
+            }
+
+        if not indices_in_interval:
+            continue
+
+        entry: dict = {
+            "interval_from": interval_from_str,
+            "interval_to": interval_to_str,
+            "derived_captured_date": derived_date,
+            "interval_ambiguous": interval_is_ambiguous,
+            "indices": indices_in_interval,
+            "per_index": per_index,
+        }
+        if ambiguous_reason:
+            entry["interval_ambiguous_reason"] = ambiguous_reason
+
+        result.append(entry)
+
+    return result
 
 
 # ─── Quality Gate ──────────────────────────────────────────────────────────────

@@ -25,6 +25,7 @@ from config import settings
 from services.satellite_indices import (
     SUPPORTED_INDEX_CODES,
     build_multi_index_evalscript,
+    extract_intervals_metadata,
     normalize_index_code,
     parse_multi_index_stats_response,
     validate_index_quality,
@@ -106,6 +107,7 @@ class MultiIndexSentinelHubService:
         self.client_secret = settings.sentinel_hub_client_secret
         self._access_token: Optional[str] = None
         self._token_expires_at: float = 0
+        self._last_response_data: Optional[dict] = None  # raw JSON, for diagnostics
 
     def _get_access_token(self) -> str:
         """Obtain OAuth2 token from Sentinel Hub with caching."""
@@ -198,8 +200,23 @@ class MultiIndexSentinelHubService:
         resp.raise_for_status()
         response_data = resp.json()
 
+        # Preserve raw response for interval diagnostics (e.g. --debug-raw-intervals).
+        # This is transient storage; the caller should extract intervals metadata
+        # before the next collect_indices call overwrites it.
+        self._last_response_data = response_data
+
         parsed = parse_multi_index_stats_response(response_data, codes)
         return parsed
+
+    def get_last_intervals_metadata(self, index_codes: list[str]) -> list[dict]:
+        """Return sanitized interval metadata from the last API response.
+
+        Calls ``extract_intervals_metadata`` on the cached raw response.
+        Returns an empty list if no response has been collected yet.
+        """
+        if self._last_response_data is None:
+            return []
+        return extract_intervals_metadata(self._last_response_data, index_codes)
 
 
 # ─── Mock multi-index service (for testability without credentials) ─────────
@@ -211,6 +228,9 @@ class MockMultiIndexSatelliteService:
 
     Used in --mock-sentinel mode for validation without Sentinel Hub credentials.
     Does NOT make network calls.
+
+    Generates pseudo-interval metadata so ``get_last_intervals_metadata()``
+    returns realistic interval diagnostics for mock-mode testing.
     """
 
     SEASONAL_BASE: dict[str, dict[int, float]] = {
@@ -236,6 +256,9 @@ class MockMultiIndexSatelliteService:
         },
     }
 
+    def __init__(self):
+        self._last_mock_response: Optional[dict] = None
+
     def collect_indices(
         self,
         geometry_wkt: str,
@@ -253,8 +276,9 @@ class MockMultiIndexSatelliteService:
         The geometry and other parameters are accepted for interface compatibility
         but not used -- this is a pure mock.
 
-        Returns one result per index with a single interval covering the full date range.
-        The captured_date is set to date_to (latest date).
+        Returns one result per index.  ``captured_date`` is derived from the
+        mock interval ``from`` field (the first day of the sub-interval), not
+        from ``date_to``.  This mirrors the corrected real-service semantics.
         """
         codes = [normalize_index_code(c) for c in index_codes if normalize_index_code(c) in SUPPORTED_INDEX_CODES]
         if not codes:
@@ -310,8 +334,15 @@ class MockMultiIndexSatelliteService:
             cursor = interval_end + timedelta(days=1)
 
         mock_response = {"data": intervals}
+        self._last_mock_response = mock_response
         parsed = parse_multi_index_stats_response(mock_response, codes)
         return parsed
+
+    def get_last_intervals_metadata(self, index_codes: list[str]) -> list[dict]:
+        """Return sanitized interval metadata from the last mock response."""
+        if self._last_mock_response is None:
+            return []
+        return extract_intervals_metadata(self._last_mock_response, index_codes)
 
 
 # ─── Factory ─────────────────────────────────────────────────────────────────

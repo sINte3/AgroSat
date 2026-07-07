@@ -64,6 +64,7 @@ from services.collector_locking import (
 from services.satellite_indices import (
     SUPPORTED_INDEX_CODES as MULTI_INDEX_CODES,
     build_multi_index_evalscript,
+    extract_intervals_metadata,
     normalize_index_code,
     validate_index_quality,
 )
@@ -338,6 +339,14 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--output-log", type=str, default=None,
         help="Optional path to write JSON run summary outside the repo.",
+    )
+
+    # Diagnostics
+    parser.add_argument(
+        "--debug-raw-intervals", action="store_true", default=False,
+        help="Print sanitized Sentinel Hub interval metadata for each field. "
+             "Shows interval boundaries, derived captured_date, and ambiguity status. "
+             "No secrets (tokens, geometry, credentials) are printed.",
     )
 
     # Locking flags
@@ -864,6 +873,7 @@ def run_real(args: argparse.Namespace) -> None:
         field_candidates = 0
         field_would_insert = 0
         field_would_skip = 0
+        field_would_skip_multi_day = 0
         field_quality_passed = 0
         field_quality_blocked = 0
         field_db_inserted = 0
@@ -941,6 +951,29 @@ def run_real(args: argparse.Namespace) -> None:
             })
             continue
 
+        # ── Debug: raw interval diagnostics ──
+        field_intervals_meta: list[dict] = []
+        try:
+            field_intervals_meta = service.get_last_intervals_metadata(codes_to_collect)
+        except Exception:
+            pass
+
+        if args.debug_raw_intervals and field_intervals_meta:
+            print(f"      [DEBUG] Raw Sentinel intervals ({len(field_intervals_meta)}):")
+            for im in field_intervals_meta:
+                amb = "AMBIGUOUS" if im.get("interval_ambiguous") else "OK"
+                reason = im.get("interval_ambiguous_reason", "")
+                amb_suffix = f" — {reason}" if reason else ""
+                print(f"        {im['interval_from']} -> {im['interval_to']} "
+                      f"derived_date={im['derived_captured_date']} "
+                      f"[{amb}]{amb_suffix}")
+                for ic, ix in im.get("per_index", {}).items():
+                    print(f"          {ic}: mean={ix.get('mean')} "
+                          f"min={ix.get('min')} max={ix.get('max')} "
+                          f"samples={ix.get('sample_count')}")
+        elif args.debug_raw_intervals:
+            print(f"      [DEBUG] No raw intervals available from Sentinel Hub response")
+
         # ── Apply quality filter ──
         quality_passed = filter_by_quality(
             parsed,
@@ -971,11 +1004,22 @@ def run_real(args: argparse.Namespace) -> None:
             field_candidates += 1
             total_candidates += 1
 
+            # captured_date comes from the parser, which now derives it from
+            # interval.from (the observation start), NOT from the CLI date_to.
             captured_date_str = data.get("captured_date")
             try:
                 cd = datetime.strptime(captured_date_str, "%Y-%m-%d").date() if captured_date_str else date_to
             except (ValueError, TypeError):
                 cd = date_to
+
+            # ── Check for ambiguous multi-day interval ──
+            if data.get("interval_ambiguous"):
+                reason = data.get("interval_ambiguous_reason", "multi-day aggregate")
+                print(f"      SKIP (multi-day): [{code}] date={captured_date_str} — {reason}")
+                field_would_skip += 1
+                field_would_skip_multi_day += 1
+                total_would_skip_existing += 1  # counted as blocked, not inserted
+                continue
 
             mean_val = data.get("mean_value")
             min_val = data.get("min_value")
@@ -1050,8 +1094,10 @@ def run_real(args: argparse.Namespace) -> None:
             "quality_blocked": field_quality_blocked,
             "would_insert": field_would_insert,
             "would_skip_existing": field_would_skip,
+            "would_skip_multi_day": field_would_skip_multi_day,
             "db_inserted": field_db_inserted,
             "db_skipped": field_db_skipped,
+            "sentinel_intervals": field_intervals_meta,
         })
 
         print()
@@ -1139,6 +1185,15 @@ def run_real(args: argparse.Namespace) -> None:
             "finished_at": finished_at.isoformat(),
             "duration_seconds": duration,
             "exit_code": 0,
+            # Sentinel interval metadata for date-mapping audit
+            "per_field_intervals": [
+                {
+                    "field_id": r["field_id"],
+                    "sentinel_intervals": r.get("sentinel_intervals", []),
+                }
+                for r in per_field_results
+                if r.get("sentinel_intervals")
+            ],
         })
 
     if total_errors > 0:
