@@ -351,6 +351,90 @@ def parse_multi_index_stats_response(
     return results
 
 
+def parse_multi_index_stats_response_flat(
+    response_data: dict,
+    index_codes: list[str],
+) -> list[dict]:
+    """
+    Parse Sentinel Hub Statistical API response into flat per-interval records.
+
+    Unlike ``parse_multi_index_stats_response``, this returns ALL non-ambiguous
+    intervals as individual records — one per (interval, index_code) combo.
+
+    Args:
+        response_data: Full JSON response from Sentinel Hub Statistics API.
+        index_codes: Expected index codes.
+
+    Returns:
+        List of dicts, each with captured_date, index_code, mean_value, etc.
+        Ambiguous multi-day intervals are excluded.
+    """
+    codes = [normalize_index_code(c) for c in index_codes]
+    results: list[dict] = []
+
+    try:
+        intervals = response_data.get("data", [])
+    except (TypeError, AttributeError):
+        logger.error("parse_multi_index_stats_response_flat: response_data is not a dict")
+        return results
+
+    if not intervals:
+        logger.warning("Sentinel Hub returned empty intervals")
+        return results
+
+    for interval in intervals:
+        interval_from_str = interval.get("interval", {}).get("from", "")
+        interval_to_str = interval.get("interval", {}).get("to", "")
+
+        if not interval_from_str or not interval_to_str:
+            continue
+
+        # ── Detect ambiguous multi-day intervals ──
+        interval_is_ambiguous, ambiguous_reason = _classify_interval_ambiguity(
+            interval_from_str, interval_to_str,
+        )
+
+        # Skip ambiguous intervals entirely
+        if interval_is_ambiguous:
+            continue
+
+        derived_date = interval_from_str[:10]
+
+        for code in codes:
+            ok, _ = _interval_is_valid_for_index(interval, code)
+            if not ok:
+                continue
+
+            stats = interval["outputs"][code]["bands"]["B0"]["stats"]
+            percentiles = stats.get("percentiles", {})
+            sample_count = safe_int(stats.get("sampleCount", 0))
+            no_data_count = safe_int(stats.get("noDataCount", 0))
+            valid_pct = ((sample_count - no_data_count) / sample_count) * 100
+            p10_val = safe_float(percentiles.get("10.0") or percentiles.get("10"))
+            p90_val = safe_float(percentiles.get("90.0") or percentiles.get("90"))
+
+            entry = {
+                "captured_date": derived_date,
+                "index_code": code,
+                "mean_value": round(safe_float(stats.get("mean")), 4),
+                "min_value": round(safe_float(stats.get("min")), 4),
+                "max_value": round(safe_float(stats.get("max")), 4),
+                "std_value": round(safe_float(stats.get("stDev")), 4),
+                "p10_value": round(p10_val, 4) if p10_val is not None else None,
+                "p90_value": round(p90_val, 4) if p90_val is not None else None,
+                "valid_pixels_pct": round(valid_pct, 1),
+                "cloud_cover_pct": None,
+                "satellite": "Sentinel-2",
+                "interval_from": interval_from_str,
+                "interval_to": interval_to_str,
+                "interval_ambiguous": interval_is_ambiguous,
+                "interval_ambiguous_reason": ambiguous_reason,
+            }
+            results.append(entry)
+
+    return results
+
+
 def _classify_interval_ambiguity(
     interval_from_str: str,
     interval_to_str: str,

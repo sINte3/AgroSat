@@ -28,6 +28,7 @@ from services.satellite_indices import (
     extract_intervals_metadata,
     normalize_index_code,
     parse_multi_index_stats_response,
+    parse_multi_index_stats_response_flat,
     validate_index_quality,
 )
 
@@ -208,6 +209,60 @@ class MultiIndexSentinelHubService:
         parsed = parse_multi_index_stats_response(response_data, codes)
         return parsed
 
+    def collect_indices_flat(
+        self,
+        geometry_wkt: str,
+        index_codes: list[str],
+        date_from: date,
+        date_to: date,
+        aggregation_interval: str = "P1D",
+        resolution: int = 20,
+        max_cloud_coverage: int = 80,
+        timeout_s: float = 120.0,
+    ) -> list[dict]:
+        """
+        Call Sentinel Hub Statistical API and return flat per-interval records.
+
+        Unlike ``collect_indices`` which collapses to one record per index,
+        this returns one record per (interval, index_code) combo, preserving
+        every non-ambiguous daily interval.
+
+        Returns:
+            List of per-interval, per-index result dicts.
+        """
+        codes = [normalize_index_code(c) for c in index_codes if normalize_index_code(c) in SUPPORTED_INDEX_CODES]
+        if not codes:
+            raise ValueError("No supported index codes provided")
+
+        token = self._get_access_token()
+        evalscript = build_multi_index_evalscript(codes)
+
+        geom = wkt.loads(geometry_wkt)
+        geojson_geom = mapping(geom)
+
+        payload = build_statistical_payload(
+            geometry_geojson=geojson_geom,
+            evalscript=evalscript,
+            index_codes=codes,
+            date_from=date_from,
+            date_to=date_to,
+            aggregation_interval=aggregation_interval,
+            resolution=resolution,
+            max_cloud_coverage=max_cloud_coverage,
+        )
+
+        resp = httpx.post(
+            STATISTICAL_API_URL,
+            json=payload,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=timeout_s,
+        )
+        resp.raise_for_status()
+        response_data = resp.json()
+        self._last_response_data = response_data
+
+        return parse_multi_index_stats_response_flat(response_data, codes)
+
     def get_last_intervals_metadata(self, index_codes: list[str]) -> list[dict]:
         """Return sanitized interval metadata from the last API response.
 
@@ -337,6 +392,78 @@ class MockMultiIndexSatelliteService:
         self._last_mock_response = mock_response
         parsed = parse_multi_index_stats_response(mock_response, codes)
         return parsed
+
+    def collect_indices_flat(
+        self,
+        geometry_wkt: str,
+        index_codes: list[str],
+        date_from: date,
+        date_to: date,
+        aggregation_interval: str = "P1D",
+        resolution: int = 20,
+        max_cloud_coverage: int = 80,
+        timeout_s: float = 120.0,
+    ) -> list[dict]:
+        """
+        Generate mock satellite index values and return flat per-interval records.
+
+        Mirrors ``collect_indices`` but returns flat list preserving all intervals.
+        """
+        codes = [normalize_index_code(c) for c in index_codes if normalize_index_code(c) in SUPPORTED_INDEX_CODES]
+        if not codes:
+            raise ValueError("No supported index codes provided")
+
+        mock_month = date_to.month
+        noise_range = 0.02
+
+        intervals: list[dict[str, Any]] = []
+        step_days = min((date_to - date_from).days, 5)
+        if step_days < 1:
+            step_days = 1
+
+        cursor = date_from
+        while cursor <= date_to:
+            month = cursor.month
+            interval_end = min(cursor + timedelta(days=step_days), date_to)
+            outputs: dict[str, Any] = {}
+
+            for code in codes:
+                base = self.SEASONAL_BASE.get(code, {}).get(month, 0.3)
+                noise = random.uniform(-noise_range, noise_range)
+                mean_val = max(-0.99, min(0.99, base + noise))
+                spread = abs(mean_val) * 0.2 + 0.03
+
+                outputs[code] = {
+                    "bands": {
+                        "B0": {
+                            "stats": {
+                                "sampleCount": 1000,
+                                "noDataCount": 50,
+                                "mean": str(round(mean_val, 4)),
+                                "min": str(round(mean_val - spread, 4)),
+                                "max": str(round(mean_val + spread, 4)),
+                                "stDev": str(round(spread * 0.4, 4)),
+                                "percentiles": {
+                                    "10.0": str(round(mean_val - spread * 0.6, 4)),
+                                    "90.0": str(round(mean_val + spread * 0.6, 4)),
+                                },
+                            }
+                        }
+                    }
+                }
+
+            intervals.append({
+                "interval": {
+                    "from": cursor.strftime("%Y-%m-%d") + "T00:00:00Z",
+                    "to": interval_end.strftime("%Y-%m-%d") + "T00:00:00Z",
+                },
+                "outputs": outputs,
+            })
+            cursor = interval_end + timedelta(days=1)
+
+        mock_response = {"data": intervals}
+        self._last_mock_response = mock_response
+        return parse_multi_index_stats_response_flat(mock_response, codes)
 
     def get_last_intervals_metadata(self, index_codes: list[str]) -> list[dict]:
         """Return sanitized interval metadata from the last mock response."""

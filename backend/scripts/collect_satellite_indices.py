@@ -66,6 +66,7 @@ from services.satellite_indices import (
     build_multi_index_evalscript,
     extract_intervals_metadata,
     normalize_index_code,
+    parse_multi_index_stats_response_flat,
     validate_index_quality,
 )
 from services.satellite_collection import (
@@ -924,13 +925,14 @@ def run_real(args: argparse.Namespace) -> None:
                 "quality_blocked": field_quality_blocked,
                 "db_inserted": field_db_inserted,
                 "db_skipped": field_db_skipped,
+                "candidate_records": [],
             })
             continue
 
         # ── Collect indices from satellite service ──
         try:
             print(f"      Collecting indices: {', '.join(codes_to_collect)} ...")
-            parsed = service.collect_indices(
+            flat_records = service.collect_indices_flat(
                 geometry_wkt=geom_wkt,
                 index_codes=codes_to_collect,
                 date_from=date_from,
@@ -938,7 +940,7 @@ def run_real(args: argparse.Namespace) -> None:
                 aggregation_interval=args.aggregation_interval,
             )
             total_sentinel_calls += 1
-            print(f"      Sentinel Hub response parsed for {len(parsed)} indices")
+            print(f"      Sentinel Hub returned {len(flat_records)} flat records (per-interval, per-index)")
         except Exception as e:
             err_msg = f"Satellite collection failed: {e}"
             print(f"      ERROR: {err_msg}")
@@ -984,67 +986,77 @@ def run_real(args: argparse.Namespace) -> None:
         elif args.debug_raw_intervals:
             print(f"      [DEBUG] No raw intervals available from Sentinel Hub response")
 
-        # ── Apply quality filter ──
-        quality_passed = filter_by_quality(
-            parsed,
-            codes_to_collect,
-            max_cloud_cover=30.0,
-            min_valid_pixels=30.0,
-        )
-        quality_blocked = {k: v for k, v in parsed.items() if k not in quality_passed}
-        field_quality_passed = len(quality_passed)
-        field_quality_blocked = len(quality_blocked)
-        total_quality_passed += field_quality_passed
-        total_quality_blocked += field_quality_blocked
+        # ── Process flat records: quality filter, then emit candidates ──
+        field_candidate_records: list[dict] = []
+        for rec in flat_records:
+            code = rec["index_code"]
+            captured_date_str = rec["captured_date"]
 
-        for code in quality_blocked:
-            data = quality_blocked[code]
-            valid, reason = validate_index_quality(
-                code,
-                data.get("mean_value"),
-                cloud_cover_pct=data.get("cloud_cover_pct"),
-                min_value=data.get("min_value"),
-                max_value=data.get("max_value"),
-                valid_pixels_pct=data.get("valid_pixels_pct"),
-            )
-            print(f"      QUALITY BLOCKED: {code} — {reason}")
-
-        for code in quality_passed:
-            data = quality_passed[code]
-            field_candidates += 1
-            total_candidates += 1
-
-            # captured_date comes from the parser, which now derives it from
-            # interval.from (the observation start), NOT from the CLI date_to.
-            captured_date_str = data.get("captured_date")
             try:
-                cd = datetime.strptime(captured_date_str, "%Y-%m-%d").date() if captured_date_str else date_to
+                cd = datetime.strptime(captured_date_str, "%Y-%m-%d").date()
             except (ValueError, TypeError):
                 cd = date_to
 
-            # ── Check for ambiguous multi-day interval ──
-            if data.get("interval_ambiguous"):
-                reason = data.get("interval_ambiguous_reason", "multi-day aggregate")
-                print(f"      SKIP (multi-day): [{code}] date={captured_date_str} — {reason}")
-                field_would_skip += 1
-                field_would_skip_multi_day += 1
-                total_would_skip_existing += 1  # counted as blocked, not inserted
+            # Quality gate
+            valid, reason = validate_index_quality(
+                code,
+                rec.get("mean_value"),
+                cloud_cover_pct=rec.get("cloud_cover_pct"),
+                min_value=rec.get("min_value"),
+                max_value=rec.get("max_value"),
+                valid_pixels_pct=rec.get("valid_pixels_pct"),
+            )
+            if not valid:
+                print(f"      QUALITY BLOCKED: [{code}] date={captured_date_str} — {reason}")
+                field_quality_blocked += 1
+                total_quality_blocked += 1
                 continue
 
-            mean_val = data.get("mean_value")
-            min_val = data.get("min_value")
-            max_val = data.get("max_value")
-            std_val = data.get("std_value")
-            p10_val = data.get("p10_value")
-            p90_val = data.get("p90_value")
-            vpp = data.get("valid_pixels_pct")
-            ccp = data.get("cloud_cover_pct")
+            field_quality_passed += 1
+            total_quality_passed += 1
+
+            # Ambiguous interval check (flat parser already skips ambiguous,
+            # but double-check for safety)
+            if rec.get("interval_ambiguous"):
+                reason = rec.get("interval_ambiguous_reason", "multi-day aggregate")
+                print(f"      SKIP (multi-day): [{code}] date={captured_date_str} — {reason}")
+                field_would_skip += 1
+                total_would_skip_existing += 1
+                continue
+
+            field_candidates += 1
+            total_candidates += 1
+
+            field_candidate_records.append({
+                "field_id": fid,
+                "index_code": code,
+                "captured_date": captured_date_str,
+                "mean_value": rec.get("mean_value"),
+                "min_value": rec.get("min_value"),
+                "max_value": rec.get("max_value"),
+                "std_value": rec.get("std_value"),
+                "p10_value": rec.get("p10_value"),
+                "p90_value": rec.get("p90_value"),
+                "valid_pixels_pct": rec.get("valid_pixels_pct"),
+                "cloud_cover_pct": rec.get("cloud_cover_pct"),
+                "interval_from": rec.get("interval_from"),
+                "interval_to": rec.get("interval_to"),
+                "interval_ambiguous": rec.get("interval_ambiguous"),
+            })
+
+            mean_val = rec.get("mean_value")
+            min_val = rec.get("min_value")
+            max_val = rec.get("max_value")
+            std_val = rec.get("std_value")
+            p10_val = rec.get("p10_value")
+            p90_val = rec.get("p90_value")
+            vpp = rec.get("valid_pixels_pct")
+            ccp = rec.get("cloud_cover_pct")
 
             print(f"      CANDIDATE: [{code}] date={captured_date_str} mean={mean_val} "
                   f"min={min_val} max={max_val} valid_pct={vpp} cloud_pct={ccp}")
 
             if do_db_writes:
-                # Check existing record before insert (idempotent)
                 if not do_overwrite and check_exists_by_key(fid, cd, code):
                     print(f"        SKIP (exists in DB)")
                     field_db_skipped += 1
@@ -1052,7 +1064,6 @@ def run_real(args: argparse.Namespace) -> None:
                     continue
 
                 if do_overwrite:
-                    # Delete existing before re-insert (overwrite mode)
                     db = SessionLocal()
                     try:
                         from sqlalchemy import text as sa_text
@@ -1108,6 +1119,7 @@ def run_real(args: argparse.Namespace) -> None:
             "db_inserted": field_db_inserted,
             "db_skipped": field_db_skipped,
             "sentinel_intervals": field_intervals_meta,
+            "candidate_records": field_candidate_records,
         })
 
         print()
