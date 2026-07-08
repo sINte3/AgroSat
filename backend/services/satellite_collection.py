@@ -48,7 +48,7 @@ def build_statistical_payload(
     index_codes: list[str],
     date_from: date,
     date_to: date,
-    aggregation_interval: str = "P5D",
+    aggregation_interval: str = "P1D",
     resolution: int = 20,
     max_cloud_coverage: int = 80,
 ) -> dict:
@@ -143,7 +143,7 @@ class MultiIndexSentinelHubService:
         index_codes: list[str],
         date_from: date,
         date_to: date,
-        aggregation_interval: str = "P5D",
+        aggregation_interval: str = "P1D",
         resolution: int = 20,
         max_cloud_coverage: int = 80,
         timeout_s: float = 120.0,
@@ -156,7 +156,7 @@ class MultiIndexSentinelHubService:
             index_codes: List of index codes (e.g. ["savi", "evi"]).
             date_from: Start date (inclusive).
             date_to: End date (inclusive).
-            aggregation_interval: Sentinel Hub aggregation interval (e.g. "P5D", "P1D").
+            aggregation_interval: Sentinel Hub aggregation interval (e.g. "P1D", "P5D").
             resolution: Output resolution in meters.
             max_cloud_coverage: Max cloud cover percentage filter.
             timeout_s: HTTP timeout in seconds.
@@ -265,7 +265,7 @@ class MockMultiIndexSatelliteService:
         index_codes: list[str],
         date_from: date,
         date_to: date,
-        aggregation_interval: str = "P5D",
+        aggregation_interval: str = "P1D",
         resolution: int = 20,
         max_cloud_coverage: int = 80,
         timeout_s: float = 120.0,

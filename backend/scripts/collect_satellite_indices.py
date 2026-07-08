@@ -317,6 +317,13 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Maximum days in date range for safety. Default: 120.",
     )
 
+    # Sentinel aggregation interval
+    parser.add_argument(
+        "--aggregation-interval", type=str, default="P1D",
+        help="Sentinel Hub aggregation interval (ISO 8601 duration). "
+             "P1D = daily, P5D = 5-day aggregate. Default: P1D.",
+    )
+
     # Safety / idempotency
     parser.add_argument(
         "--force", action="store_true", default=False,
@@ -847,6 +854,7 @@ def run_real(args: argparse.Namespace) -> None:
     print(f"  Indices:              {', '.join(codes)}")
     print(f"  Fields selected:      {total_fields}")
     print(f"  Date range:           {date_from} to {date_to} ({date_range_days} days)")
+    print(f"  Aggregation interval: {args.aggregation_interval}")
     print(f"  Idempotency mode:     {idempotency_mode}")
     print(f"  Overwrite:            {do_overwrite}")
     print(f"  Lock:                 {lock_path or args.lock_file or DEFAULT_LOCK_FILE}")
@@ -927,6 +935,7 @@ def run_real(args: argparse.Namespace) -> None:
                 index_codes=codes_to_collect,
                 date_from=date_from,
                 date_to=date_to,
+                aggregation_interval=args.aggregation_interval,
             )
             total_sentinel_calls += 1
             print(f"      Sentinel Hub response parsed for {len(parsed)} indices")
@@ -959,7 +968,8 @@ def run_real(args: argparse.Namespace) -> None:
             pass
 
         if args.debug_raw_intervals and field_intervals_meta:
-            print(f"      [DEBUG] Raw Sentinel intervals ({len(field_intervals_meta)}):")
+            print(f"    Interval metadata: aggregation_interval={args.aggregation_interval}")
+            print(f"    [DEBUG] Raw Sentinel intervals ({len(field_intervals_meta)}):")
             for im in field_intervals_meta:
                 amb = "AMBIGUOUS" if im.get("interval_ambiguous") else "OK"
                 reason = im.get("interval_ambiguous_reason", "")
@@ -1162,6 +1172,7 @@ def run_real(args: argparse.Namespace) -> None:
             "date_from": date_from.isoformat(),
             "date_to": date_to.isoformat(),
             "date_range_days": date_range_days,
+            "aggregation_interval": args.aggregation_interval,
             "indices": codes,
             "fields_selected": total_fields,
             "sentinel_hub_calls": total_sentinel_calls,
