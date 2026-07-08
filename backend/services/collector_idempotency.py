@@ -118,8 +118,14 @@ def plan_actions(
 
     Returns list of dicts with:
       - field_id, index_code, date_from, date_to
-      - action: "insert", "skip_existing", "update_existing"
+      - action: "insert", "skip_existing", "update_existing", "collect_then_check"
       - reason, existing_count
+
+    In SKIP_EXISTING mode, actions with range-wide existing records return
+    "collect_then_check" rather than "skip_existing".  The caller must still
+    collect candidates and apply exact-date ``(field_id, captured_date, index_code)``
+    idempotency per candidate.  Pre-skipping an entire index from range-wide
+    counts is incorrect for historical backfill with partial existing data.
 
     Since exact captured_dates from Sentinel Hub are unknown until API call,
     plans at field+index level and reports existing counts.
@@ -135,8 +141,8 @@ def plan_actions(
 
         if existing_count > 0:
             if mode == IdempotencyMode.SKIP_EXISTING:
-                action = "skip_existing"
-                reason = "Records already exist; skip per --skip-existing"
+                action = "collect_then_check"
+                reason = "Existing range-wide records found; will check per-candidate exact-date idempotency"
             elif mode == IdempotencyMode.FORCE:
                 action = "update_existing"
                 reason = "Records exist but --force overrides — will update"

@@ -900,7 +900,13 @@ def run_real(args: argparse.Namespace) -> None:
         codes_to_collect: list[str] = []
         for p in planned:
             ic = p["index_code"]
-            if p["action"] == "skip_existing" and do_skip_existing and not do_overwrite:
+            if p["action"] == "collect_then_check":
+                # Range-wide existing records found, but we collect all candidates
+                # and check exact-date (field_id, captured_date, index_code) per candidate.
+                # The existing_count is informational only, not a pre-skip decision.
+                codes_to_collect.append(ic)
+                print(f"      [{ic}] {p['existing_count']} existing range-wide (will check exact dates per candidate)")
+            elif p["action"] == "skip_existing" and do_skip_existing and not do_overwrite:
                 total_would_skip_existing += 1
                 field_would_skip += 1
                 print(f"      SKIP: {ic} already has {p['existing_count']} records")
@@ -912,7 +918,7 @@ def run_real(args: argparse.Namespace) -> None:
                 codes_to_collect.append(ic)
 
         if not codes_to_collect:
-            print(f"      No codes to collect (all skipped)")
+            print(f"      No codes to collect (all codes excluded by legacy NDVI path or full-pre-skip)")
             per_field_results.append({
                 "field_id": fid,
                 "field_name": fname,
@@ -1149,7 +1155,7 @@ def run_real(args: argparse.Namespace) -> None:
 
     # Per-code existing counts (aggregated across fields)
     print()
-    print(f"  Existing records per index:")
+    print(f"  Existing records per index (informational -- does not pre-skip indices):")
     for code in codes:
         total_ec = 0
         for field in fields:
