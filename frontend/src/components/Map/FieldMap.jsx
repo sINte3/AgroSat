@@ -5,6 +5,10 @@ import MapboxDraw from '@mapbox/mapbox-gl-draw';
 import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css';
 import apiClient from '../../api/client';
 import MapLegend from './MapLegend';
+import MapHoverPopup from './MapHoverPopup';
+import { getIndexColor } from '../../config/indexMetadata';
+
+// ─── Constants ──────────────────────────────────────────────────────────────────
 
 const CROP_COLORS = {
   wheat:        '#EAB308',
@@ -31,7 +35,7 @@ const OSM_SOURCE = {
   type: 'raster',
   tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
   tileSize: 256,
-  attribution: 'Р вЂ™Р’В© OpenStreetMap contributors',
+  attribution: '© OpenStreetMap contributors',
   maxzoom: 18,
 };
 
@@ -39,7 +43,7 @@ const ESRI_SATELLITE_SOURCE = {
   type: 'raster',
   tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
   tileSize: 256,
-  attribution: 'Р вЂ™Р’В© Esri, Maxar, Airbus',
+  attribution: '© Esri, Maxar, Airbus',
   maxzoom: 18,
 };
 
@@ -47,7 +51,7 @@ const ESRI_LABELS_SOURCE = {
   type: 'raster',
   tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}'],
   tileSize: 256,
-  attribution: 'Р вЂ™Р’В© Esri',
+  attribution: '© Esri',
   maxzoom: 18,
 };
 
@@ -95,6 +99,209 @@ const MAP_MIN_ZOOM = 3;
 const MAP_MAX_ZOOM = 18;
 const LAYERS = ['fields-fill', 'fields-label'];
 
+const NO_DATA_GRAY = '#4b5563';
+const NO_DATA_GRAY_HEX = '#6B7280';
+
+// ─── Map mode config ────────────────────────────────────────────────────────────
+
+const MAP_MODES = [
+  { code: 'crop',     label: 'Культуры' },
+  { code: 'ndvi',     label: 'NDVI' },
+  { code: 'savi',     label: 'SAVI' },
+  { code: 'evi',      label: 'EVI' },
+  { code: 'ndmi',     label: 'NDMI' },
+  { code: 'ndre',     label: 'NDRE' },
+  { code: 'coverage', label: 'Покрытие' },
+  { code: 'freshness',label: 'Актуальность' },
+];
+
+// ─── Helper: get color by index value ──────────────────────────────────────────
+
+function getIndexModeColor(value, code) {
+  if (value == null || isNaN(value)) return NO_DATA_GRAY;
+  return getIndexColor(value, code);
+}
+
+// ─── Helper: get coverage status color ──────────────────────────────────────────
+
+function getCoverageColor(status) {
+  switch (status) {
+    case 'complete': return '#16a34a';
+    case 'partial':  return '#f59e0b';
+    case 'none':     return NO_DATA_GRAY;
+    default:         return NO_DATA_GRAY;
+  }
+}
+
+// ─── Helper: get freshness status color ─────────────────────────────────────────
+
+function getFreshnessColor(status) {
+  switch (status) {
+    case 'fresh':      return '#16a34a';
+    case 'stale':      return '#dc2626';
+    case 'future_date': return '#f59e0b';
+    default:           return NO_DATA_GRAY;
+  }
+}
+
+// ─── Helper: enrich feature properties with coverage data ──────────────────────
+
+const SATELLITE_INDEX_CODES = ['savi', 'evi', 'ndmi', 'ndre'];
+
+function enrichGeoJsonFeatures(geojson, coverageMap) {
+  if (!geojson?.features) return geojson;
+  return {
+    ...geojson,
+    features: geojson.features.map(f => {
+      const props = f.properties || {};
+      const fieldId = props.id;
+      const cov = coverageMap?.[fieldId];
+      const enriched = { ...props };
+
+      if (cov) {
+        enriched.coverage_status = cov.coverage_status || 'none';
+        enriched.freshness_status = cov.freshness_status || 'no_data';
+        enriched.coverage_has_any_data = cov.has_any_data || false;
+        enriched.coverage_latest_date = cov.latest_captured_date || null;
+
+        // Per-index values
+        SATELLITE_INDEX_CODES.forEach(code => {
+          const idx = cov.indices?.[code];
+          if (idx && idx.has_data) {
+            enriched[`${code}_value`] = idx.latest_mean_value ?? null;
+            enriched[`${code}_date`] = idx.latest_captured_date ?? null;
+          } else {
+            enriched[`${code}_value`] = null;
+            enriched[`${code}_date`] = null;
+          }
+          enriched[`${code}_has_data`] = !!(idx && (idx.has_data || idx.record_count > 0));
+        });
+      } else {
+        // No coverage data available
+        enriched.coverage_status = 'none';
+        enriched.freshness_status = 'no_data';
+        enriched.coverage_has_any_data = false;
+        enriched.coverage_latest_date = null;
+        SATELLITE_INDEX_CODES.forEach(code => {
+          enriched[`${code}_value`] = null;
+          enriched[`${code}_date`] = null;
+          enriched[`${code}_has_data`] = false;
+        });
+      }
+
+      // Compute color for current mode (will be recomputed on mode change)
+      return { ...f, properties: enriched };
+    }),
+  };
+}
+
+function computeModeColor(properties, mode) {
+  if (!properties) return NO_DATA_GRAY;
+
+  switch (mode) {
+    case 'crop':
+      return getCropColorFromProps(properties);
+    case 'ndvi':
+      return getIndexModeColor(properties.last_ndvi ?? properties.ndvi_value ?? null, 'ndvi');
+    case 'savi':
+      return getIndexModeColor(properties.savi_value ?? null, 'savi');
+    case 'evi':
+      return getIndexModeColor(properties.evi_value ?? null, 'evi');
+    case 'ndmi':
+      return getIndexModeColor(properties.ndmi_value ?? null, 'ndmi');
+    case 'ndre':
+      return getIndexModeColor(properties.ndre_value ?? null, 'ndre');
+    case 'coverage':
+      return getCoverageColor(properties.coverage_status);
+    case 'freshness':
+      return getFreshnessColor(properties.freshness_status);
+    default:
+      return NO_DATA_GRAY;
+  }
+}
+
+function getCropColorFromProps(props) {
+  const crop = props.current_crop;
+  const irr = props.irrigation_type;
+  if (crop === 'Пшеница озимая') return CROP_COLORS.wheat;
+  if (crop === 'Хлопок' && irr === 'drip') return CROP_COLORS.cotton_drip;
+  if (crop === 'Хлопок' && irr === 'canal') return CROP_COLORS.cotton_canal;
+  if (crop === 'Люцерна') return CROP_COLORS.alfalfa;
+  if (crop === 'Рис') return CROP_COLORS.rice;
+  if (crop === 'Кукуруза') return CROP_COLORS.maize;
+  return CROP_COLORS.default;
+}
+
+function addModeColorToFeatures(geojson, mode) {
+  if (!geojson?.features) return geojson;
+  return {
+    ...geojson,
+    features: geojson.features.map(f => {
+      const props = f.properties || {};
+      return {
+        ...f,
+        properties: {
+          ...props,
+          map_mode_color: computeModeColor(props, mode),
+          map_mode_value: props.last_ndvi ?? props.savi_value ?? props.evi_value ?? props.ndmi_value ?? props.ndre_value ?? null,
+          map_mode_label: getModeLabel(mode),
+        },
+      };
+    }),
+  };
+}
+
+function getModeLabel(mode) {
+  const m = MAP_MODES.find(mm => mm.code === mode);
+  return m ? m.label : mode;
+}
+
+// ─── Get hover info from feature properties ────────────────────────────────────
+
+function formatModeValue(properties, mode) {
+  switch (mode) {
+    case 'crop':
+      return properties.current_crop || '—';
+    case 'ndvi':
+      if (properties.last_ndvi != null) return properties.last_ndvi.toFixed(4);
+      return null;
+    case 'savi':
+      return properties.savi_value != null ? properties.savi_value.toFixed(4) : null;
+    case 'evi':
+      return properties.evi_value != null ? properties.evi_value.toFixed(4) : null;
+    case 'ndmi':
+      return properties.ndmi_value != null ? properties.ndmi_value.toFixed(4) : null;
+    case 'ndre':
+      return properties.ndre_value != null ? properties.ndre_value.toFixed(4) : null;
+    case 'coverage':
+      return getCoverageLabel(properties.coverage_status);
+    case 'freshness':
+      return getFreshnessLabel(properties.freshness_status);
+    default:
+      return null;
+  }
+}
+
+function getCoverageLabel(status) {
+  switch (status) {
+    case 'complete': return 'Полное покрытие';
+    case 'partial':  return 'Частично';
+    case 'none':     return 'Нет данных';
+    default:         return 'Нет данных';
+  }
+}
+
+function getFreshnessLabel(status) {
+  switch (status) {
+    case 'fresh':      return 'Актуально';
+    case 'stale':      return 'Устарело';
+    case 'future_date': return 'Дата из будущего';
+    default:           return 'Нет данных';
+  }
+}
+
+// ─── Component ──────────────────────────────────────────────────────────────────
+
 export default function FieldMap({
   onFieldSelect,
   onDrawComplete,
@@ -105,10 +312,16 @@ export default function FieldMap({
   enterpriseId,
   highlightedFieldId,
   onMapReady,
+  coverageMap,
+  coverageLoading,
+  selectedMapMode,
+  onMapModeChange,
 }) {
   const [activeStyle, setActiveStyle] = useState('satellite');
   const [activeColorMode, setActiveColorMode] = useState('crop');
   const [showLegend, setShowLegend] = useState(false);
+  const [hoveredFeature, setHoveredFeature] = useState(null);
+  const [hoverPosition, setHoverPosition] = useState(null);
   const mapContainerRef = useRef(null);
   const mapRef = useRef(null);
   const drawRef = useRef(null);
@@ -118,8 +331,11 @@ export default function FieldMap({
   const sessionPurgedRef = useRef(false);
   const dataLoadedRef = useRef(false);
   const geojsonRef = useRef(null);
+  const enrichedGeoJsonRef = useRef(null);
   const styleSwitchColorModeRef = useRef('crop');
   const styleLoadHandlerRef = useRef(null);
+  const coverageMapRef = useRef(null);
+  const selectedMapModeRef = useRef('crop');
 
   const callbacksRef = useRef({
     onFieldSelect,
@@ -136,6 +352,8 @@ export default function FieldMap({
     onDrawCreate: null,
   });
 
+  const hoverTimeoutRef = useRef(null);
+
   useEffect(() => {
     callbacksRef.current = {
       onFieldSelect,
@@ -149,7 +367,17 @@ export default function FieldMap({
     isDrawingRef.current = isDrawingMode;
   }, [isDrawingMode]);
 
-  // Р Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљ Disable draw mode Р Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљ
+  // Track coverageMap in ref
+  useEffect(() => {
+    coverageMapRef.current = coverageMap;
+  }, [coverageMap]);
+
+  // Track selectedMapMode in ref
+  useEffect(() => {
+    selectedMapModeRef.current = selectedMapMode || 'crop';
+  }, [selectedMapMode]);
+
+  // ─── Disable draw mode ──────────────────────────────────────────────────────
   const disableDrawMode = () => {
     const m = mapRef.current;
     if (!m) return;
@@ -169,7 +397,7 @@ export default function FieldMap({
     m.getCanvas().style.cursor = '';
   };
 
-  // Р Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљ Enable draw mode Р Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљ
+  // ─── Enable draw mode ────────────────────────────────────────────────────────
   const enableDrawMode = () => {
     const m = mapRef.current;
     if (!m || !m.isStyleLoaded()) {
@@ -184,7 +412,6 @@ export default function FieldMap({
       return;
     }
 
-    // Patch MapboxDraw class constants for MapLibre GL compatibility.
     MapboxDraw.constants.classes.CANVAS = 'maplibregl-canvas';
     MapboxDraw.constants.classes.CONTROL_BASE = 'maplibregl-ctrl';
     MapboxDraw.constants.classes.CONTROL_PREFIX = 'maplibregl-ctrl-';
@@ -212,11 +439,9 @@ export default function FieldMap({
     };
 
     m.on('draw.create', handlersRef.current.onDrawCreate);
-
-    // Global draw-control lock; use per-account locks only if throughput requires it.
   };
 
-  // Р Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљ Draw mode effect Р Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљ
+  // ─── Draw mode effect ────────────────────────────────────────────────────────
   useEffect(() => {
     if (isDrawingMode && canDraw) {
       enableDrawMode();
@@ -226,7 +451,7 @@ export default function FieldMap({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isDrawingMode, canDraw]);
 
-  // Р Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљ Logout handler Р Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљ
+  // ─── Logout handler ──────────────────────────────────────────────────────────
   const handleLogout = () => {
     sessionPurgedRef.current = true;
 
@@ -251,7 +476,10 @@ export default function FieldMap({
     }
   };
 
-  // Р Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљ Map initialization Р Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљ
+  // ─── Refresh map colors from enriched GeoJSON + current mode ────────────────
+  const applyModeColors = useRef(null);
+
+  // ─── Map initialization ──────────────────────────────────────────────────────
   useEffect(() => {
     if (mapRef.current) return;
     isMountedRef.current = true;
@@ -274,7 +502,6 @@ export default function FieldMap({
       const m = mapRef.current;
       if (!m || !isMountedRef.current) return;
 
-      // Р Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљ GeoJSON load Р Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљ
       abortControllerRef.current = new AbortController();
 
       try {
@@ -285,7 +512,6 @@ export default function FieldMap({
           signal: abortControllerRef.current.signal,
         });
 
-        // Mandatory check after request resolves
         if (
           sessionPurgedRef.current ||
           !isMountedRef.current ||
@@ -294,18 +520,27 @@ export default function FieldMap({
           return;
         }
 
-        geojsonRef.current = res.data;
+        const rawGeoJson = res.data;
+        geojsonRef.current = rawGeoJson;
 
-        // Р Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљ Fit map to loaded field bounds (once) Р Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљ
+        // Enrich with coverage data
+        const enriched = enrichGeoJsonFeatures(rawGeoJson, coverageMapRef.current);
+        enrichedGeoJsonRef.current = enriched;
+
+        // Apply current mode colors
+        const colored = addModeColorToFeatures(enriched, selectedMapModeRef.current);
+
         const doFitBounds = !dataLoadedRef.current;
         dataLoadedRef.current = true;
 
         if (!m.getSource('fields-source')) {
           m.addSource('fields-source', {
             type: 'geojson',
-            data: res.data,
+            data: colored,
             promoteId: 'id',
           });
+        } else {
+          m.getSource('fields-source').setData(colored);
         }
 
         // Add layers only if they don't exist
@@ -315,7 +550,7 @@ export default function FieldMap({
             type: 'fill',
             source: 'fields-source',
             paint: {
-              'fill-color': CROP_COLOR_EXPR,
+              'fill-color': ['get', 'map_mode_color'],
               'fill-opacity': 0.4,
             },
           });
@@ -356,7 +591,7 @@ export default function FieldMap({
           });
         }
 
-        const features = res.data.features;
+        const features = colored.features;
         if (features?.length && doFitBounds) {
           const bounds = new maplibregl.LngLatBounds();
           let hasCoords = false;
@@ -387,7 +622,7 @@ export default function FieldMap({
           }
         }
 
-        // Р Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљ Interaction handlers Р Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљ
+        // Interaction handlers
         LAYERS.forEach((layer) => {
           if (m.getLayer(layer)) {
             if (handlersRef.current.onMouseMove) {
@@ -420,6 +655,16 @@ export default function FieldMap({
                 1,
               ]);
             }
+
+            // Update hover popup with debounce
+            if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current);
+            hoverTimeoutRef.current = setTimeout(() => {
+              if (!isMountedRef.current) return;
+              const feat = e.features[0];
+              const props = feat.properties || {};
+              setHoveredFeature(props);
+              setHoverPosition({ x: e.point.x, y: e.point.y });
+            }, 50);
           }
         };
 
@@ -430,6 +675,9 @@ export default function FieldMap({
             m.setPaintProperty('fields-border', 'line-width', 2);
             m.setPaintProperty('fields-border', 'line-opacity', 1);
           }
+          if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current);
+          setHoveredFeature(null);
+          setHoverPosition(null);
         };
 
         handlersRef.current.onFieldClick = (e) => {
@@ -464,13 +712,13 @@ export default function FieldMap({
       isMountedRef.current = false;
       sessionPurgedRef.current = true;
       window.removeEventListener('agrosat:logout', handleLogout);
+      if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current);
 
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
         abortControllerRef.current = null;
       }
 
-      // Cancel any pending style-load handler
       if (styleLoadHandlerRef.current && mapRef.current) {
         mapRef.current.off('style.load', styleLoadHandlerRef.current);
         styleLoadHandlerRef.current = null;
@@ -499,7 +747,7 @@ export default function FieldMap({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Р Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљ Selected / highlight filter updates Р Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљ
+  // ─── Selected / highlight filter updates ────────────────────────────────────
   useEffect(() => {
     const m = mapRef.current;
     if (!m || !m.isStyleLoaded()) return;
@@ -521,14 +769,13 @@ export default function FieldMap({
     } catch (_) {}
   }, [selectedFieldId]);
 
-  // Р Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљ Style switch Р Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљР Р†РІР‚СњР вЂљ
+  // ─── Style switch ──────────────────────────────────────────────────────────
   const switchMapStyle = (styleKey) => {
     const m = mapRef.current;
     if (!m) return;
     if (styleKey === activeStyle) return;
     setActiveStyle(styleKey);
 
-    // Cancel any pending style-load handler from a previous style switch
     if (styleLoadHandlerRef.current) {
       m.off('style.load', styleLoadHandlerRef.current);
       styleLoadHandlerRef.current = null;
@@ -546,34 +793,26 @@ export default function FieldMap({
     m.setStyle(MAP_STYLES[styleKey].style);
   };
 
+  // ─── Rehydrate layers after style switch ────────────────────────────────────
   const rehydrateLayers = (data) => {
     const m = mapRef.current;
     if (!m || !isMountedRef.current) return;
 
     const mode = styleSwitchColorModeRef.current;
-    const fillColor = mode === 'ndvi'
-      ? [
-          'interpolate',
-          ['linear'],
-          ['coalesce', ['get', 'last_ndvi'], -1],
-          -1, '#4b5563',
-          0.0, '#8B0000',
-          0.2, '#FF4500',
-          0.35, '#FFD700',
-          0.5, '#9ACD32',
-          0.65, '#228B22',
-          0.8, '#006400',
-        ]
-      : CROP_COLOR_EXPR;
+
+    // Re-enrich and recolor with current coverage + mode
+    const enriched = enrichGeoJsonFeatures(data, coverageMapRef.current);
+    enrichedGeoJsonRef.current = enriched;
+    const colored = addModeColorToFeatures(enriched, mode);
 
     if (!m.getSource('fields-source')) {
       m.addSource('fields-source', {
         type: 'geojson',
-        data,
+        data: colored,
         promoteId: 'id',
       });
     } else {
-      m.getSource('fields-source').setData(data);
+      m.getSource('fields-source').setData(colored);
     }
 
     if (!m.getLayer('fields-fill')) {
@@ -582,12 +821,12 @@ export default function FieldMap({
         type: 'fill',
         source: 'fields-source',
         paint: {
-          'fill-color': fillColor,
+          'fill-color': ['get', 'map_mode_color'],
           'fill-opacity': 0.4,
         },
       });
     } else {
-      m.setPaintProperty('fields-fill', 'fill-color', fillColor);
+      m.setPaintProperty('fields-fill', 'fill-color', ['get', 'map_mode_color']);
     }
 
     if (!m.getLayer('fields-border')) {
@@ -644,13 +883,75 @@ export default function FieldMap({
     });
   };
 
+  // ─── Switch color mode ─────────────────────────────────────────────────────
   const switchColorMode = (mode) => {
     setActiveColorMode(mode);
     styleSwitchColorModeRef.current = mode;
-    if (geojsonRef.current && mapRef.current?.isStyleLoaded()) {
-      rehydrateLayers(geojsonRef.current);
-    }
+    if (onMapModeChange) onMapModeChange(mode);
+
+    const m = mapRef.current;
+    if (!m || !m.isStyleLoaded()) return;
+
+    // Recolor features with new mode
+    const enriched = enrichGeoJsonFeatures(geojsonRef.current, coverageMapRef.current);
+    enrichedGeoJsonRef.current = enriched;
+    const colored = addModeColorToFeatures(enriched, mode);
+
+    try {
+      const src = m.getSource('fields-source');
+      if (src) {
+        src.setData(colored);
+      }
+    } catch (_) {}
+
+    // Update fill-color paint property
+    try {
+      if (m.getLayer('fields-fill')) {
+        m.setPaintProperty('fields-fill', 'fill-color', ['get', 'map_mode_color']);
+      }
+    } catch (_) {}
   };
+
+  // ─── Respond to coverageMap changes: re-enrich and recolor ─────────────────
+  useEffect(() => {
+    if (!coverageMap || !mapRef.current || !mapRef.current.isStyleLoaded()) return;
+    const mode = selectedMapMode || 'crop';
+    const enriched = enrichGeoJsonFeatures(geojsonRef.current, coverageMap);
+    enrichedGeoJsonRef.current = enriched;
+    const colored = addModeColorToFeatures(enriched, mode);
+    try {
+      const src = mapRef.current.getSource('fields-source');
+      if (src) {
+        src.setData(colored);
+      }
+    } catch (_) {}
+  }, [coverageMap]);
+
+  // ─── Respond to selectedMapMode changes: recolor ───────────────────────────
+  useEffect(() => {
+    if (!mapRef.current || !mapRef.current.isStyleLoaded()) return;
+    const mode = selectedMapMode || 'crop';
+    setActiveColorMode(mode);
+    styleSwitchColorModeRef.current = mode;
+
+    const enriched = enrichGeoJsonFeatures(geojsonRef.current, coverageMapRef.current);
+    enrichedGeoJsonRef.current = enriched;
+    const colored = addModeColorToFeatures(enriched, mode);
+
+    try {
+      const src = mapRef.current.getSource('fields-source');
+      if (src) {
+        src.setData(colored);
+      }
+    } catch (_) {}
+
+    try {
+      if (mapRef.current.getLayer('fields-fill')) {
+        mapRef.current.setPaintProperty('fields-fill', 'fill-color', ['get', 'map_mode_color']);
+        mapRef.current.setPaintProperty('fields-fill', 'fill-opacity', 0.4);
+      }
+    } catch (_) {}
+  }, [selectedMapMode]);
 
   return (
     <div className="relative w-full h-full">
@@ -669,23 +970,24 @@ export default function FieldMap({
         ))}
       </div>
 
-      {/* Color mode toggle */}
-      <div className="absolute top-12 right-3 z-10 flex gap-1">
-        <button
-          onClick={() => switchColorMode('crop')}
-          className={`px-2.5 py-1 text-xs rounded-md font-medium transition-colors shadow border ${activeColorMode === 'crop' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white/90 backdrop-blur-sm text-slate-600 hover:text-slate-900 border-slate-200'}`}
-        >
-          Культуры
-        </button>
-        <button
-          onClick={() => switchColorMode('ndvi')}
-          className={`px-2.5 py-1 text-xs rounded-md font-medium transition-colors shadow border ${activeColorMode === 'ndvi' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white/90 backdrop-blur-sm text-slate-600 hover:text-slate-900 border-slate-200'}`}
-        >
-          NDVI
-        </button>
+      {/* Map mode selector — compact row */}
+      <div className="absolute top-12 right-3 z-10 flex flex-wrap gap-1 max-w-[260px] justify-end">
+        {MAP_MODES.map(mode => (
+          <button
+            key={mode.code}
+            onClick={() => switchColorMode(mode.code)}
+            className={`px-2 py-1 text-xs rounded-md font-medium transition-colors shadow border ${
+              activeColorMode === mode.code
+                ? 'bg-blue-600 text-white border-blue-600'
+                : 'bg-white/90 backdrop-blur-sm text-slate-600 hover:text-slate-900 border-slate-200'
+            }`}
+          >
+            {mode.label}
+          </button>
+        ))}
       </div>
 
-      {/* Legend toggle button */}
+      {/* Legend toggle */}
       <div className="absolute bottom-20 right-3 z-10 flex flex-col items-end gap-2">
         <button
           onClick={() => setShowLegend(!showLegend)}
@@ -707,11 +1009,21 @@ export default function FieldMap({
         )}
       </div>
 
+      {/* Hover popup */}
+      {hoveredFeature && hoverPosition && !isDrawingMode && (
+        <MapHoverPopup
+          feature={hoveredFeature}
+          position={hoverPosition}
+          mapMode={activeColorMode}
+          onClose={() => { setHoveredFeature(null); setHoverPosition(null); }}
+        />
+      )}
+
       {/* Re-center button */}
       <button
         onClick={() => mapRef.current?.flyTo({ center: DEFAULT_CENTER, zoom: DEFAULT_ZOOM, duration: 1000 })}
         className="absolute bottom-8 right-3 z-10 bg-white/90 backdrop-blur-sm hover:bg-slate-100 rounded-lg p-2 shadow-lg transition-colors border border-slate-200"
-        title="Р В РІР‚ВР РЋСвЂњР РЋРІР‚В¦Р В Р’В°Р РЋР вЂљР В Р’В°"
+        title="Сбросить вид"
       >
         <svg className="w-5 h-5 text-slate-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}

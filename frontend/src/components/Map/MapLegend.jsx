@@ -1,6 +1,7 @@
 // ─── Map Legend Component ─────────────────────────────────────────────────────
-// Explains the active color mode (crop / NDVI) and field status colors.
-// Uses qualitative labels — no exact agronomic thresholds unless already in code.
+// Explains the active color mode (crop / index / coverage / freshness).
+
+import { COVERAGE_STATUS_CONFIG, FRESHNESS_STATUS_CONFIG } from '../../config/indexMetadata';
 
 const CROP_LEGEND = [
   { color: '#EAB308', label: 'Пшеница' },
@@ -13,12 +14,60 @@ const CROP_LEGEND = [
 ];
 
 const NDVI_LEGEND = [
-  { color: '#16a34a', label: 'Высокое значение', note: '≥0.6' },
+  { color: '#16a34a', label: 'Высокое значение', note: '≥ 0.6' },
   { color: '#84cc16', label: 'Хорошее значение', note: '0.45–0.6' },
   { color: '#eab308', label: 'Среднее значение', note: '0.3–0.45' },
   { color: '#f97316', label: 'Низкое значение', note: '0.15–0.3' },
-  { color: '#dc2626', label: 'Критическое значение', note: '<0.15' },
+  { color: '#dc2626', label: 'Критическое значение', note: '< 0.15' },
   { color: '#4b5563', label: 'Нет данных', note: 'спутник не зафиксирован' },
+];
+
+const SAVI_LEGEND = [
+  { color: '#16a34a', label: 'Высокое значение', note: '≥ 0.4' },
+  { color: '#84cc16', label: 'Хорошее значение', note: '0.3–0.4' },
+  { color: '#eab308', label: 'Среднее значение', note: '0.2–0.3' },
+  { color: '#f97316', label: 'Низкое значение', note: '0.1–0.2' },
+  { color: '#dc2626', label: 'Критическое значение', note: '< 0.1' },
+  { color: '#4b5563', label: 'Нет данных', note: 'спутник не зафиксирован' },
+];
+
+const EVI_LEGEND = [
+  { color: '#16a34a', label: 'Высокое значение', note: '≥ 0.4' },
+  { color: '#84cc16', label: 'Хорошее значение', note: '0.3–0.4' },
+  { color: '#eab308', label: 'Среднее значение', note: '0.2–0.3' },
+  { color: '#f97316', label: 'Низкое значение', note: '0.1–0.2' },
+  { color: '#dc2626', label: 'Критическое значение', note: '< 0.1' },
+  { color: '#4b5563', label: 'Нет данных', note: 'спутник не зафиксирован' },
+];
+
+const NDMI_LEGEND = [
+  { color: '#2563eb', label: 'Очень сухо', note: '< -0.2' },
+  { color: '#60a5fa', label: 'Сухо', note: '-0.2 – 0.0' },
+  { color: '#f59e0b', label: 'Умеренная влажность', note: '0.0 – 0.1' },
+  { color: '#84cc16', label: 'Хорошая влажность', note: '0.1 – 0.3' },
+  { color: '#16a34a', label: 'Высокая влажность', note: '≥ 0.3' },
+  { color: '#4b5563', label: 'Нет данных', note: 'спутник не зафиксирован' },
+];
+
+const NDRE_LEGEND = [
+  { color: '#16a34a', label: 'Высокий сигнал', note: '≥ 0.35' },
+  { color: '#84cc16', label: 'Хороший сигнал', note: '0.2 – 0.35' },
+  { color: '#eab308', label: 'Умеренный сигнал', note: '0.1 – 0.2' },
+  { color: '#f97316', label: 'Низкий сигнал', note: '< 0.1' },
+  { color: '#4b5563', label: 'Нет данных', note: 'спутник не зафиксирован' },
+];
+
+const COVERAGE_LEGEND = [
+  { color: COVERAGE_STATUS_CONFIG.complete.color, label: COVERAGE_STATUS_CONFIG.complete.label },
+  { color: COVERAGE_STATUS_CONFIG.partial.color, label: COVERAGE_STATUS_CONFIG.partial.label },
+  { color: COVERAGE_STATUS_CONFIG.none.color, label: COVERAGE_STATUS_CONFIG.none.label },
+];
+
+const FRESHNESS_LEGEND = [
+  { color: FRESHNESS_STATUS_CONFIG.fresh.color, label: FRESHNESS_STATUS_CONFIG.fresh.label },
+  { color: FRESHNESS_STATUS_CONFIG.stale.color, label: FRESHNESS_STATUS_CONFIG.stale.label },
+  { color: FRESHNESS_STATUS_CONFIG.future_date.color, label: FRESHNESS_STATUS_CONFIG.future_date.label },
+  { color: FRESHNESS_STATUS_CONFIG.no_data.color, label: FRESHNESS_STATUS_CONFIG.no_data.label },
 ];
 
 const STATUS_LEGEND = [
@@ -28,15 +77,34 @@ const STATUS_LEGEND = [
   { color: '#9ca3af', label: 'Нет данных' },
 ];
 
+const MODE_LEGENDS = {
+  crop: { items: CROP_LEGEND, title: 'Легенда: Культуры' },
+  ndvi: { items: NDVI_LEGEND, title: 'Легенда: NDVI' },
+  savi: { items: SAVI_LEGEND, title: 'Легенда: SAVI' },
+  evi: { items: EVI_LEGEND, title: 'Легенда: EVI' },
+  ndmi: { items: NDMI_LEGEND, title: 'Легенда: NDMI' },
+  ndre: { items: NDRE_LEGEND, title: 'Легенда: NDRE' },
+  coverage: { items: COVERAGE_LEGEND, title: 'Легенда: Покрытие' },
+  freshness: { items: FRESHNESS_LEGEND, title: 'Легенда: Актуальность' },
+};
+
+const LEGEND_DISCLAIMERS = {
+  ndvi: 'Цвет показывает относительное значение NDVI, не является диагнозом урожайности.',
+  savi: 'Цвет показывает относительное значение SAVI, не является диагнозом урожайности.',
+  evi: 'Цвет показывает относительное значение EVI, не является диагнозом урожайности.',
+  ndmi: 'Отрицательные значения NDMI допустимы и указывают на сухую поверхность.',
+  ndre: 'Цвет показывает относительное значение NDRE, не является диагнозом урожайности.',
+};
+
 export default function MapLegend({ activeColorMode, onClose }) {
-  const legendItems = activeColorMode === 'crop' ? CROP_LEGEND : NDVI_LEGEND;
-  const title = activeColorMode === 'crop' ? 'Легенда: Культуры' : 'Легенда: NDVI';
+  const legend = MODE_LEGENDS[activeColorMode] || MODE_LEGENDS.crop;
+  const disclaimer = LEGEND_DISCLAIMERS[activeColorMode];
 
   return (
-    <div className="bg-white/95 backdrop-blur-sm rounded-lg shadow-lg border border-slate-200 text-xs w-56 max-h-80 overflow-y-auto">
+    <div className="bg-white/95 backdrop-blur-sm rounded-lg shadow-lg border border-slate-200 text-xs w-56 max-h-96 overflow-y-auto">
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-gray-100">
-        <span className="font-semibold text-gray-700">{title}</span>
+        <span className="font-semibold text-gray-700">{legend.title}</span>
         {onClose && (
           <button
             onClick={onClose}
@@ -51,7 +119,7 @@ export default function MapLegend({ activeColorMode, onClose }) {
 
       {/* Legend items */}
       <div className="p-3 space-y-2">
-        {legendItems.map(item => (
+        {legend.items.map(item => (
           <div key={item.label} className="flex items-center gap-2">
             <div
               className="w-5 h-3 rounded-sm flex-shrink-0"
@@ -67,7 +135,7 @@ export default function MapLegend({ activeColorMode, onClose }) {
         ))}
       </div>
 
-      {/* Status legend (always shown) */}
+      {/* Status legend — shown always */}
       <div className="border-t border-gray-100 px-3 py-2">
         <div className="text-xs font-semibold text-gray-700 mb-1.5">Статус поля</div>
         <div className="space-y-1.5">
@@ -83,10 +151,12 @@ export default function MapLegend({ activeColorMode, onClose }) {
         </div>
       </div>
 
-      {/* Index note — shown always */}
-      <div className="border-t border-gray-100 px-3 py-2 text-[10px] text-gray-400 leading-relaxed">
-        Отрицательные значения индексов могут быть допустимыми.
-      </div>
+      {/* Mode-specific disclaimer */}
+      {disclaimer && (
+        <div className="border-t border-gray-100 px-3 py-2 text-[10px] text-gray-400 leading-relaxed">
+          {disclaimer}
+        </div>
+      )}
     </div>
   );
 }

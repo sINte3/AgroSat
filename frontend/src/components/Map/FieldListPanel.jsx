@@ -48,6 +48,32 @@ function getFieldStatus(field) {
   return { label: 'Хороший', color: '#16a34a' };
 }
 
+function getModeValuePreview(field, cov, mode) {
+  if (!cov) return '';
+  switch (mode) {
+    case 'savi':
+    case 'evi':
+    case 'ndmi':
+    case 'ndre': {
+      const idx = cov.indices?.[mode];
+      if (idx && idx.has_data && idx.latest_mean_value != null) {
+        return `${mode.toUpperCase()}: ${Number(idx.latest_mean_value).toFixed(3)}`;
+      }
+      return `${mode.toUpperCase()}: —`;
+    }
+    case 'coverage': {
+      const cfg = COVERAGE_STATUS_CONFIG[cov.coverage_status];
+      return cfg ? cfg.shortLabel : '';
+    }
+    case 'freshness': {
+      const cfg = FRESHNESS_STATUS_CONFIG[cov.freshness_status];
+      return cfg ? cfg.shortLabel : '';
+    }
+    default:
+      return '';
+  }
+}
+
 export default function FieldListPanel({
   fields,
   enterprises,
@@ -60,6 +86,7 @@ export default function FieldListPanel({
   enterpriseId,
   coverageMap,
   coverageLoading,
+  selectedMapMode,
 }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [enterpriseFilter, setEnterpriseFilter] = useState(enterpriseId || null);
@@ -543,6 +570,12 @@ export default function FieldListPanel({
                       </div>
                     ) : (
                       <span className="text-xs text-gray-400">—</span>
+                    )}
+                    {/* Map mode value chip — compact */}
+                    {selectedMapMode && selectedMapMode !== 'crop' && selectedMapMode !== 'ndvi' && cov && (
+                      <div className="mt-0.5 text-[10px] text-gray-400 font-mono text-right">
+                        {getModeValuePreview(field, cov, selectedMapMode)}
+                      </div>
                     )}
                   </div>
                 </div>

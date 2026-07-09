@@ -17,6 +17,8 @@ export default function FieldsPage({ onFieldClick, onNavigate, enterpriseId }) {
   const [coverageMap, setCoverageMap] = useState(null);
   const [coverageLoading, setCoverageLoading] = useState(false);
 
+  const [selectedMapMode, setSelectedMapMode] = useState('crop');
+
   // Draw / create field state
   const [isDrawingMode, setIsDrawingMode] = useState(false);
   const [drawnGeometry, setDrawnGeometry] = useState(null);
@@ -185,6 +187,10 @@ export default function FieldsPage({ onFieldClick, onNavigate, enterpriseId }) {
           isDrawingMode={isDrawingMode}
           setIsDrawingMode={setIsDrawingMode}
           canDraw={canCreateField}
+          coverageMap={coverageMap}
+          coverageLoading={coverageLoading}
+          selectedMapMode={selectedMapMode}
+          onMapModeChange={setSelectedMapMode}
         />
 
         {/* Draw controls overlay */}
@@ -231,6 +237,7 @@ export default function FieldsPage({ onFieldClick, onNavigate, enterpriseId }) {
           enterpriseId={enterpriseId}
           coverageMap={coverageMap}
           coverageLoading={coverageLoading}
+          selectedMapMode={selectedMapMode}
         />
       </div>
 
