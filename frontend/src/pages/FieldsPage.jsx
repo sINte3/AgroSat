@@ -1,9 +1,9 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import FieldMap from '../components/Map/FieldMap';
 import FieldListPanel from '../components/Map/FieldListPanel';
 import FieldDetailPanel from '../components/Map/FieldDetailPanel';
 import CreateFieldModal from '../components/Map/CreateFieldModal';
-import { getCachedEnterprises, getFields, getField, createField, clearGeoCache } from '../api/client';
+import { getCachedEnterprises, getFields, getField, createField, clearGeoCache, getSatelliteCoverage } from '../api/client';
 import { useAuth } from '../context/AuthContext';
 
 export default function FieldsPage({ onFieldClick, onNavigate, enterpriseId }) {
@@ -14,6 +14,8 @@ export default function FieldsPage({ onFieldClick, onNavigate, enterpriseId }) {
   const [selectedFieldId, setSelectedFieldId] = useState(null);
   const [selectedField, setSelectedField] = useState(null);
   const [highlightedFieldId, setHighlightedFieldId] = useState(null);
+  const [coverageMap, setCoverageMap] = useState(null);
+  const [coverageLoading, setCoverageLoading] = useState(false);
 
   // Draw / create field state
   const [isDrawingMode, setIsDrawingMode] = useState(false);
@@ -34,6 +36,31 @@ export default function FieldsPage({ onFieldClick, onNavigate, enterpriseId }) {
       .then(setEnterprises)
       .catch((err) => console.error('Error loading enterprises:', err));
   }, []);
+
+  // Fetch coverage once for current scope — never per field
+  const fieldsLoadedRef = useRef(false);
+  useEffect(() => {
+    if (fields.length === 0) return;
+    // Only fetch on first load or enterprise change
+    if (fieldsLoadedRef.current && !enterpriseId) return;
+    fieldsLoadedRef.current = true;
+
+    setCoverageLoading(true);
+    const params = { include_empty: true, active_only: true };
+    if (enterpriseId) params.enterprise_id = enterpriseId;
+    getSatelliteCoverage(params)
+      .then(data => {
+        const map = {};
+        if (Array.isArray(data.fields)) {
+          data.fields.forEach(f => {
+            map[f.field_id] = f;
+          });
+        }
+        setCoverageMap(map);
+      })
+      .catch(err => console.error('Coverage fetch error:', err))
+      .finally(() => setCoverageLoading(false));
+  }, [enterpriseId, fields.length]);
 
   // Load field detail when selectedFieldId changes (for the right-side detail panel)
   useEffect(() => {
@@ -202,6 +229,8 @@ export default function FieldsPage({ onFieldClick, onNavigate, enterpriseId }) {
           onOpenFullDetail={handleOpenFullDetail}
           onNavigate={onNavigate}
           enterpriseId={enterpriseId}
+          coverageMap={coverageMap}
+          coverageLoading={coverageLoading}
         />
       </div>
 

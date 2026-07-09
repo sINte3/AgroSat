@@ -75,11 +75,7 @@ const INDEX_METADATA = {
   },
 };
 
-/** Index codes that use the satellite-indices API */
-export const SATELLITE_INDEX_CODES = ['savi', 'evi', 'ndmi', 'ndre'];
-
-/** All index codes including legacy NDVI */
-export const ALL_INDEX_CODES = ['ndvi', 'savi', 'evi', 'ndmi', 'ndre'];
+// (SATELLITE_INDEX_CODES and ALL_INDEX_CODES are now defined after INDEX_METADATA)
 
 /** Get metadata for a single index */
 export function getIndexMetadata(code) {
@@ -116,5 +112,103 @@ export function getIndexColor(value, code) {
   if (value < 0.4) return '#84cc16';
   return '#16a34a';
 }
+
+// ─── Satellite coverage status config ────────────────────────────────────
+
+/**
+ * Labels and styling for coverage_status values returned by
+ * /api/satellite-indices/coverage per field.
+ */
+export const COVERAGE_STATUS_CONFIG = {
+  none: {
+    label: 'Нет данных',
+    shortLabel: 'Нет данных',
+    color: '#9ca3af',       // gray-400
+    bgColor: '#f3f4f6',     // gray-100
+    textColor: '#6b7280',    // gray-500
+    icon: '○',
+    priority: 'high',
+  },
+  partial: {
+    label: 'Частично',
+    shortLabel: 'Частично',
+    color: '#f59e0b',       // amber-500
+    bgColor: '#fffbeb',     // amber-50
+    textColor: '#b45309',   // amber-700
+    icon: '◐',
+    priority: 'medium',
+  },
+  complete: {
+    label: 'Полное покрытие',
+    shortLabel: 'Полное',
+    color: '#16a34a',       // green-600
+    bgColor: '#f0fdf4',     // green-50
+    textColor: '#15803d',   // green-700
+    icon: '●',
+    priority: 'normal',
+  },
+};
+
+/**
+ * Labels and styling for freshness_status values.
+ */
+export const FRESHNESS_STATUS_CONFIG = {
+  no_data: {
+    label: 'Нет данных',
+    shortLabel: 'Нет данных',
+    color: '#9ca3af',
+    bgColor: '#f3f4f6',
+    textColor: '#6b7280',
+  },
+  fresh: {
+    label: 'Актуально',
+    shortLabel: 'Актуально',
+    color: '#16a34a',
+    bgColor: '#f0fdf4',
+    textColor: '#15803d',
+  },
+  stale: {
+    label: 'Устарело',
+    shortLabel: 'Устарело',
+    color: '#dc2626',       // red-600
+    bgColor: '#fef2f2',     // red-50
+    textColor: '#b91c1c',   // red-700
+  },
+  future_date: {
+    label: 'Дата из будущего',
+    shortLabel: 'Будущая дата',
+    color: '#f59e0b',
+    bgColor: '#fffbeb',
+    textColor: '#b45309',
+  },
+};
+
+/**
+ * Coverage priority labels for operational hints.
+ */
+export const COVERAGE_PRIORITY_LABELS = {
+  high: {
+    label: 'Требует сбора данных',
+    detail: 'Поле без данных или с устаревшими спутниковыми данными. Приоритет для проверки.',
+  },
+  medium: {
+    label: 'Частичное покрытие',
+    detail: 'Некоторые спутниковые индексы отсутствуют. Требуется дообследование.',
+  },
+  normal: {
+    label: 'Данные актуальны',
+    detail: 'Все спутниковые индексы доступны и актуальны.',
+  },
+};
+
+/**
+ * Supported satellite index codes (excludes NDVI).
+ */
+export const SATELLITE_INDEX_CODES = ['savi', 'evi', 'ndmi', 'ndre'];
+
+/**
+ * All index codes including legacy NDVI.
+ */
+export const ALL_INDEX_CODES = ['ndvi', 'savi', 'evi', 'ndmi', 'ndre'];
 
 export default INDEX_METADATA;

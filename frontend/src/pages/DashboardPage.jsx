@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { getCachedDashboardSummary, getAlerts } from '../api/client';
+import { getCachedDashboardSummary, getAlerts, getSatelliteCoverage } from '../api/client';
 import SummaryCards from '../components/Dashboard/SummaryCards';
+import { COVERAGE_STATUS_CONFIG, FRESHNESS_STATUS_CONFIG, COVERAGE_PRIORITY_LABELS } from '../config/indexMetadata';
+import INDEX_METADATA from '../config/indexMetadata';
 
 const ALERT_TYPE_LABELS = {
   ndvi_low:    'NDVI ниже нормы для фазы роста',
@@ -19,22 +21,33 @@ export default function DashboardPage({ onNavigate, onFieldClick, onFieldHighlig
   const [allAlerts, setAllAlerts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [coverage, setCoverage] = useState(null);
+  const [coverageLoading, setCoverageLoading] = useState(true);
+  const [coverageError, setCoverageError] = useState(null);
 
   const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setCoverageError(null);
+    setCoverage(null);
     try {
-      const [summaryData, alertsData] = await Promise.all([
+      const [summaryData, alertsData, coverageData] = await Promise.all([
         getCachedDashboardSummary(),
         getAlerts({ is_active: true, limit: 20 }),
+        getSatelliteCoverage({ include_empty: true, active_only: true }).catch(e => {
+          setCoverageError(e?.message || 'Не удалось загрузить данные покрытия');
+          return null;
+        }),
       ]);
       setSummary(summaryData);
       setAllAlerts(Array.isArray(alertsData) ? alertsData : []);
+      if (coverageData) setCoverage(coverageData);
     } catch (err) {
       setError('Не удалось загрузить данные дашборда');
       console.error(err);
     } finally {
       setLoading(false);
+      setCoverageLoading(false);
     }
   }, []);
 
@@ -322,7 +335,122 @@ export default function DashboardPage({ onNavigate, onFieldClick, onFieldHighlig
             )}
           </div>
         </div>
+
+        {/* ── Satellite coverage block ───────────────────────────────── */}
+
+        {/* Loading */}
+        {coverageLoading && (
+          <div className="card">
+            <div className="h-4 bg-gray-200 rounded w-48 mb-3 animate-pulse" />
+            <div className="grid grid-cols-3 gap-3">
+              {[...Array(6)].map((_, i) => (
+                <div key={i} className="h-12 bg-gray-100 rounded animate-pulse" />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Auth error */}
+        {coverageError && coverageError.includes('401') && (
+          <div className="card border border-red-200 bg-red-50">
+            <p className="text-sm text-red-700 font-medium">Нет доступа к спутниковым данным</p>
+            <p className="text-xs text-red-500 mt-1">Проверьте права учётной записи.</p>
+          </div>
+        )}
+
+        {/* Config error (422) */}
+        {coverageError && coverageError.includes('конфигурации') && (
+          <div className="card border border-amber-200 bg-amber-50">
+            <p className="text-sm text-amber-700 font-medium">{coverageError}</p>
+          </div>
+        )}
+
+        {/* Coverage data */}
+        {coverage && coverage.summary && !coverageLoading && (
+          <div className="card">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-sm font-semibold text-agro-text">
+                Покрытие спутниковыми индексами
+              </h2>
+              {coverage.summary.latest_captured_date && (
+                <span className="text-xs text-agro-muted">
+                  Данные от {new Date(coverage.summary.latest_captured_date).toLocaleDateString('ru-RU')}
+                </span>
+              )}
+            </div>
+
+            {/* Summary grid */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+              <CoverageStat label="Всего полей" value={coverage.summary.fields_total} color="text-agro-text" />
+              <CoverageStat label="С данными" value={coverage.summary.fields_with_any_data} color="text-green-600" />
+              <CoverageStat label="Без данных" value={coverage.summary.fields_without_data} color="text-gray-500" />
+              <CoverageStat label="Полное покрытие" value={coverage.summary.fields_with_all_requested_indices} color="text-green-600" />
+              <CoverageStat label="Частичное" value={coverage.summary.fields_with_partial_indices} color="text-amber-600" />
+              <CoverageStat label="Устарело" value={coverage.summary.fields_stale} color="text-red-600" />
+              <CoverageStat label="Всего записей" value={coverage.summary.record_count_total} color="text-agro-text" />
+            </div>
+
+            {/* Per-index mini summary */}
+            {coverage.summary.index_summary && Object.keys(coverage.summary.index_summary).length > 0 && (
+              <div>
+                <p className="text-xs font-semibold text-agro-muted uppercase tracking-wide mb-2">
+                  По индексам
+                </p>
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+                  {Object.entries(coverage.summary.index_summary).map(([code, idxData]) => {
+                    const meta = INDEX_METADATA[code];
+                    return (
+                      <div key={code} className="p-2 rounded-lg bg-agro-surface2">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-xs font-bold text-agro-text">{meta?.label || code.toUpperCase()}</span>
+                          <span className="text-[10px] text-agro-muted">{meta?.shortMeaning || ''}</span>
+                        </div>
+                        <p className="text-sm font-semibold text-agro-text mt-0.5">
+                          {idxData.fields_with_data ?? 0} полей
+                        </p>
+                        {idxData.latest_date && (
+                          <p className="text-[10px] text-agro-muted">
+                            до {new Date(idxData.latest_date).toLocaleDateString('ru-RU')}
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Empty coverage: endpoint returned no summary */}
+        {!coverageLoading && !coverageError && coverage && !coverage.summary && (
+          <div className="card">
+            <div className="flex items-center gap-3 py-4">
+              <div className="w-10 h-10 rounded-full bg-gray-100 flex items-center justify-center">
+                <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"
+                  />
+                </svg>
+              </div>
+              <div>
+                <p className="text-sm font-medium text-agro-text">Нет данных покрытия</p>
+                <p className="text-xs text-agro-muted">Спутниковые индексы ещё не загружены.</p>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
+    </div>
+  );
+}
+
+/* ── Coverage stat inline component ────────────────────────── */
+function CoverageStat({ label, value, color }) {
+  return (
+    <div className="p-2 rounded-lg bg-agro-surface2">
+      <p className="text-[11px] text-agro-muted">{label}</p>
+      <p className={`text-lg font-bold ${color}`}>{value ?? '—'}</p>
     </div>
   );
 }

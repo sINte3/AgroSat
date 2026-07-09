@@ -281,4 +281,69 @@ export async function loginWithPassword(email, password) {
   return data;
 }
 
+// ─── Satellite Coverage ──────────────────────────────────────────────
+
+const VALID_INDEX_CODES = ['savi', 'evi', 'ndmi', 'ndre'];
+
+/**
+ * Fetch satellite-index coverage summary.
+ *
+ * GET /api/satellite-indices/coverage
+ *
+ * Accepted params: enterprise_id, field_ids, index_codes, date_from,
+ * date_to, active_only, include_empty, stale_after_days, as_of.
+ *
+ * Rules:
+ * - NDVI is never included in index_codes — stripped before request.
+ * - Response is normalized defensively: missing summary/fields are safe.
+ * - 401/403 are surfaced via the retry interceptor's 401 handler.
+ * - 422 surfaces a configuration error string.
+ */
+export async function getSatelliteCoverage(params = {}) {
+  const cleaned = { ...params };
+
+  // Strip NDVI from index_codes if present
+  if (cleaned.index_codes) {
+    const codes = Array.isArray(cleaned.index_codes)
+      ? cleaned.index_codes
+      : String(cleaned.index_codes).split(',').map(s => s.trim().toLowerCase());
+    cleaned.index_codes = codes.filter(c => c !== 'ndvi');
+    if (cleaned.index_codes.length === 0) {
+      cleaned.index_codes = VALID_INDEX_CODES;
+    }
+  }
+
+  try {
+    const { data } = await client.get('satellite-indices/coverage', {
+      params: cleaned,
+      // Do not retry 422 — it's a configuration error, not transient
+      __noRetry: true,
+    });
+
+    // Defensive normalization
+    return {
+      filters: data?.filters ?? null,
+      summary: {
+        fields_total: data?.summary?.fields_total ?? 0,
+        fields_with_any_data: data?.summary?.fields_with_any_data ?? 0,
+        fields_without_data: data?.summary?.fields_without_data ?? 0,
+        fields_with_all_requested_indices: data?.summary?.fields_with_all_requested_indices ?? 0,
+        fields_with_partial_indices: data?.summary?.fields_with_partial_indices ?? 0,
+        fields_stale: data?.summary?.fields_stale ?? 0,
+        index_summary: data?.summary?.index_summary ?? {},
+        latest_captured_date: data?.summary?.latest_captured_date ?? null,
+        record_count_total: data?.summary?.record_count_total ?? 0,
+      },
+      fields: Array.isArray(data?.fields) ? data.fields : [],
+    };
+  } catch (err) {
+    if (err?.response?.status === 422) {
+      throw new Error(
+        'Ошибка конфигурации спутниковых данных. Обратитесь к администратору.'
+      );
+    }
+    throw err;
+  }
+}
+
 export default client;

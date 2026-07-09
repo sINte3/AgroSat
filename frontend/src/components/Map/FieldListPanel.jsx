@@ -1,5 +1,8 @@
 import { useState, useEffect, useMemo } from 'react';
 import IndexLegend from '../Field/IndexLegend';
+import { COVERAGE_STATUS_CONFIG, FRESHNESS_STATUS_CONFIG, COVERAGE_PRIORITY_LABELS } from '../../config/indexMetadata';
+
+const SATELLITE_INDEX_CODES = ['savi', 'evi', 'ndmi', 'ndre'];
 
 // ─── Helper functions ─────────────────────────────────────────────────────────
 const getCropColor = (crop) => {
@@ -55,13 +58,17 @@ export default function FieldListPanel({
   onOpenFullDetail,
   onNavigate,
   enterpriseId,
+  coverageMap,
+  coverageLoading,
 }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [enterpriseFilter, setEnterpriseFilter] = useState(enterpriseId || null);
   const [cropFilter, setCropFilter] = useState(null);
   const [statusFilter, setStatusFilter] = useState(null); // 'has_data' | 'no_data' | null
+  const [coverageFilter, setCoverageFilter] = useState(null); // null | 'with_data' | 'without_data' | 'complete' | 'partial' | 'stale'
   const [collapsed, setCollapsed] = useState(false);
   const [showLegend, setShowLegend] = useState(false);
+  const [showCoverageAttention, setShowCoverageAttention] = useState(false);
 
   // Sync enterpriseId prop → enterpriseFilter
   useEffect(() => {
@@ -77,7 +84,7 @@ export default function FieldListPanel({
     return ['Все культуры', ...Array.from(crops).sort()];
   }, [fields]);
 
-  // Filter by search + enterprise + crop + status
+  // Filter by search + enterprise + crop + status + coverage filter
   const filteredFields = useMemo(() => {
     return fields.filter(f => {
       if (searchQuery && !f.name.toLowerCase().includes(searchQuery.toLowerCase())) return false;
@@ -85,9 +92,33 @@ export default function FieldListPanel({
       if (cropFilter && f.current_crop !== cropFilter) return false;
       if (statusFilter === 'has_data' && f.last_ndvi == null) return false;
       if (statusFilter === 'no_data' && f.last_ndvi != null) return false;
+
+      // Coverage-based filters
+      if (coverageFilter && coverageMap) {
+        const cov = coverageMap[f.id];
+        switch (coverageFilter) {
+          case 'with_data':
+            if (!cov || !cov.has_any_data) return false;
+            break;
+          case 'without_data':
+            if (cov && cov.has_any_data) return false;
+            break;
+          case 'complete':
+            if (!cov || cov.coverage_status !== 'complete') return false;
+            break;
+          case 'partial':
+            if (!cov || cov.coverage_status !== 'partial') return false;
+            break;
+          case 'stale':
+            if (!cov || cov.freshness_status !== 'stale') return false;
+            break;
+          default: break;
+        }
+      }
+
       return true;
     });
-  }, [fields, searchQuery, enterpriseFilter, cropFilter, statusFilter]);
+  }, [fields, searchQuery, enterpriseFilter, cropFilter, statusFilter, coverageFilter, coverageMap]);
 
   // Sort: alerts first, then NDVI ascending
   const sortedFields = useMemo(() => {
@@ -122,12 +153,13 @@ export default function FieldListPanel({
   }, [sortedFields]);
 
   // Check if any filter is active (excluding enterprise which is a view-level filter)
-  const hasActiveFilters = searchQuery || cropFilter || statusFilter;
+  const hasActiveFilters = searchQuery || cropFilter || statusFilter || coverageFilter;
 
   function resetFilters() {
     setSearchQuery('');
     setCropFilter(null);
     setStatusFilter(null);
+    setCoverageFilter(null);
   }
 
   // Check selected field is still in the filtered list
@@ -219,6 +251,70 @@ export default function FieldListPanel({
             </select>
           </div>
 
+          {/* Coverage filter row */}
+          <div className="flex flex-wrap gap-1.5 mt-2">
+            <button
+              onClick={() => setCoverageFilter(null)}
+              className={`px-2 py-1 text-[11px] rounded-full border font-medium transition-colors ${
+                coverageFilter === null
+                  ? 'bg-green-600 text-white border-green-600'
+                  : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-50'
+              }`}
+            >
+              Все
+            </button>
+            <button
+              onClick={() => setCoverageFilter(coverageFilter === 'with_data' ? null : 'with_data')}
+              className={`px-2 py-1 text-[11px] rounded-full border font-medium transition-colors ${
+                coverageFilter === 'with_data'
+                  ? 'bg-green-600 text-white border-green-600'
+                  : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-50'
+              }`}
+            >
+              С данными (инд.)
+            </button>
+            <button
+              onClick={() => setCoverageFilter(coverageFilter === 'without_data' ? null : 'without_data')}
+              className={`px-2 py-1 text-[11px] rounded-full border font-medium transition-colors ${
+                coverageFilter === 'without_data'
+                  ? 'bg-green-600 text-white border-green-600'
+                  : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-50'
+              }`}
+            >
+              Без данных (инд.)
+            </button>
+            <button
+              onClick={() => setCoverageFilter(coverageFilter === 'complete' ? null : 'complete')}
+              className={`px-2 py-1 text-[11px] rounded-full border font-medium transition-colors ${
+                coverageFilter === 'complete'
+                  ? 'bg-green-600 text-white border-green-600'
+                  : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-50'
+              }`}
+            >
+              Полное
+            </button>
+            <button
+              onClick={() => setCoverageFilter(coverageFilter === 'partial' ? null : 'partial')}
+              className={`px-2 py-1 text-[11px] rounded-full border font-medium transition-colors ${
+                coverageFilter === 'partial'
+                  ? 'bg-amber-600 text-white border-amber-600'
+                  : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-50'
+              }`}
+            >
+              Частичное
+            </button>
+            <button
+              onClick={() => setCoverageFilter(coverageFilter === 'stale' ? null : 'stale')}
+              className={`px-2 py-1 text-[11px] rounded-full border font-medium transition-colors ${
+                coverageFilter === 'stale'
+                  ? 'bg-red-600 text-white border-red-600'
+                  : 'bg-white text-gray-500 border-gray-200 hover:bg-gray-50'
+              }`}
+            >
+              Устарело
+            </button>
+          </div>
+
           {/* Status / data availability filter */}
           <div className="flex gap-2">
             <button
@@ -262,6 +358,57 @@ export default function FieldListPanel({
               Сбросить фильтры
             </button>
           )}
+
+          {/* ── Coverage attention summary ──────────────────────── */}
+          {coverageMap && !coverageLoading && (
+            <div className="mt-2">
+              <button
+                onClick={() => setShowCoverageAttention(!showCoverageAttention)}
+                className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700"
+              >
+                <svg className={`w-3 h-3 transition-transform ${showCoverageAttention ? 'rotate-90' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M9 18l6-6-6-6" />
+                </svg>
+                Поля без спутниковых данных
+              </button>
+              {showCoverageAttention && (
+                <div className="mt-1 space-y-1 max-h-32 overflow-y-auto">
+                  {fields
+                    .filter(f => {
+                      const cov = coverageMap[f.id];
+                      return !cov || !cov.has_any_data;
+                    })
+                    .slice(0, 10)
+                    .map(f => (
+                      <button
+                        key={f.id}
+                        onClick={() => onFieldSelect(f.id)}
+                        className="w-full text-left text-xs text-gray-600 hover:text-gray-900 px-2 py-1 rounded hover:bg-gray-100"
+                      >
+                        {f.name} · {f.area_ha?.toFixed(1)} га
+                      </button>
+                    ))}
+                  {fields.filter(f => {
+                    const cov = coverageMap[f.id];
+                    return !cov || !cov.has_any_data;
+                  }).length === 0 && (
+                    <p className="text-xs text-gray-400 px-2">Все поля имеют спутниковые данные</p>
+                  )}
+                  {fields.filter(f => {
+                    const cov = coverageMap[f.id];
+                    return !cov || !cov.has_any_data;
+                  }).length > 10 && (
+                    <p className="text-xs text-gray-400 px-2">
+                      +{fields.filter(f => {
+                        const cov = coverageMap[f.id];
+                        return !cov || !cov.has_any_data;
+                      }).length - 10} ещё
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* ── Field list ──────────────────────────────────────── */}
@@ -288,6 +435,12 @@ export default function FieldListPanel({
 
           {sortedFields.map(field => {
             const status = getFieldStatus(field);
+            const cov = coverageMap?.[field.id];
+            const covCfg = cov?.coverage_status ? COVERAGE_STATUS_CONFIG[cov.coverage_status] : null;
+            const freshCfg = cov?.freshness_status ? FRESHNESS_STATUS_CONFIG[cov.freshness_status] : null;
+            const priority = covCfg?.priority ? COVERAGE_PRIORITY_LABELS[covCfg.priority] : null;
+            const indices = cov?.indices || {};
+
             return (
               <div
                 key={field.id}
@@ -304,7 +457,7 @@ export default function FieldListPanel({
                       <span className="w-2.5 h-2.5 rounded-full flex-shrink-0"
                             style={{ backgroundColor: getCropColor(field.current_crop) }} />
                       <span className="text-sm font-medium text-gray-900 truncate">{field.name}</span>
-                      {/* Status badge */}
+                      {/* NDVI status badge */}
                       <span
                         className="text-[11px] font-medium px-1.5 py-0.5 rounded-full text-white flex-shrink-0"
                         style={{ backgroundColor: status.color }}
@@ -312,13 +465,71 @@ export default function FieldListPanel({
                         {status.label}
                       </span>
                     </div>
-                    <div className="flex items-center gap-3 mt-1 ml-[18px]">
+
+                    {/* Coverage badges + priority */}
+                    <div className="flex items-center gap-1.5 mt-1 ml-[18px] flex-wrap">
                       <span className="text-xs text-gray-500">{field.area_ha?.toFixed(1)} га</span>
                       <span className="text-xs text-gray-400">{field.current_crop || '—'}</span>
                       {(field.active_alerts || 0) > 0 && (
                         <span className="text-xs text-red-500">⚠ {field.active_alerts}</span>
                       )}
+
+                      {/* Coverage badge */}
+                      {covCfg && (
+                        <span
+                          className="text-[10px] font-medium px-1.5 py-0.5 rounded-full"
+                          style={{ backgroundColor: covCfg.bgColor, color: covCfg.textColor }}
+                        >
+                          {covCfg.shortLabel}
+                        </span>
+                      )}
+
+                      {/* Freshness badge */}
+                      {freshCfg && cov.freshness_status !== 'no_data' && cov.freshness_status !== 'future_date' && (
+                        <span
+                          className="text-[10px] font-medium px-1.5 py-0.5 rounded-full"
+                          style={{ backgroundColor: freshCfg.bgColor, color: freshCfg.textColor }}
+                        >
+                          {freshCfg.shortLabel}
+                        </span>
+                      )}
+
+                      {/* Priority hint */}
+                      {priority && covCfg?.priority !== 'normal' && (
+                        <span className="text-[10px] text-gray-500 italic">
+                          {priority.label}
+                        </span>
+                      )}
+
+                      {/* Latest captured date */}
+                      {cov?.latest_captured_date && (
+                        <span className="text-[10px] text-gray-400">
+                          {new Date(cov.latest_captured_date).toLocaleDateString('ru-RU')}
+                        </span>
+                      )}
                     </div>
+
+                    {/* Compact index chips */}
+                    {cov && indices && Object.keys(indices).length > 0 && (
+                      <div className="flex items-center gap-1 mt-1 ml-[18px] flex-wrap">
+                        {SATELLITE_INDEX_CODES.map(code => {
+                          const idx = indices[code];
+                          const hasData = idx && (idx.has_data || idx.record_count > 0);
+                          return (
+                            <span
+                              key={code}
+                              className={`text-[9px] font-mono font-semibold px-1 py-0.5 rounded ${
+                                hasData
+                                  ? 'bg-green-50 text-green-700 border border-green-200'
+                                  : 'bg-gray-50 text-gray-400 border border-gray-200'
+                              }`}
+                            >
+                              {code.toUpperCase()}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
 
                   {/* NDVI indicator */}
