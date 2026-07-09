@@ -238,6 +238,35 @@ export async function getSatelliteIndexHistory(fieldId, indexCode, options = {})
   return data;
 }
 
+/**
+ * Fetch latest values for all supported satellite indices for a field.
+ *
+ * Only fetches SAVI, EVI, NDMI, NDRE — never NDVI.
+ * Returns object keyed by index code, each value being { record, error }.
+ * A missing or errored index produces { record: null, error: true }.
+ */
+export async function getAllSupportedSatelliteIndicesForField(fieldId) {
+  const codes = ['savi', 'evi', 'ndmi', 'ndre'];
+  const results = {};
+
+  const responses = await Promise.allSettled(
+    codes.map((code) =>
+      getSatelliteIndexLatest(fieldId, code, { includeCloudy: false })
+    )
+  );
+
+  codes.forEach((code, i) => {
+    const res = responses[i];
+    if (res.status === 'fulfilled' && res.value?.record) {
+      results[code] = { record: res.value.record, error: null };
+    } else {
+      results[code] = { record: null, error: true };
+    }
+  });
+
+  return results;
+}
+
 // ─── Auth ────────────────────────────────────────────────────────────────────
 
 export async function loginWithPassword(email, password) {

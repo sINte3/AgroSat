@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
+import IndexLegend from '../Field/IndexLegend';
 
 // ─── Helper functions ─────────────────────────────────────────────────────────
 const getCropColor = (crop) => {
@@ -60,6 +61,7 @@ export default function FieldListPanel({
   const [cropFilter, setCropFilter] = useState(null);
   const [statusFilter, setStatusFilter] = useState(null); // 'has_data' | 'no_data' | null
   const [collapsed, setCollapsed] = useState(false);
+  const [showLegend, setShowLegend] = useState(false);
 
   // Sync enterpriseId prop → enterpriseFilter
   useEffect(() => {
@@ -336,6 +338,30 @@ export default function FieldListPanel({
               </div>
             );
           })}
+        </div>
+
+        {/* ── Legend toggle ─────────────────────────────────────── */}
+        <div className="border-t border-gray-100">
+          <button
+            onClick={() => setShowLegend(!showLegend)}
+            className="w-full flex items-center justify-between px-4 py-2.5 text-xs text-gray-500 hover:text-gray-700 hover:bg-gray-50 transition-colors"
+          >
+            <span className="font-medium">Что такое спутниковые индексы?</span>
+            <svg
+              className={`w-4 h-4 transition-transform ${showLegend ? 'rotate-180' : ''}`}
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+            >
+              <path d="M6 9l6 6 6-6" />
+            </svg>
+          </button>
+          {showLegend && (
+            <div className="px-4 pb-3">
+              <IndexLegend />
+            </div>
+          )}
         </div>
 
         {/* ── Stats bar ───────────────────────────────────────── */}
