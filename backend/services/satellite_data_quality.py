@@ -603,14 +603,18 @@ def build_quality_summary(
         stale_count_total += stale_count
         missing_count_total += missing_count
 
-    # Append suspicious NDVI fields to problem_fields
-    for pf in suspicious_ndvi_fields:
-        if pf["field_id"] in field_ids:
-            problem_fields.append(pf)
-    # Append suspicious satellite fields
-    for pf in suspicious_sat_fields:
-        if pf["field_id"] in field_ids:
-            problem_fields.append(pf)
+    # Tenant-scoped calls defensively exclude rows outside the scoped fields.
+    # Global calls preserve every row returned by the global SQL helpers.
+    if enterprise_id is not None:
+        problem_fields.extend(
+            pf for pf in suspicious_ndvi_fields if pf["field_id"] in field_ids
+        )
+        problem_fields.extend(
+            pf for pf in suspicious_sat_fields if pf["field_id"] in field_ids
+        )
+    else:
+        problem_fields.extend(suspicious_ndvi_fields)
+        problem_fields.extend(suspicious_sat_fields)
 
     # Deduplicate problem_fields by (field_id, index_code, status) keeping first
     seen = set()

@@ -6,11 +6,14 @@ interactions use unittest.mock.  Tests inspect bound SQL text and
 parameter dictionaries, verifying enterprise scoping at the SQL level.
 """
 
+import asyncio
 import unittest
 from unittest.mock import MagicMock, patch, call
 
 from sqlalchemy.orm import Session
 from sqlalchemy import text
+
+from api.satellite_data_quality import get_data_quality_summary
 
 from services.satellite_data_quality import (
     _fetch_field_index_map,
@@ -360,6 +363,46 @@ class BuildQualitySummaryGlobalBehaviorTests(unittest.TestCase):
                 f"{name} enterprise_id should be None for global call",
             )
 
+    def test_global_suspicious_row_outside_active_fields_is_preserved(self):
+        """Global results preserve suspicious rows outside the active-field map."""
+        suspicious_row = {
+            "field_id": 99,
+            "field_name": "Inactive",
+            "enterprise_name": "E1",
+            "index_code": "ndvi",
+            "status": "suspicious",
+            "latest_captured_date": "2025-01-01",
+            "age_days": None,
+            "reason": "mean_ndvi=-2.0000 outside expected range [-1, 1]",
+        }
+        with patch(
+            "services.satellite_data_quality._fetch_field_index_map",
+            return_value=[{"field_id": 1, "field_name": "F1",
+                           "enterprise_id": 1, "enterprise_name": "E1"}],
+        ), patch(
+            "services.satellite_data_quality._fetch_ndvi_latest_per_field",
+            return_value={},
+        ), patch(
+            "services.satellite_data_quality._fetch_satellite_latest_per_field_index",
+            return_value={},
+        ), patch(
+            "services.satellite_data_quality._fetch_suspicious_ndvi_count",
+            return_value=1,
+        ), patch(
+            "services.satellite_data_quality._fetch_suspicious_satellite_count",
+            return_value=0,
+        ), patch(
+            "services.satellite_data_quality._fetch_suspicious_ndvi_fields",
+            return_value=[suspicious_row],
+        ), patch(
+            "services.satellite_data_quality._fetch_suspicious_satellite_fields",
+            return_value=[],
+        ):
+            result = build_quality_summary(self.db, enterprise_id=None)
+
+        self.assertIn(99, [pf["field_id"] for pf in result["problem_fields"]])
+        self.assertEqual(result["summary"]["suspicious_value_count"], 1)
+
 
 # ======================================================================
 # 10: Defense-in-depth: foreign-enterprise suspicious rows filtered
@@ -430,16 +473,26 @@ class EndpointScopeResolutionTests(unittest.TestCase):
     provides a conflicting enterprise_id query param."""
 
     def test_endpoint_forces_enterprise_scope(self):
-        """Simulate the endpoint logic: enterprise_scope=7 overrides query enterprise_id=9."""
-        enterprise_scope = 7
-        enterprise_id_query = 9
-        effective = enterprise_id_query
-        if enterprise_scope is not None:
-            effective = enterprise_scope
-        self.assertEqual(effective, 7,
-                         "enterprise_scope must override query enterprise_id")
-        self.assertNotEqual(effective, 9,
-                            "tenant user must not use explicit query enterprise_id")
+        """The actual endpoint forces enterprise_scope=7 over query value 9."""
+        db = _make_mock_db()
+        expected = {"result": "tenant"}
+        with patch(
+            "api.satellite_data_quality.build_quality_summary",
+            return_value=expected,
+        ) as mock_build:
+            result = asyncio.run(get_data_quality_summary(
+                fresh_days=10,
+                limit=100,
+                enterprise_id=9,
+                index_code=None,
+                db=db,
+                current_user=MagicMock(),
+                enterprise_scope=7,
+            ))
+
+        self.assertEqual(result, expected)
+        self.assertEqual(mock_build.call_args.kwargs["enterprise_id"], 7)
+        db.execute.assert_not_called()
 
 
 class EndpointPreservesExplicitFilterForGlobalTests(unittest.TestCase):
@@ -447,15 +500,26 @@ class EndpointPreservesExplicitFilterForGlobalTests(unittest.TestCase):
     an explicit enterprise_id query filter."""
 
     def test_global_enterprise_filter_preserved(self):
-        """enterprise_scope=None keeps the explicit enterprise_id=5."""
-        enterprise_scope = None
-        enterprise_id_query = 5
-        effective = enterprise_id_query
-        if enterprise_scope is not None:
-            effective = enterprise_scope
-        # With scope=None, effective stays as the query value
-        self.assertEqual(effective, 5,
-                         "global role with scope=None must preserve query enterprise_id")
+        """The actual endpoint keeps explicit enterprise_id=5 for global scope."""
+        db = _make_mock_db()
+        expected = {"result": "global"}
+        with patch(
+            "api.satellite_data_quality.build_quality_summary",
+            return_value=expected,
+        ) as mock_build:
+            result = asyncio.run(get_data_quality_summary(
+                fresh_days=10,
+                limit=100,
+                enterprise_id=5,
+                index_code=None,
+                db=db,
+                current_user=MagicMock(),
+                enterprise_scope=None,
+            ))
+
+        self.assertEqual(result, expected)
+        self.assertEqual(mock_build.call_args.kwargs["enterprise_id"], 5)
+        db.execute.assert_not_called()
 
 
 # ======================================================================
