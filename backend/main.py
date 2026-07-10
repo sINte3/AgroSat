@@ -13,8 +13,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from config import settings
+from config import settings, validate_runtime_security
 from database import init_db
+
+# Fail-fast: reject insecure configuration before anything else.
+validate_runtime_security()
 
 # Настройка логирования
 logging.basicConfig(

@@ -9,7 +9,7 @@ from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
 from database import get_db
-from config import settings
+from config import settings, validate_runtime_security
 # Register all ORM classes used by relationships before auth ORM queries.
 # Without these imports, db.query(User) can fail when SQLAlchemy resolves
 # relationships such as NDVIRecord.field -> "Field".
@@ -37,15 +37,8 @@ def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
 
 
-def enforce_secure_key():
-    if not settings.secret_key or settings.secret_key == "change_me_in_production":
-        if settings.environment != "development":
-            logger.critical("Runtime Blocked: Default or empty SECRET_KEY in production!")
-            raise RuntimeError("SECRET_KEY must be safely configured in production!")
-
-
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
-    enforce_secure_key()
+    validate_runtime_security()
     to_encode = data.copy()
     now = datetime.utcnow()
     if expires_delta:
@@ -68,11 +61,29 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = De
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        payload = jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM])
-        user_id_str: str = payload.get("sub")
+        # Validate the secret before decoding — a config error must not be
+        # silently converted into a normal auth failure.
+        validate_runtime_security()
+
+        payload = jwt.decode(
+            token,
+            settings.secret_key,
+            algorithms=[ALGORITHM],
+        )
+
+        # Explicitly require sub, exp, iat.  python-jose's options.require
+        # is unreliable across versions, so we verify in code.
+        for claim in ("sub", "exp", "iat"):
+            if claim not in payload:
+                raise credentials_exception
+
         token_type: str = payload.get("type")
 
-        if user_id_str is None or token_type != "access":
+        if token_type != "access":
+            raise credentials_exception
+
+        user_id_str: str = payload.get("sub")
+        if user_id_str is None:
             raise credentials_exception
 
         try:
@@ -101,8 +112,8 @@ async def get_current_active_user(current_user: User = Depends(get_current_user)
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 def register_user(user_in: UserRegister, db: Session = Depends(get_db)):
-    """Регистрация нового пользователя (только в dev-окружении, роль VIEWER по умолчанию)."""
-    if settings.environment != "development":
+    """Регистрация нового пользователя (только dev + flag, роль VIEWER)."""
+    if settings.environment != "development" or not settings.public_registration_enabled:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Публичная регистрация отключена в данном окружении"
@@ -137,7 +148,6 @@ def login_for_access_token(
     db: Session = Depends(get_db)
 ):
     """Авторизация пользователя. Ожидает urlencoded параметры username (email) и password."""
-    enforce_secure_key()
     email_normalized = form_data.username.strip().lower()
 
     user = db.query(User).filter(User.email == email_normalized).first()

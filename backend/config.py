@@ -5,14 +5,25 @@ from functools import lru_cache
 
 BACKEND_DIR = Path(__file__).resolve().parent
 
+# Lowercase known weak / placeholder keys that must never be accepted.
+_FORBIDDEN_SECRETS = frozenset({
+    "changeme",
+    "change_me",
+    "replace_me",
+    "secret",
+    "default",
+    "test_secret",
+})
+
 
 class Settings(BaseSettings):
     # App
     app_name: str = "AgroSat"
     app_version: str = "0.1.0"
     environment: str = "development"
-    secret_key: str = "change_me_in_production"
+    secret_key: str = ""
     debug: bool = True
+    public_registration_enabled: bool = False
 
     # Database
     database_url: str = "postgresql://agrosat:agrosat_secret_2024@localhost:5432/agrosat"
@@ -53,3 +64,56 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
+
+
+# The .env.example placeholder value at the time of writing.
+_ENV_EXAMPLE_PLACEHOLDER = "замените_на_длинную_случайную_строку_минимум_32_символа"
+
+
+def _reject_known_insecure(key: str, stripped: str) -> bool:
+    """Return True when the key matches any known insecure value."""
+    # Exact match against the .env.example cyrillic placeholder.
+    if stripped == _ENV_EXAMPLE_PLACEHOLDER:
+        return True
+    # Project-specific known defaults.
+    if stripped == "change_me_in_production":
+        return True
+    if stripped == "agrosat_dev_secret_key_change_in_prod":
+        return True
+    # Generic forbidden placeholders (case-insensitive).
+    if stripped in _FORBIDDEN_SECRETS:
+        return True
+    return False
+
+
+def validate_runtime_security() -> None:
+    """Validate that the runtime secret key meets security requirements.
+
+    Must be called before any JWT encode or decode operation, and at
+    application startup.  Raises RuntimeError when the key is insecure.
+    """
+    key = settings.secret_key
+
+    # Reject empty or whitespace-only.
+    if not key or not key.strip():
+        raise RuntimeError(
+            "SECRET_KEY is empty. Set a random value of at least 32 characters."
+        )
+
+    stripped = key.strip().lower()
+
+    # Reject known insecure values *before* the length check so that e.g.
+    # "change_me_in_production" (24 characters) is caught by the right message.
+    if _reject_known_insecure(key, stripped):
+        raise RuntimeError(
+            "SECRET_KEY contains a known insecure placeholder. "
+            "Set a unique random value of at least 32 characters."
+        )
+
+    # Reject short keys.
+    if len(key) < 32:
+        raise RuntimeError(
+            "SECRET_KEY is too short. Must be at least 32 characters."
+        )
+
+    # Key is acceptable.

@@ -19,6 +19,43 @@ from passlib.context import CryptContext
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+# The previous hardcoded seed password — reject if supplied.
+_KNOWN_SEED_PASSWORD = "AgroSat2024!"
+
+
+def _validate_bootstrap_password(password: str) -> str:
+    """Validate and return the bootstrap admin password, or raise."""
+    if not password or not password.strip():
+        raise RuntimeError(
+            "AGROSAT_BOOTSTRAP_ADMIN_PASSWORD is empty or whitespace-only."
+        )
+
+    # Check for known insecure value *before* length so that the correct
+    # message is returned regardless of the password length.
+    if password == _KNOWN_SEED_PASSWORD:
+        raise RuntimeError(
+            "AGROSAT_BOOTSTRAP_ADMIN_PASSWORD matches a known insecure value. "
+            "Set a unique strong password."
+        )
+
+    if len(password) < 16:
+        raise RuntimeError(
+            "AGROSAT_BOOTSTRAP_ADMIN_PASSWORD must be at least 16 characters."
+        )
+
+    has_upper = any(c.isupper() for c in password)
+    has_lower = any(c.islower() for c in password)
+    has_digit = any(c.isdigit() for c in password)
+    has_special = any(not c.isalnum() for c in password)
+
+    if not (has_upper and has_lower and has_digit and has_special):
+        raise RuntimeError(
+            "AGROSAT_BOOTSTRAP_ADMIN_PASSWORD must contain at least one uppercase "
+            "letter, one lowercase letter, one digit, and one non-alphanumeric character."
+        )
+
+    return password
+
 
 def seed_enterprises(db):
     """Заполнить справочник предприятий."""
@@ -172,22 +209,24 @@ def seed_demo_fields(db):
 
 
 def seed_admin_user(db):
-    """Создать администратора системы."""
+    """Создать администратора системы, используя AGROSAT_BOOTSTRAP_ADMIN_PASSWORD."""
     if db.query(User).count() > 0:
         print("⏭️  Пользователи уже есть")
         return
+
+    password = os.environ.get("AGROSAT_BOOTSTRAP_ADMIN_PASSWORD", "")
+    _validate_bootstrap_password(password)
 
     admin = User(
         email="admin@agrosat.uz",
         full_name="Администратор AgroSat",
         role=UserRole.ADMIN,
-        hashed_password=pwd_context.hash("AgroSat2024!"),
+        hashed_password=pwd_context.hash(password),
         is_active=True,
     )
     db.add(admin)
     db.commit()
-    print(f"✅ Создан пользователь admin@agrosat.uz (пароль: AgroSat2024!)")
-    print("   ⚠️  СМЕНИТЕ ПАРОЛЬ ПОСЛЕ ПЕРВОГО ВХОДА!")
+    print("✅ Администратор создан. Удалите AGROSAT_BOOTSTRAP_ADMIN_PASSWORD из среды после использования.")
 
 
 if __name__ == "__main__":
