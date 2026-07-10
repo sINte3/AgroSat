@@ -59,22 +59,34 @@ def has_column(db: Session, table: str, column: str) -> bool:
 
 # ─── Core quality data queries ────────────────────────────────────────────────
 
-def _fetch_field_index_map(db: Session) -> list[dict[str, Any]]:
+def _fetch_field_index_map(
+    db: Session,
+    enterprise_id: int | None = None,
+) -> list[dict[str, Any]]:
     """
-    Fetch all active fields with enterprise info.
+    Fetch active fields with enterprise info.
+    When enterprise_id is supplied, filters inside SQL via parameterized clause.
     Returns list of {field_id, field_name, enterprise_id, enterprise_name}.
     """
+    params: dict[str, Any] = {}
+    tenant_clause = ""
+    if enterprise_id is not None:
+        tenant_clause = " AND f.enterprise_id = :enterprise_id"
+        params["enterprise_id"] = enterprise_id
+
     rows = db.execute(
-        text("""
+        text(f"""
             SELECT f.id AS field_id,
                    f.name AS field_name,
                    f.enterprise_id,
                    e.name AS enterprise_name
             FROM fields f
             LEFT JOIN enterprises e ON e.id = f.enterprise_id
-            WHERE f.is_active = true OR f.is_active IS NULL
+            WHERE (f.is_active = true OR f.is_active IS NULL)
+                  {tenant_clause}
             ORDER BY f.id
-        """)
+        """),
+        params,
     ).fetchall()
     return [
         {
@@ -87,22 +99,37 @@ def _fetch_field_index_map(db: Session) -> list[dict[str, Any]]:
     ]
 
 
-def _fetch_ndvi_latest_per_field(db: Session) -> dict[int, dict[str, Any]]:
+def _fetch_ndvi_latest_per_field(
+    db: Session,
+    enterprise_id: int | None = None,
+) -> dict[int, dict[str, Any]]:
     """
     For each field that has at least one ndvi_records row, return the
     latest captured_date and mean_ndvi. Returns dict[field_id, {...}].
+    When enterprise_id is supplied, joins to fields for SQL-level scoping.
     """
+    params: dict[str, Any] = {}
+    tenant_join = ""
+    tenant_where = ""
+    if enterprise_id is not None:
+        tenant_join = " JOIN fields f ON f.id = nr.field_id"
+        tenant_where = " AND f.enterprise_id = :enterprise_id"
+        params["enterprise_id"] = enterprise_id
+
     rows = db.execute(
-        text("""
-            SELECT DISTINCT ON (field_id)
-                   field_id,
-                   captured_date,
-                   mean_ndvi,
-                   cloud_cover_pct,
-                   valid_pixels_pct
-            FROM ndvi_records
-            ORDER BY field_id, captured_date DESC, id DESC
-        """)
+        text(f"""
+            SELECT DISTINCT ON (nr.field_id)
+                   nr.field_id,
+                   nr.captured_date,
+                   nr.mean_ndvi,
+                   nr.cloud_cover_pct,
+                   nr.valid_pixels_pct
+            FROM ndvi_records nr
+            {tenant_join}
+            WHERE 1=1{tenant_where}
+            ORDER BY nr.field_id, nr.captured_date DESC, nr.id DESC
+        """),
+        params,
     ).fetchall()
     return {
         r.field_id: {
@@ -118,6 +145,7 @@ def _fetch_ndvi_latest_per_field(db: Session) -> dict[int, dict[str, Any]]:
 def _fetch_satellite_latest_per_field_index(
     db: Session,
     index_codes: frozenset,
+    enterprise_id: int | None = None,
 ) -> dict[tuple[int, str], dict[str, Any]]:
     """
     For each (field_id, index_code) pair with data, return the latest
@@ -128,20 +156,28 @@ def _fetch_satellite_latest_per_field_index(
         return {}
 
     placeholders = ", ".join(f":c{i}" for i in range(len(index_codes)))
-    params = {f"c{i}": code for i, code in enumerate(sorted(index_codes))}
+    params: dict[str, Any] = {f"c{i}": code for i, code in enumerate(sorted(index_codes))}
+
+    tenant_join = ""
+    tenant_where = ""
+    if enterprise_id is not None:
+        tenant_join = " JOIN fields f ON f.id = sir.field_id"
+        tenant_where = " AND f.enterprise_id = :enterprise_id"
+        params["enterprise_id"] = enterprise_id
 
     rows = db.execute(
         text(f"""
-            SELECT DISTINCT ON (field_id, index_code)
-                   field_id,
-                   index_code,
-                   captured_date,
-                   mean_value,
-                   cloud_cover_pct,
-                   valid_pixels_pct
-            FROM satellite_index_records
-            WHERE index_code IN ({placeholders})
-            ORDER BY field_id, index_code, captured_date DESC, id DESC
+            SELECT DISTINCT ON (sir.field_id, sir.index_code)
+                   sir.field_id,
+                   sir.index_code,
+                   sir.captured_date,
+                   sir.mean_value,
+                   sir.cloud_cover_pct,
+                   sir.valid_pixels_pct
+            FROM satellite_index_records sir
+            {tenant_join}
+            WHERE sir.index_code IN ({placeholders}){tenant_where}
+            ORDER BY sir.field_id, sir.index_code, sir.captured_date DESC, sir.id DESC
         """),
         params,
     ).fetchall()
@@ -156,28 +192,62 @@ def _fetch_satellite_latest_per_field_index(
     }
 
 
-def _fetch_suspicious_ndvi_count(db: Session) -> int:
-    """Count NDVI records where mean_ndvi is outside [-1, 1]."""
+def _fetch_suspicious_ndvi_count(
+    db: Session,
+    enterprise_id: int | None = None,
+) -> int:
+    """Count NDVI records where mean_ndvi is outside [-1, 1].
+    When enterprise_id is supplied, joins to fields for SQL-level scoping."""
+    params: dict[str, Any] = {
+        "vmin": EXPECTED_VALUE_MIN,
+        "vmax": EXPECTED_VALUE_MAX,
+    }
+    tenant_join = ""
+    tenant_where = ""
+    if enterprise_id is not None:
+        tenant_join = " JOIN fields f ON f.id = nr.field_id"
+        tenant_where = " AND f.enterprise_id = :enterprise_id"
+        params["enterprise_id"] = enterprise_id
+
     row = db.execute(
-        text("""
-            SELECT COUNT(*) FROM ndvi_records
-            WHERE mean_ndvi IS NOT NULL
-              AND (mean_ndvi < :vmin OR mean_ndvi > :vmax)
+        text(f"""
+            SELECT COUNT(*) FROM ndvi_records nr
+            {tenant_join}
+            WHERE nr.mean_ndvi IS NOT NULL
+              AND (nr.mean_ndvi < :vmin OR nr.mean_ndvi > :vmax)
+                  {tenant_where}
         """),
-        {"vmin": EXPECTED_VALUE_MIN, "vmax": EXPECTED_VALUE_MAX},
+        params,
     ).fetchone()
     return row[0] if row else 0
 
 
-def _fetch_suspicious_satellite_count(db: Session) -> int:
-    """Count satellite index records where mean_value is outside [-1, 1]."""
+def _fetch_suspicious_satellite_count(
+    db: Session,
+    enterprise_id: int | None = None,
+) -> int:
+    """Count satellite index records where mean_value is outside [-1, 1].
+    When enterprise_id is supplied, joins to fields for SQL-level scoping."""
+    params: dict[str, Any] = {
+        "vmin": EXPECTED_VALUE_MIN,
+        "vmax": EXPECTED_VALUE_MAX,
+    }
+    tenant_join = ""
+    tenant_where = ""
+    if enterprise_id is not None:
+        tenant_join = " JOIN fields f ON f.id = sir.field_id"
+        tenant_where = " AND f.enterprise_id = :enterprise_id"
+        params["enterprise_id"] = enterprise_id
+
     row = db.execute(
-        text("""
-            SELECT COUNT(*) FROM satellite_index_records
-            WHERE mean_value IS NOT NULL
-              AND (mean_value < :vmin OR mean_value > :vmax)
+        text(f"""
+            SELECT COUNT(*) FROM satellite_index_records sir
+            {tenant_join}
+            WHERE sir.mean_value IS NOT NULL
+              AND (sir.mean_value < :vmin OR sir.mean_value > :vmax)
+                  {tenant_where}
         """),
-        {"vmin": EXPECTED_VALUE_MIN, "vmax": EXPECTED_VALUE_MAX},
+        params,
     ).fetchone()
     return row[0] if row else 0
 
@@ -186,6 +256,7 @@ def _fetch_suspicious_satellite_fields(
     db: Session,
     index_codes: frozenset,
     limit: int = PROBLEM_FIELDS_LIMIT,
+    enterprise_id: int | None = None,
 ) -> list[dict[str, Any]]:
     """
     Fetch satellite index records with suspicious values (outside [-1, 1]),
@@ -194,10 +265,15 @@ def _fetch_suspicious_satellite_fields(
     if not index_codes:
         return []
     placeholders = ", ".join(f":c{i}" for i in range(len(index_codes)))
-    params = {f"c{i}": code for i, code in enumerate(sorted(index_codes))}
+    params: dict[str, Any] = {f"c{i}": code for i, code in enumerate(sorted(index_codes))}
     params["vmin"] = EXPECTED_VALUE_MIN
     params["vmax"] = EXPECTED_VALUE_MAX
     params["limit"] = limit
+
+    tenant_where = ""
+    if enterprise_id is not None:
+        tenant_where = " AND f.enterprise_id = :enterprise_id"
+        params["enterprise_id"] = enterprise_id
 
     rows = db.execute(
         text(f"""
@@ -213,6 +289,7 @@ def _fetch_suspicious_satellite_fields(
             WHERE sir.index_code IN ({placeholders})
               AND sir.mean_value IS NOT NULL
               AND (sir.mean_value < :vmin OR sir.mean_value > :vmax)
+                  {tenant_where}
             ORDER BY sir.captured_date DESC
             LIMIT :limit
         """),
@@ -237,13 +314,25 @@ def _fetch_suspicious_satellite_fields(
 def _fetch_suspicious_ndvi_fields(
     db: Session,
     limit: int = PROBLEM_FIELDS_LIMIT,
+    enterprise_id: int | None = None,
 ) -> list[dict[str, Any]]:
     """
     Fetch NDVI records with suspicious values (outside [-1, 1]),
     joined with field/enterprise names.
+    When enterprise_id is supplied, adds SQL-level enterprise filter.
     """
+    params: dict[str, Any] = {
+        "vmin": EXPECTED_VALUE_MIN,
+        "vmax": EXPECTED_VALUE_MAX,
+        "limit": limit,
+    }
+    tenant_where = ""
+    if enterprise_id is not None:
+        tenant_where = " AND f.enterprise_id = :enterprise_id"
+        params["enterprise_id"] = enterprise_id
+
     rows = db.execute(
-        text("""
+        text(f"""
             SELECT nr.field_id,
                    f.name AS field_name,
                    e.name AS enterprise_name,
@@ -254,10 +343,11 @@ def _fetch_suspicious_ndvi_fields(
             LEFT JOIN enterprises e ON e.id = f.enterprise_id
             WHERE nr.mean_ndvi IS NOT NULL
               AND (nr.mean_ndvi < :vmin OR nr.mean_ndvi > :vmax)
+                  {tenant_where}
             ORDER BY nr.captured_date DESC
             LIMIT :limit
         """),
-        {"vmin": EXPECTED_VALUE_MIN, "vmax": EXPECTED_VALUE_MAX, "limit": limit},
+        params,
     ).fetchall()
 
     return [
@@ -350,12 +440,9 @@ def build_quality_summary(
     explicit SQL aggregates — no lazy loading, no per-field loops over the DB.
     """
     # ── Fields ────────────────────────────────────────────────────────────
-    all_fields = _fetch_field_index_map(db)
+    all_fields = _fetch_field_index_map(db, enterprise_id=enterprise_id)
 
-    # Filter by enterprise if requested
-    if enterprise_id is not None:
-        all_fields = [f for f in all_fields if f["enterprise_id"] == enterprise_id]
-
+    # No Python-only enterprise filter — SQL handles scoping.
     total_fields = len(all_fields)
     field_ids = {f["field_id"] for f in all_fields}
     field_map = {f["field_id"]: f for f in all_fields}
@@ -366,9 +453,9 @@ def build_quality_summary(
     limitations = []
 
     # ── NDVI (ndvi_records) ───────────────────────────────────────────────
-    ndvi_latest = _fetch_ndvi_latest_per_field(db)
-    suspicious_ndvi_count = _fetch_suspicious_ndvi_count(db)
-    suspicious_ndvi_fields = _fetch_suspicious_ndvi_fields(db, limit)
+    ndvi_latest = _fetch_ndvi_latest_per_field(db, enterprise_id=enterprise_id)
+    suspicious_ndvi_count = _fetch_suspicious_ndvi_count(db, enterprise_id=enterprise_id)
+    suspicious_ndvi_fields = _fetch_suspicious_ndvi_fields(db, limit, enterprise_id=enterprise_id)
 
     # ── Satellite indices (satellite_index_records) ───────────────────────
     index_codes = SATELLITE_INDEX_CODES
@@ -381,9 +468,9 @@ def build_quality_summary(
         else:
             index_codes = frozenset()
 
-    sat_latest = _fetch_satellite_latest_per_field_index(db, index_codes)
-    suspicious_sat_count = _fetch_suspicious_satellite_count(db)
-    suspicious_sat_fields = _fetch_suspicious_satellite_fields(db, index_codes, limit)
+    sat_latest = _fetch_satellite_latest_per_field_index(db, index_codes, enterprise_id=enterprise_id)
+    suspicious_sat_count = _fetch_suspicious_satellite_count(db, enterprise_id=enterprise_id)
+    suspicious_sat_fields = _fetch_suspicious_satellite_fields(db, index_codes, limit, enterprise_id=enterprise_id)
 
     total_suspicious = suspicious_ndvi_count + suspicious_sat_count
 
@@ -517,9 +604,13 @@ def build_quality_summary(
         missing_count_total += missing_count
 
     # Append suspicious NDVI fields to problem_fields
-    problem_fields.extend(suspicious_ndvi_fields)
+    for pf in suspicious_ndvi_fields:
+        if pf["field_id"] in field_ids:
+            problem_fields.append(pf)
     # Append suspicious satellite fields
-    problem_fields.extend(suspicious_sat_fields)
+    for pf in suspicious_sat_fields:
+        if pf["field_id"] in field_ids:
+            problem_fields.append(pf)
 
     # Deduplicate problem_fields by (field_id, index_code, status) keeping first
     seen = set()
