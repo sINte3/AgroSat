@@ -24,10 +24,16 @@ def fetch_all_fields_ndvi():
     from database import SessionLocal
     from models.field import Field, CropSeason
     from models.monitoring import NDVIRecord
-    from services.satellite import satellite_service, validate_ndvi_quality
+    from services.satellite import get_satellite_service, validate_ndvi_quality
+    from services.satellite_safety import SatelliteConfigurationError, require_payload_provenance
     from services.alert_engine import analyze_field_ndvi, save_alerts
     from sqlalchemy.orm import selectinload
 
+    try:
+        satellite_service = get_satellite_service()
+    except SatelliteConfigurationError:
+        logger.error("Sentinel Hub configuration is unavailable; NDVI collection skipped")
+        return
     db = SessionLocal()
     try:
         fields = (
@@ -68,6 +74,7 @@ def fetch_all_fields_ndvi():
                     continue
 
                 # Проверяем, нет ли уже записи за эту дату
+                require_payload_provenance(ndvi_data)
                 captured_date = date.fromisoformat(ndvi_data["captured_date"])
                 existing = db.query(NDVIRecord).filter(
                     NDVIRecord.field_id == field.id,

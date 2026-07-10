@@ -25,7 +25,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from database import SessionLocal, init_db
 from models.field import Field
 from models.monitoring import NDVIRecord
-from services.satellite import fetch_ndvi_for_field_date, validate_ndvi_quality
+from services.satellite import fetch_ndvi_for_field_date, get_satellite_service, validate_ndvi_quality
+from services.satellite_safety import require_payload_provenance
 from sqlalchemy import text
 
 logging.basicConfig(
@@ -58,7 +59,7 @@ def generate_sentinel2_dates(start_date, end_date):
     return dates
 
 
-def backfill_field(db, field, target_dates, existing_dates):
+def backfill_field(db, field, target_dates, existing_dates, *, service):
     """Fetch historical NDVI for one field across target dates."""
     field_name = field.name or f"field_{field.id}"
 
@@ -77,7 +78,7 @@ def backfill_field(db, field, target_dates, existing_dates):
 
     for target_date in new_dates:
         try:
-            ndvi_data = fetch_ndvi_for_field_date(db, field, target_date)
+            ndvi_data = fetch_ndvi_for_field_date(db, field, target_date, service=service)
 
             if ndvi_data is None:
                 continue
@@ -117,7 +118,7 @@ def backfill_field(db, field, target_dates, existing_dates):
                 p90_ndvi=ndvi_data.get("p90_ndvi"),
                 cloud_cover_pct=ndvi_data.get("cloud_cover_pct"),
                 valid_pixels_pct=ndvi_data.get("valid_pixels_pct"),
-                satellite=ndvi_data.get("satellite", "Sentinel-2"),
+                satellite=require_payload_provenance(ndvi_data),
                 ndvi_change=ndvi_change,
                 ndvi_change_pct=ndvi_change_pct,
             )
@@ -155,6 +156,7 @@ def main():
     logger.info(f"Date range: {start_date} to {end_date}")
     logger.info(f"Target dates: {len(target_dates)} (every ~5 days)")
 
+    service = None if args.dry_run else get_satellite_service()
     init_db()
     db = SessionLocal()
 
@@ -199,7 +201,7 @@ def main():
 
             existing = get_existing_dates(db, field.id)
 
-            count = backfill_field(db, field, target_dates, existing)
+            count = backfill_field(db, field, target_dates, existing, service=service)
             total_success += count
 
             logger.info(f"  → Saved {count} new records")

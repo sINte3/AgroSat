@@ -44,7 +44,7 @@ try:
 except Exception:
     pass
 
-sys.path.insert(0, "backend")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import settings
 from database import SessionLocal
@@ -76,7 +76,11 @@ from services.satellite_collection import (
     get_mock_multi_index_satellite_service,
     filter_by_quality,
 )
-
+from services.satellite_safety import (
+    SatelliteConfigurationError,
+    require_real_provenance,
+    validate_credentials,
+)
 # -- Constants --
 
 LEGACY_NDVI_CODE = "ndvi"
@@ -634,7 +638,9 @@ def _get_satellite_service(
     Returns:
         A service instance with collect_indices() interface.
     """
-    if mock_sentinel or no_sentinel:
+    if no_sentinel:
+        raise SatelliteConfigurationError("--no-sentinel cannot run collection")
+    if mock_sentinel:
         logger.info("Using mock satellite service (no network calls)")
         return get_mock_multi_index_satellite_service()
 
@@ -647,6 +653,7 @@ def _insert_satellite_index_record(
     captured_date: date,
     index_code: str,
     mean_value: float | None,
+    satellite: str,
     min_value: float | None = None,
     max_value: float | None = None,
     std_value: float | None = None,
@@ -654,7 +661,6 @@ def _insert_satellite_index_record(
     p90_value: float | None = None,
     valid_pixels_pct: float | None = None,
     cloud_cover_pct: float | None = None,
-    satellite: str = "Sentinel-2",
 ) -> bool:
     """
     Insert a single satellite_index_record. Returns True on success, False on skip/error.
@@ -662,6 +668,7 @@ def _insert_satellite_index_record(
     Uses idempotent insert: checks (field_id, captured_date, index_code) uniqueness
     before inserting. Does NOT overwrite existing records.
     """
+    require_real_provenance(satellite)
     if check_exists_by_key(field_id, captured_date, index_code):
         logger.info("  SKIP (exists): field=%d date=%s code=%s", field_id, captured_date, index_code)
         return False
@@ -711,7 +718,7 @@ def run_real(args: argparse.Namespace) -> None:
       --apply:          Enable Sentinel Hub calls (or mock), parse results, no DB writes.
       --write:          Enable both Sentinel Hub calls AND idempotent DB writes.
       --mock-sentinel:  Use mock satellite service instead of real Sentinel Hub.
-      --no-sentinel:    Force mock (same as --mock-sentinel for safety).
+      --no-sentinel:    Reject collection; no external call means no synthetic substitute.
     """
     # Multi-field write-mode guard
     if args.field_id is None and args.enterprise_id is None and (args.max_fields is None or args.max_fields <= 0):
@@ -728,12 +735,10 @@ def run_real(args: argparse.Namespace) -> None:
     is_apply_mode = bool(args.apply)
     is_write_mode = bool(args.write) or bool(args.force)
     do_db_writes = is_write_mode
-    use_mock = bool(args.mock_sentinel) or bool(args.no_sentinel)
+    use_mock = bool(args.mock_sentinel)
 
     # Determine execution mode for display
-    if use_mock and do_db_writes:
-        mode_label = "MOCK + WRITE"
-    elif use_mock and not do_db_writes:
+    if use_mock and not do_db_writes:
         mode_label = "MOCK APPLY (no DB writes)"
     elif do_db_writes:
         mode_label = "REAL + WRITE"
@@ -771,6 +776,10 @@ def run_real(args: argparse.Namespace) -> None:
         print(f"ERROR: --date-from ({date_from}) is after --date-to ({date_to})", file=sys.stderr)
         sys.exit(2)
 
+    # Defense in depth if the pure validator was bypassed.
+    if do_db_writes and use_mock:
+        raise SatelliteConfigurationError("Synthetic satellite service cannot write")
+
     # Acquire lock for real mode
     force_lock = args.force_lock or args.break_stale_lock
     lock_path = acquire_lock(
@@ -781,6 +790,8 @@ def run_real(args: argparse.Namespace) -> None:
 
     # Get satellite service
     service = _get_satellite_service(use_mock, args.no_sentinel)
+    if do_db_writes:
+        require_real_provenance(getattr(service, "source", None))
 
     # Fetch fields
     max_fields = args.max_fields
@@ -1048,6 +1059,7 @@ def run_real(args: argparse.Namespace) -> None:
                 "interval_from": rec.get("interval_from"),
                 "interval_to": rec.get("interval_to"),
                 "interval_ambiguous": rec.get("interval_ambiguous"),
+                "satellite": getattr(service, "source", None),
             })
 
             mean_val = rec.get("mean_value")
@@ -1099,6 +1111,7 @@ def run_real(args: argparse.Namespace) -> None:
                     p90_value=p90_val,
                     valid_pixels_pct=vpp,
                     cloud_cover_pct=ccp,
+                    satellite=getattr(service, "source", None),
                 )
                 if inserted:
                     field_db_inserted += 1
@@ -1247,8 +1260,30 @@ def json_output(path: str, data: dict) -> None:
 # -- Main entry point --
 
 
+def validate_collection_mode(args: argparse.Namespace) -> None:
+    """Reject unsafe modes before locks, DB access, services, or network calls."""
+    write_enabled = bool(args.write) or bool(args.force)
+    collection_enabled = bool(args.apply) or write_enabled
+    if write_enabled and bool(args.mock_sentinel):
+        raise SystemExit(2)
+    if collection_enabled and bool(args.no_sentinel):
+        raise SystemExit(2)
+    if bool(args.mock_sentinel) and not bool(args.apply):
+        raise SystemExit(2)
+    if collection_enabled and not bool(args.mock_sentinel):
+        try:
+            validate_credentials(
+                settings.sentinel_hub_client_id,
+                settings.sentinel_hub_client_secret,
+            )
+        except SatelliteConfigurationError:
+            raise SystemExit(2)
+
+
 def main() -> None:
     args = parse_args()
+
+    validate_collection_mode(args)
 
     # TASK_142_NDVI_APPLY_WRITE_GUARD
     # NDVI remains legacy-only here. Dry-run inspection is allowed.

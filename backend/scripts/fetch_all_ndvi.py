@@ -24,9 +24,11 @@ DELAY_BETWEEN_REQUESTS = 3
 
 
 def fetch_ndvi_for_all():
-    from services.satellite import satellite_service, validate_ndvi_quality
+    from services.satellite import get_satellite_service, validate_ndvi_quality
+    from services.satellite_safety import require_payload_provenance
     from services.alert_engine import analyze_field_ndvi, save_alerts
 
+    satellite_service = get_satellite_service()
     init_db()
     db = SessionLocal()
 
@@ -84,6 +86,7 @@ def fetch_ndvi_for_all():
                     continue
 
                 # Считаем изменение
+                require_payload_provenance(ndvi_data)
                 prev = db.query(NDVIRecord).filter(
                     NDVIRecord.field_id == field.id
                 ).order_by(NDVIRecord.captured_date.desc()).first()

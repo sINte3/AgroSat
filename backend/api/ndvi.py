@@ -114,8 +114,19 @@ async def refresh_ndvi(
     _auth_field=Depends(get_authorized_field_row_for_write),
 ):
     """Force refresh NDVI for a field now. Admin/manager/agronomist only."""
+    from services.satellite import get_satellite_service, validate_ndvi_quality
+    from services.satellite_safety import (
+        SatelliteConfigurationError,
+        SatelliteProvenanceError,
+        require_payload_provenance,
+    )
+
     try:
-        from services.satellite import satellite_service, validate_ndvi_quality
+        satellite_service = get_satellite_service()
+    except SatelliteConfigurationError:
+        raise HTTPException(status_code=503, detail="Satellite service unavailable")
+
+    try:
 
         geom_row = db.execute(
             text("SELECT ST_AsText(geometry) AS geometry_wkt FROM fields WHERE id = :fid"),
@@ -136,6 +147,11 @@ async def refresh_ndvi(
                 "status": "no_data",
                 "message": "Satellite data unavailable or cloud cover too high",
             }
+
+        try:
+            require_payload_provenance(ndvi_data)
+        except SatelliteProvenanceError:
+            raise HTTPException(status_code=502, detail="Satellite data unavailable")
 
         is_valid, reason = validate_ndvi_quality(
             mean_ndvi=ndvi_data["mean_ndvi"],
@@ -235,7 +251,7 @@ async def refresh_ndvi(
                 "p90_ndvi": ndvi_data.get("p90_ndvi"),
                 "cloud_cover_pct": ndvi_data.get("cloud_cover_pct"),
                 "valid_pixels_pct": ndvi_data.get("valid_pixels_pct"),
-                "satellite": ndvi_data.get("satellite", "Sentinel-2"),
+                "satellite": require_payload_provenance(ndvi_data),
                 "ndvi_change": ndvi_change,
                 "ndvi_change_pct": ndvi_change_pct,
             },

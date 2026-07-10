@@ -17,6 +17,7 @@ Usage:
 
 import argparse
 import math
+import os
 import sys
 import time
 from datetime import date, timedelta
@@ -33,9 +34,10 @@ from shapely import wkt
 from shapely.geometry import mapping
 from sqlalchemy import text as sa_text
 
-sys.path.insert(0, "backend")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import settings
+from services.satellite_safety import validate_batch_provenance, validate_credentials
 from database import SessionLocal, engine
 from services.satellite_indices import (
     SUPPORTED_INDEX_CODES,
@@ -189,7 +191,7 @@ def _prepare_records(parsed: dict[str, dict]) -> list[dict]:
             "p90_value": d.get("p90_value"),
             "valid_pixels_pct": d.get("valid_pixels_pct"),
             "cloud_cover_pct": d.get("cloud_cover_pct"),
-            "satellite": d.get("satellite", "Sentinel-2"),
+            "satellite": d.get("satellite"),
         })
     return records
 
@@ -380,6 +382,7 @@ def _do_field_write(field_id: int, records: list[dict]) -> dict[str, int]:
 
     Idempotent: skips UPDATE when existing row already matches.
     """
+    records = validate_batch_provenance(records)
     db = SessionLocal()
     counts = {"inserted": 0, "updated": 0, "skipped": 0}
     try:
@@ -719,6 +722,10 @@ def main() -> None:
         print("ERROR: --field-ids is required (use --self-test for offline validation)", file=sys.stderr)
         sys.exit(1)
 
+    client_id, client_secret = validate_credentials(
+        settings.sentinel_hub_client_id, settings.sentinel_hub_client_secret
+    )
+
     # Preflight: table exists
     _check_table_exists()
 
@@ -752,13 +759,6 @@ def main() -> None:
     date_from = date_to - timedelta(days=args.days)
 
     # Credentials
-    client_id = settings.sentinel_hub_client_id
-    client_secret = settings.sentinel_hub_client_secret
-    if not client_id or not client_secret:
-        print("ERROR: Sentinel Hub credentials not configured in .env", file=sys.stderr)
-        print("  Set SENTINEL_HUB_CLIENT_ID and SENTINEL_HUB_CLIENT_SECRET", file=sys.stderr)
-        sys.exit(1)
-
     # Obtain token once
     try:
         token = _get_access_token(client_id, client_secret)

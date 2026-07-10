@@ -21,7 +21,8 @@ from models.field import Field, CropSeason
 from models.enterprise import Enterprise
 from models.crop import CropType
 from models.monitoring import NDVIRecord, Alert, ScoutingNote, User
-from services.satellite import fetch_ndvi_for_field_date
+from services.satellite import fetch_ndvi_for_field_date, get_satellite_service
+from services.satellite_safety import require_payload_provenance
 from sqlalchemy import text
 
 logging.basicConfig(
@@ -84,6 +85,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Print plan without writing any data")
     args = parser.parse_args()
 
+    service = None if args.dry_run else get_satellite_service()
     init_db()
     db = SessionLocal()
 
@@ -195,7 +197,7 @@ def main():
             for target_date in target_dates:
                 field_attempted += 1
                 try:
-                    ndvi_data = fetch_ndvi_for_field_date(db, field, target_date)
+                    ndvi_data = fetch_ndvi_for_field_date(db, field, target_date, service=service)
                     if ndvi_data is None:
                         field_skipped_no_data += 1
                         logger.debug(f"  [{field.name}] {target_date}: no data (cloud/mock)")
@@ -237,7 +239,7 @@ def main():
                         p90_ndvi=ndvi_data.get("p90_ndvi"),
                         cloud_cover_pct=ndvi_data.get("cloud_cover_pct"),
                         valid_pixels_pct=ndvi_data.get("valid_pixels_pct"),
-                        satellite=ndvi_data.get("satellite", "Sentinel-2"),
+                        satellite=require_payload_provenance(ndvi_data),
                         ndvi_change=ndvi_change,
                         ndvi_change_pct=ndvi_change_pct,
                     )

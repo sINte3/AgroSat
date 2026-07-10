@@ -17,6 +17,14 @@ from shapely.geometry import shape, mapping
 from shapely import wkt
 
 from config import settings
+from services.satellite_safety import (
+    MOCK_SATELLITE_SOURCE,
+    REAL_SATELLITE_SOURCE,
+    SatelliteConfigurationError,
+    require_payload_provenance,
+    require_real_provenance,
+    validate_credentials,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -139,9 +147,14 @@ class SentinelHubService:
     STATISTICAL_API_URL = "https://services.sentinel-hub.com/api/v1/statistics"
     TOKEN_URL = "https://services.sentinel-hub.com/auth/realms/main/protocol/openid-connect/token"
 
-    def __init__(self):
-        self.client_id = settings.sentinel_hub_client_id
-        self.client_secret = settings.sentinel_hub_client_secret
+    source = REAL_SATELLITE_SOURCE
+    is_mock = False
+
+    def __init__(self, client_id=None, client_secret=None):
+        self.client_id, self.client_secret = validate_credentials(
+            settings.sentinel_hub_client_id if client_id is None else client_id,
+            settings.sentinel_hub_client_secret if client_secret is None else client_secret,
+        )
         self._access_token: Optional[str] = None
         self._token_expires_at: float = 0
 
@@ -303,7 +316,7 @@ class SentinelHubService:
                 "p10_ndvi": round(safe_float(percentiles.get("10.0", 0)), 4),
                 "p90_ndvi": round(safe_float(percentiles.get("90.0", 0)), 4),
                 "valid_pixels_pct": round(valid_pct, 1),
-                "satellite": "Sentinel-2",
+                "satellite": REAL_SATELLITE_SOURCE,
             }
 
         except (KeyError, IndexError, TypeError) as e:
@@ -334,6 +347,8 @@ class MockSatelliteService:
     Генерирует реалистичные NDVI данные на основе культуры и месяца.
     Замените на SentinelHubService когда получите ключи.
     """
+    source = MOCK_SATELLITE_SOURCE
+    is_mock = True
 
     def get_ndvi_stats(self, geometry_wkt: str, date_from: date, date_to: date) -> dict:
         import random
@@ -359,7 +374,7 @@ class MockSatelliteService:
             "p10_ndvi": round(mean - 0.10, 4),
             "p90_ndvi": round(mean + 0.10, 4),
             "valid_pixels_pct": round(random.uniform(75, 98), 1),
-            "satellite": "Mock/Dev",
+            "satellite": MOCK_SATELLITE_SOURCE,
         }
 
     def get_latest_ndvi(self, geometry_wkt: str) -> dict:
@@ -410,7 +425,7 @@ class MockSatelliteService:
             "std_ndvi": round(random.uniform(0.02, 0.08), 4),
             "cloud_cover_pct": round(random.uniform(0, 20), 1),
             "valid_pixels_pct": round(random.uniform(75, 98), 1),
-            "satellite": "Mock/Dev",
+            "satellite": MOCK_SATELLITE_SOURCE,
         }
 
     def get_ndvi_stats_for_date(self, geometry_wkt: str, target_date: date) -> Optional[dict]:
@@ -423,7 +438,7 @@ class MockSatelliteService:
         return None
 
 
-def fetch_ndvi_for_field_date(db, field, target_date: date) -> Optional[dict]:
+def fetch_ndvi_for_field_date(db, field, target_date: date, *, service) -> Optional[dict]:
     """
     Fetch NDVI for a specific target date (±2 day window).
     Works with both real SentinelHubService and MockSatelliteService.
@@ -431,6 +446,9 @@ def fetch_ndvi_for_field_date(db, field, target_date: date) -> Optional[dict]:
     Returns the NDVI data dict if valid data was found, None otherwise.
     Does NOT save to DB — caller is responsible for that.
     """
+    if getattr(service, "is_mock", False):
+        require_real_provenance(getattr(service, "source", None))
+
     from sqlalchemy import text
 
     # Get geometry WKT
@@ -444,12 +462,8 @@ def fetch_ndvi_for_field_date(db, field, target_date: date) -> Optional[dict]:
 
     geometry_wkt = result[0]
 
-    # Try real service first, fall back to mock
-    ndvi_data = satellite_service.get_ndvi_stats_for_date(geometry_wkt, target_date)
-
-    # If real returned nothing and we're in mock mode, use mock generator
-    if ndvi_data is None and isinstance(satellite_service, MockSatelliteService):
-        ndvi_data = satellite_service._mock_historical_ndvi(field, target_date)
+    # The caller supplied an explicitly constructed real service.
+    ndvi_data = service.get_ndvi_stats_for_date(geometry_wkt, target_date)
 
     if ndvi_data is None:
         return None
@@ -466,17 +480,18 @@ def fetch_ndvi_for_field_date(db, field, target_date: date) -> Optional[dict]:
         logger.debug(f"Quality gate rejected {field.name} @ {target_date}: {reason}")
         return None
 
+    require_payload_provenance(ndvi_data)
     return ndvi_data
 
 
-def get_satellite_service():
-    """Фабрика: реальный или Mock сервис в зависимости от наличия ключей."""
-    if settings.sentinel_hub_client_id and settings.sentinel_hub_client_secret:
-        logger.info("Используется Sentinel Hub API (реальные данные)")
-        return SentinelHubService()
-    else:
-        logger.warning("⚠️  Sentinel Hub ключи не настроены. Используется MOCK режим.")
+def get_satellite_service(*, allow_mock: bool = False):
+    """Build an explicitly real service, or an explicit no-write mock."""
+    client_id = settings.sentinel_hub_client_id
+    client_secret = settings.sentinel_hub_client_secret
+    both_missing = not (isinstance(client_id, str) and client_id.strip()) and not (
+        isinstance(client_secret, str) and client_secret.strip()
+    )
+    if allow_mock and both_missing:
         return MockSatelliteService()
-
-
-satellite_service = get_satellite_service()
+    validate_credentials(client_id, client_secret)
+    return SentinelHubService(client_id, client_secret)

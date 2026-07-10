@@ -22,6 +22,11 @@ from shapely import wkt
 from shapely.geometry import mapping
 
 from config import settings
+from services.satellite_safety import (
+    MOCK_SATELLITE_SOURCE,
+    REAL_SATELLITE_SOURCE,
+    validate_credentials,
+)
 from services.satellite_indices import (
     SUPPORTED_INDEX_CODES,
     build_multi_index_evalscript,
@@ -103,9 +108,14 @@ def build_statistical_payload(
 class MultiIndexSentinelHubService:
     """Sentinel Hub Statistical API client for multi-index collection."""
 
-    def __init__(self):
-        self.client_id = settings.sentinel_hub_client_id
-        self.client_secret = settings.sentinel_hub_client_secret
+    source = REAL_SATELLITE_SOURCE
+    is_mock = False
+
+    def __init__(self, client_id=None, client_secret=None):
+        self.client_id, self.client_secret = validate_credentials(
+            settings.sentinel_hub_client_id if client_id is None else client_id,
+            settings.sentinel_hub_client_secret if client_secret is None else client_secret,
+        )
         self._access_token: Optional[str] = None
         self._token_expires_at: float = 0
         self._last_response_data: Optional[dict] = None  # raw JSON, for diagnostics
@@ -287,6 +297,8 @@ class MockMultiIndexSatelliteService:
     Generates pseudo-interval metadata so ``get_last_intervals_metadata()``
     returns realistic interval diagnostics for mock-mode testing.
     """
+    source = MOCK_SATELLITE_SOURCE
+    is_mock = True
 
     SEASONAL_BASE: dict[str, dict[int, float]] = {
         "savi": {
@@ -476,7 +488,7 @@ class MockMultiIndexSatelliteService:
 
 
 def get_multi_index_satellite_service() -> MultiIndexSentinelHubService:
-    """Return a real Sentinel Hub service (credentials required at call time)."""
+    """Return a real Sentinel Hub service with validated credentials."""
     return MultiIndexSentinelHubService()
 
 
@@ -527,4 +539,3 @@ def filter_by_quality(
         else:
             logger.info("Quality gate rejected %s: %s", norm, reason)
     return passed
-

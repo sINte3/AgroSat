@@ -16,6 +16,7 @@ Usage:
 
 import argparse
 import math
+import os
 import sys
 from datetime import date, timedelta
 from typing import Optional
@@ -31,9 +32,10 @@ from shapely import wkt
 from shapely.geometry import mapping
 from sqlalchemy import text as sa_text
 
-sys.path.insert(0, "backend")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import settings
+from services.satellite_safety import validate_batch_provenance, validate_credentials
 from database import SessionLocal, engine
 from models.monitoring import SatelliteIndexRecord
 from services.satellite_indices import (
@@ -201,7 +203,7 @@ def _prepare_records(parsed: dict[str, dict]) -> list[dict]:
             "p90_value": d.get("p90_value"),
             "valid_pixels_pct": d.get("valid_pixels_pct"),
             "cloud_cover_pct": d.get("cloud_cover_pct"),
-            "satellite": d.get("satellite", "Sentinel-2"),
+            "satellite": d.get("satellite"),
         })
     return records
 
@@ -278,6 +280,7 @@ def verify_only(field_id: int, index_codes: list[str]) -> None:
 
 def do_write(field_id: int, records: list[dict]) -> dict[str, int]:
     """Upsert rows into satellite_index_records. Returns {inserted, updated, skipped}."""
+    records = validate_batch_provenance(records)
     db = SessionLocal()
     counts = {"inserted": 0, "updated": 0, "skipped": 0}
 
@@ -575,6 +578,10 @@ def main() -> None:
 
     index_codes = _normalize_and_validate_indices(args.indices)
 
+    client_id, client_secret = validate_credentials(
+        settings.sentinel_hub_client_id, settings.sentinel_hub_client_secret
+    )
+
     # Preflight: table exists
     _check_table_exists()
 
@@ -591,13 +598,6 @@ def main() -> None:
     date_from = date_to - timedelta(days=args.days)
 
     # Credentials
-    client_id = settings.sentinel_hub_client_id
-    client_secret = settings.sentinel_hub_client_secret
-    if not client_id or not client_secret:
-        print("ERROR: Sentinel Hub credentials not configured in .env", file=sys.stderr)
-        print("  Set SENTINEL_HUB_CLIENT_ID and SENTINEL_HUB_CLIENT_SECRET", file=sys.stderr)
-        sys.exit(1)
-
     # Build payload
     payload = _build_statistical_payload(
         geometry_geojson=geojson_geom,
