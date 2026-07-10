@@ -54,13 +54,22 @@ export default function FieldDetailPanel({ field, onBack, onNavigate }) {
           <p className="text-xs text-gray-500">{field.enterprise_name || ''}</p>
         </div>
         {onNavigate && (
-          <button
-            onClick={() => onNavigate('field-detail', field.id)}
-            className="text-xs text-green-600 hover:text-green-700 whitespace-nowrap font-medium"
-            title="Открыть полную карточку"
-          >
-            Подробнее →
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => onNavigate('field-detail', field.id)}
+              className="text-xs text-green-600 hover:text-green-700 whitespace-nowrap font-medium"
+              title="Открыть полную карточку"
+            >
+              Подробнее →
+            </button>
+            <button
+              onClick={() => onNavigate('field-analytics', field.id)}
+              className="px-2 py-1 text-xs font-medium rounded-md bg-green-50 text-green-700 hover:bg-green-100 transition-colors"
+              title="Открыть аналитику поля"
+            >
+              📊 Аналитика
+            </button>
+          </div>
         )}
       </div>
 

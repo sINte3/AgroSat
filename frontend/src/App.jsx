@@ -7,6 +7,7 @@ import Header from './components/Layout/Header';
 import DashboardPage from './pages/DashboardPage';
 import FieldsPage from './pages/FieldsPage';
 import FieldDetailPage from './pages/FieldDetailPage';
+import FieldAnalyticsPage from './pages/FieldAnalyticsPage';
 import AlertsPage from './pages/AlertsPage';
 import EnterprisesPage from './pages/EnterprisesPage';
 import EnterpriseDetailPage from './pages/EnterpriseDetailPage';
@@ -75,6 +76,10 @@ function AppLayout() {
         setSelectedFieldId(id);
         setView('field-detail');
         break;
+      case 'field-analytics':
+        setSelectedFieldId(id);
+        setView('field-analytics');
+        break;
       case 'alerts':
         setView('alerts');
         setSelectedFieldId(null);
@@ -110,6 +115,7 @@ function AppLayout() {
       case 'dashboard':   return { title: 'Главная' };
       case 'fields':      return { title: 'Поля' };
       case 'field-detail': return { title: 'Поле', subtitle: selectedFieldId ? `#${selectedFieldId}` : null };
+      case 'field-analytics': return { title: 'Аналитика поля', subtitle: selectedFieldId ? `#${selectedFieldId}` : null };
       case 'alerts':      return { title: 'Предупреждения' };
       case 'reports':     return { title: 'Отчёты' };
       case 'enterprise-detail': return { title: 'Предприятие', subtitle: selectedEnterpriseId ? `#${selectedEnterpriseId}` : null };
@@ -117,7 +123,7 @@ function AppLayout() {
     }
   };
 
-  const activeView = view === 'field-detail' ? 'fields'
+  const activeView = view === 'field-detail' || view === 'field-analytics' ? 'fields'
     : view === 'enterprise-detail' ? 'enterprises'
     : view === 'reports' ? 'reports'
     : view;
@@ -129,6 +135,13 @@ function AppLayout() {
       case 'field-detail':
         return (
           <FieldDetailPage
+            fieldId={selectedFieldId}
+            onBack={() => { setSelectedFieldId(null); setView('fields'); }}
+          />
+        );
+      case 'field-analytics':
+        return (
+          <FieldAnalyticsPage
             fieldId={selectedFieldId}
             onBack={() => { setSelectedFieldId(null); setView('fields'); }}
           />
