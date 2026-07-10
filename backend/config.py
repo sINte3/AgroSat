@@ -100,18 +100,27 @@ def validate_runtime_security() -> None:
             "SECRET_KEY is empty. Set a random value of at least 32 characters."
         )
 
-    stripped = key.strip().lower()
+    normalized = key.strip()
+
+    # Reject keys with surrounding whitespace — do not silently trim.
+    if key != normalized:
+        raise RuntimeError(
+            "SECRET_KEY contains leading or trailing whitespace. "
+            "Remove surrounding whitespace and retry."
+        )
+
+    lower = normalized.lower()
 
     # Reject known insecure values *before* the length check so that e.g.
     # "change_me_in_production" (24 characters) is caught by the right message.
-    if _reject_known_insecure(key, stripped):
+    if _reject_known_insecure(key, lower):
         raise RuntimeError(
             "SECRET_KEY contains a known insecure placeholder. "
             "Set a unique random value of at least 32 characters."
         )
 
-    # Reject short keys.
-    if len(key) < 32:
+    # Reject short keys — check against normalized (stripped) value.
+    if len(normalized) < 32:
         raise RuntimeError(
             "SECRET_KEY is too short. Must be at least 32 characters."
         )

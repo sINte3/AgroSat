@@ -11,6 +11,9 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import hashlib
+import hmac
+
 from database import SessionLocal, init_db
 from models.enterprise import Enterprise
 from models.crop import CropType, UZBEKISTAN_CROPS
@@ -19,8 +22,8 @@ from passlib.context import CryptContext
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# The previous hardcoded seed password — reject if supplied.
-_KNOWN_SEED_PASSWORD = "AgroSat2024!"
+# SHA-256 digest of the previous hardcoded seed password — reject if supplied.
+_KNOWN_SEED_PASSWORD_SHA256 = "a4c3a85ec11d90a8a03360cd0f64b8626c04b222298365e369ff1539fbc1eb4f"
 
 
 def _validate_bootstrap_password(password: str) -> str:
@@ -30,23 +33,32 @@ def _validate_bootstrap_password(password: str) -> str:
             "AGROSAT_BOOTSTRAP_ADMIN_PASSWORD is empty or whitespace-only."
         )
 
-    # Check for known insecure value *before* length so that the correct
-    # message is returned regardless of the password length.
-    if password == _KNOWN_SEED_PASSWORD:
+    # Reject passwords with surrounding whitespace — do not silently trim.
+    normalized = password.strip()
+    if password != normalized:
+        raise RuntimeError(
+            "AGROSAT_BOOTSTRAP_ADMIN_PASSWORD contains leading or "
+            "trailing whitespace. Remove surrounding whitespace and retry."
+        )
+
+    # Check for known insecure value via SHA-256 digest comparison
+    # *before* length so that the correct message is returned regardless.
+    candidate_digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    if hmac.compare_digest(candidate_digest, _KNOWN_SEED_PASSWORD_SHA256):
         raise RuntimeError(
             "AGROSAT_BOOTSTRAP_ADMIN_PASSWORD matches a known insecure value. "
             "Set a unique strong password."
         )
 
-    if len(password) < 16:
+    if len(normalized) < 16:
         raise RuntimeError(
             "AGROSAT_BOOTSTRAP_ADMIN_PASSWORD must be at least 16 characters."
         )
 
-    has_upper = any(c.isupper() for c in password)
-    has_lower = any(c.islower() for c in password)
-    has_digit = any(c.isdigit() for c in password)
-    has_special = any(not c.isalnum() for c in password)
+    has_upper = any(c.isupper() for c in normalized)
+    has_lower = any(c.islower() for c in normalized)
+    has_digit = any(c.isdigit() for c in normalized)
+    has_special = any(not c.isalnum() for c in normalized)
 
     if not (has_upper and has_lower and has_digit and has_special):
         raise RuntimeError(
@@ -54,7 +66,7 @@ def _validate_bootstrap_password(password: str) -> str:
             "letter, one lowercase letter, one digit, and one non-alphanumeric character."
         )
 
-    return password
+    return normalized
 
 
 def seed_enterprises(db):
@@ -226,7 +238,7 @@ def seed_admin_user(db):
     )
     db.add(admin)
     db.commit()
-    print("✅ Администратор создан. Удалите AGROSAT_BOOTSTRAP_ADMIN_PASSWORD из среды после использования.")
+    print("✅ Администратор создан. Удалите переменную bootstrap из среды после использования.")
 
 
 if __name__ == "__main__":

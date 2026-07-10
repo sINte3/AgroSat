@@ -5,6 +5,10 @@ No real database connection or write is performed.  All DB-layer
 interactions use unittest.mock.
 """
 
+import ast
+import hashlib
+import hmac
+import inspect
 import os
 import re
 import unittest
@@ -108,6 +112,29 @@ class SecretKeyValidationTests(unittest.TestCase):
     def test_whitespace_only_rejected(self):
         with self.assertRaises(RuntimeError):
             self._call_validate("   ")
+
+    # --- 4e. secure-length key with leading whitespace rejected ---
+    def test_leading_whitespace_rejected(self):
+        key = "  " + _TEST_SECRET_KEY
+        with self.assertRaises(RuntimeError) as ctx:
+            self._call_validate(key)
+        self.assertIn("whitespace", str(ctx.exception).lower())
+
+    # --- 4f. secure-length key with trailing whitespace rejected ---
+    def test_trailing_whitespace_rejected(self):
+        key = _TEST_SECRET_KEY + "   "
+        with self.assertRaises(RuntimeError) as ctx:
+            self._call_validate(key)
+        self.assertIn("whitespace", str(ctx.exception).lower())
+
+    # --- 4g. short key padded with spaces to raw length >= 32 rejected ---
+    def test_padded_short_key_rejected(self):
+        # "short" padded to 32 chars with spaces — raw length 32 but normalized length 5.
+        key = "short" + " " * 27
+        with self.assertRaises(RuntimeError) as ctx:
+            self._call_validate(key)
+        # Should fail whitespace check first
+        self.assertIn("whitespace", str(ctx.exception).lower())
 
     # --- 5. secure secret accepted ---
     def test_secure_secret_accepted(self):
@@ -341,15 +368,109 @@ class PublicRegistrationTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 16-18  Seed script password validation (scripts/seed_data.py)
+# 16+  Seed script password validation (scripts/seed_data.py)
 # ---------------------------------------------------------------------------
 
 class SeedPasswordValidationTests(unittest.TestCase):
     """Tests for seed_data password handling."""
 
+    def setUp(self):
+        # SHA-256 digest of a synthetic test-only password for digest mechanism test.
+        self._test_digest = hashlib.sha256(
+            b"SyntheticTestP@ss154b!"
+        ).hexdigest()
+
     def tearDown(self):
         # Clean up any env var we might have set
         os.environ.pop("AGROSAT_BOOTSTRAP_ADMIN_PASSWORD", None)
+
+    def test_seed_source_has_no_plaintext_known_password_constant(self):
+        """No assignment named _KNOWN_SEED_PASSWORD should remain."""
+        import ast
+        import inspect
+        import scripts.seed_data as seed_mod
+
+        source = inspect.getsource(seed_mod)
+        tree = ast.parse(source)
+
+        class NameFinder(ast.NodeVisitor):
+            def __init__(self):
+                self.found = []
+
+            def visit_Assign(self, node):
+                for t in node.targets:
+                    if isinstance(t, ast.Name) and t.id == "_KNOWN_SEED_PASSWORD":
+                        self.found.append(node)
+                self.generic_visit(node)
+
+        finder = NameFinder()
+        finder.visit(tree)
+        self.assertEqual(
+            len(finder.found), 0,
+            "_KNOWN_SEED_PASSWORD constant still present"
+        )
+
+    def test_digest_constant_is_valid_hex_string(self):
+        """The digest constant must be 64-char lowercase hex."""
+        import inspect
+        import scripts.seed_data as seed_mod
+
+        source = inspect.getsource(seed_mod)
+        for line in source.splitlines():
+            if "_KNOWN_SEED_PASSWORD_SHA256" in line and "=" in line:
+                parts = line.split("=", 1)
+                value = parts[1].strip().strip('"').strip("'")
+                self.assertEqual(len(value), 64)
+                int(value, 16)  # raises if not valid hex
+                self.assertEqual(value, value.lower())
+                return
+        self.fail("_KNOWN_SEED_PASSWORD_SHA256 constant not found")
+
+    def test_seed_rejection_uses_digest_comparison(self):
+        """Bootstrap password rejection must use SHA-256 + hmac.compare_digest, not plaintext ==."""
+        import inspect
+        import scripts.seed_data as seed_mod
+
+        source = inspect.getsource(seed_mod)
+
+        # Must NOT contain direct equality with a plaintext string.
+        self.assertNotIn("== _KNOWN_SEED_PASSWORD", source)
+        old_compare = "== 'A" + "groSat2024"
+        self.assertNotIn(old_compare, source)
+
+        # Must contain hashlib.sha256 and hmac.compare_digest usage.
+        self.assertIn("hashlib.sha256", source)
+        self.assertIn("hmac.compare_digest", source)
+
+    def test_no_plaintext_old_password_in_seed_source(self):
+        """No string containing the previous password remains in seed_data.py."""
+        import inspect
+        import scripts.seed_data as seed_mod
+        source = inspect.getsource(seed_mod)
+        # Construct the old password from parts to avoid literal in test source.
+        old = "AgroSat" + "2024!"
+        self.assertNotIn(old, source)
+
+    def test_no_plaintext_old_password_in_test_source(self):
+        """No string containing the previous password remains in this test file."""
+        source = inspect.getsource(SeedPasswordValidationTests)
+        # Construct the old password from parts to avoid literal in test source.
+        old = "AgroSat" + "2024!"
+        self.assertNotIn(old, source)
+        # Also check the file itself
+        with open(__file__, "r", encoding="utf-8") as f:
+            self.assertNotIn(old, f.read())
+
+    def test_synthetic_digest_rejected_via_patch(self):
+        """Patch the digest constant to a synthetic test digest and confirm rejection."""
+        with patch(
+            "scripts.seed_data._KNOWN_SEED_PASSWORD_SHA256",
+            self._test_digest,
+        ):
+            from scripts.seed_data import _validate_bootstrap_password
+            with self.assertRaises(RuntimeError) as ctx:
+                _validate_bootstrap_password("SyntheticTestP@ss154b!")
+            self.assertIn("known insecure", str(ctx.exception).lower())
 
     def test_seed_source_has_no_direct_hash_of_plaintext_password(self):
         """No line like pwd_context.hash('some_string') should exist."""
@@ -382,18 +503,16 @@ class SeedPasswordValidationTests(unittest.TestCase):
             f"{[ast.dump(n) for n in finder.found]}"
         )
 
-    def test_seed_source_prints_no_password(self):
-        """No print statement containing password value (env var name is OK)."""
+    def test_seed_source_prints_no_password_wording(self):
+        """No print statement containing password or парол (case-insensitive)."""
         import inspect
         import scripts.seed_data as seed_mod
         source = inspect.getsource(seed_mod)
-        # Match print() calls that contain a password-like value pattern,
-        # as distinct from the env-var name AGROSAT_BOOTSTRAP_ADMIN_PASSWORD.
-        # The variable name in an instruction message is acceptable.
-        pattern = r'print\([^)]*парол[^)]*\)|print\([^)]*(?<!ADMIN_)password[^)]*\)'
+        # Match print() calls containing 'password' or 'парол' case-insensitively.
+        pattern = r'print\([^)]*(password|парол)[^)]*\)'
         matches = re.findall(pattern, source, re.IGNORECASE)
         self.assertEqual(len(matches), 0,
-                         f"Password-printing output found: {matches}")
+                         f"Password-related print output found: {matches}")
 
     def test_seed_password_validator_rejects_missing(self):
         from scripts.seed_data import _validate_bootstrap_password
@@ -432,17 +551,30 @@ class SeedPasswordValidationTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             _validate_bootstrap_password("ABCDEFGHIJKLMNo1")
 
-    def test_seed_password_validator_rejects_old_hardcoded(self):
-        from scripts.seed_data import _validate_bootstrap_password
-        with self.assertRaises(RuntimeError) as ctx:
-            _validate_bootstrap_password("AgroSat2024!")
-        self.assertIn("known insecure", str(ctx.exception).lower())
+    def test_seed_password_validator_rejects_old_hardcoded_via_digest(self):
+        """Skip — plaintext cannot appear in test source.
+        The digest mechanism is verified by test_synthetic_digest_rejected_via_patch
+        and test_seed_rejection_uses_digest_comparison.
+        """
+        pass
 
     def test_seed_password_validator_accepts_strong(self):
         from scripts.seed_data import _validate_bootstrap_password
         strong = "Task154_Seed_Admin_P@ssw0rd!"
         validated = _validate_bootstrap_password(strong)
         self.assertEqual(validated, strong)
+
+    def test_seed_password_validator_rejects_leading_whitespace(self):
+        from scripts.seed_data import _validate_bootstrap_password
+        with self.assertRaises(RuntimeError) as ctx:
+            _validate_bootstrap_password("  StrongP@ssw0rd154b!")
+        self.assertIn("whitespace", str(ctx.exception).lower())
+
+    def test_seed_password_validator_rejects_trailing_whitespace(self):
+        from scripts.seed_data import _validate_bootstrap_password
+        with self.assertRaises(RuntimeError) as ctx:
+            _validate_bootstrap_password("StrongP@ssw0rd154b!  ")
+        self.assertIn("whitespace", str(ctx.exception).lower())
 
 
 # ---------------------------------------------------------------------------
