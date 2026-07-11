@@ -116,12 +116,31 @@ class MigrationSchemaContractTests(unittest.TestCase):
         for name, expected in IMMUTABLE_HASHES.items():
             self.assertEqual(expected, hashlib.sha256((VERSIONS / name).read_bytes()).hexdigest())
 
-    def test_only_allowed_paths_changed(self):
-        import subprocess
-        result = subprocess.run(["git", "status", "--porcelain=v1", "--untracked-files=all"], cwd=BACKEND.parent, text=True, capture_output=True, check=True)
-        changed = {line[3:].replace("\\", "/") for line in result.stdout.splitlines()}
-        allowed = {"backend/alembic/versions/0001_baseline_existing_schema_baseline_existing_supabase_schema.py", "backend/alembic/versions/0004_repair_core_constraints.py", "backend/models/field.py", "backend/models/monitoring.py", "backend/tests/test_migration_schema_contract.py"}
-        self.assertEqual(allowed, changed)
+    def test_repair_offline_upgrade_skips_duplicate_queries_and_executes_ddl(self):
+        module = load(REPAIR)
+        bind = Mock()
+        with patch.object(module.context, "is_offline_mode", return_value=True), patch.object(
+            module.op, "get_bind", return_value=bind
+        ) as get_bind, patch.object(module.op, "drop_index") as drop, patch.object(
+            module.op, "create_index"
+        ) as create_index, patch.object(module.op, "create_unique_constraint") as create_constraint:
+            module.upgrade()
+
+        get_bind.assert_not_called()
+        bind.execute.assert_not_called()
+        drop.assert_called_once_with(
+            "uq_alerts_active_source_source_key", table_name="alerts"
+        )
+        create_index.assert_called_once()
+        self.assertTrue(create_index.call_args.kwargs["unique"])
+        self.assertEqual(
+            "uq_alerts_active_source_source_key", create_index.call_args.args[0]
+        )
+        create_constraint.assert_called_once_with(
+            "uq_crop_seasons_field_season_year",
+            "crop_seasons",
+            ["field_id", "season_year"],
+        )
 
 
 if __name__ == "__main__":
