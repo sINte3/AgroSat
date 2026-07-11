@@ -14,7 +14,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from config import settings, validate_runtime_security
-from database import init_db
 
 # Fail-fast: reject insecure configuration before anything else.
 validate_runtime_security()
@@ -33,14 +32,6 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Инициализация при старте, очистка при остановке."""
     logger.info("🚀 AgroSat запускается...")
-
-    # Создание таблиц БД
-    try:
-        init_db()
-        logger.info("✅ База данных готова")
-    except Exception as e:
-        logger.error(f"❌ Ошибка инициализации БД: {e}")
-        raise
 
     logger.info(f"✅ AgroSat v{settings.app_version} запущен в режиме '{settings.environment}'")
 
