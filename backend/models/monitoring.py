@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, Text, Boolean, ForeignKey, Date, Enum, UniqueConstraint, Index
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text, Boolean, ForeignKey, Date, Enum, UniqueConstraint, Index, text
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
@@ -13,6 +13,7 @@ class NDVIRecord(Base):
     __table_args__ = (
         UniqueConstraint("field_id", "captured_date",
                          name="uq_ndvi_records_field_captured_date"),
+        Index("idx_ndvi_records_field_date_desc", "field_id", text("captured_date DESC")),
     )
 
     id = Column(Integer, primary_key=True, index=True)
@@ -66,6 +67,18 @@ class AlertType(str, enum.Enum):
 class Alert(Base):
     """Алерт по полю."""
     __tablename__ = "alerts"
+    __table_args__ = (
+        Index("idx_alerts_field_active_severity", "field_id", "is_active", "severity"),
+        Index("ix_alerts_source_source_key", "source", "source_key"),
+        Index(
+            "uq_alerts_active_source_source_key",
+            "source", "source_key",
+            unique=True,
+            postgresql_where=text(
+                "is_active = true AND source IS NOT NULL AND source_key IS NOT NULL"
+            ),
+        ),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     field_id = Column(Integer, ForeignKey("fields.id"), nullable=False)
@@ -109,7 +122,7 @@ class SatelliteIndexRecord(Base):
         Index("ix_satellite_index_records_index_code", "index_code"),
     )
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     field_id = Column(Integer, ForeignKey("fields.id"), nullable=False)
 
     captured_date = Column(Date, nullable=False)

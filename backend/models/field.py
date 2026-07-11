@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, Text, Boolean, ForeignKey, JSON
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text, Boolean, ForeignKey, JSON, UniqueConstraint, Index
 from sqlalchemy.orm import relationship
 from geoalchemy2 import Geometry
 from datetime import datetime
@@ -8,6 +8,9 @@ from database import Base
 class Field(Base):
     """Поле (участок) агрокластера."""
     __tablename__ = "fields"
+    __table_args__ = (
+        Index("idx_fields_enterprise_active", "enterprise_id", "is_active"),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     enterprise_id = Column(Integer, ForeignKey("enterprises.id"), nullable=False)
@@ -53,6 +56,12 @@ class Field(Base):
 class CropSeason(Base):
     """Сезон посева: что посеяно на поле в данном году."""
     __tablename__ = "crop_seasons"
+    __table_args__ = (
+        UniqueConstraint(
+            "field_id", "season_year",
+            name="uq_crop_seasons_field_season_year",
+        ),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     field_id = Column(Integer, ForeignKey("fields.id"), nullable=False)
