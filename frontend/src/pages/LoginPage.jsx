@@ -1,9 +1,10 @@
 import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
 export default function LoginPage() {
   const { login } = useAuth();
+  const location = useLocation();
   const navigate = useNavigate();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -21,7 +22,19 @@ export default function LoginPage() {
     setBusy(false);
 
     if (ok) {
-      navigate('/', { replace: true });
+      const from = location.state?.from;
+      const pathname = from?.pathname;
+      const isSafePath =
+        typeof pathname === 'string' &&
+        pathname.startsWith('/') &&
+        !pathname.startsWith('//') &&
+        pathname !== '/login' &&
+        pathname !== '/unauthorized';
+      const destination = isSafePath
+        ? `${pathname}${from.search || ''}${from.hash || ''}`
+        : '/dashboard';
+
+      navigate(destination, { replace: true });
     } else {
       setError('Неверный email или пароль');
     }
