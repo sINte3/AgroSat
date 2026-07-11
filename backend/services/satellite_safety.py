@@ -48,6 +48,15 @@ def require_real_provenance(source):
     return REAL_SATELLITE_SOURCE
 
 
+def require_real_service(service):
+    """Require an explicitly non-mock service with canonical real provenance."""
+    if service is None or not hasattr(service, "is_mock"):
+        raise SatelliteProvenanceError("Real satellite service identity is required")
+    if service.is_mock is not False:
+        raise SatelliteProvenanceError("Real satellite service identity is required")
+    return require_real_provenance(getattr(service, "source", None))
+
+
 def require_payload_provenance(payload, key="satellite"):
     if not isinstance(payload, dict):
         raise SatelliteProvenanceError("Satellite payload provenance is required")

@@ -79,6 +79,7 @@ from services.satellite_collection import (
 from services.satellite_safety import (
     SatelliteConfigurationError,
     require_real_provenance,
+    require_real_service,
     validate_credentials,
 )
 # -- Constants --
@@ -791,7 +792,7 @@ def run_real(args: argparse.Namespace) -> None:
     # Get satellite service
     service = _get_satellite_service(use_mock, args.no_sentinel)
     if do_db_writes:
-        require_real_provenance(getattr(service, "source", None))
+        require_real_service(service)
 
     # Fetch fields
     max_fields = args.max_fields

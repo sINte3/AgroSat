@@ -22,7 +22,7 @@ from services.satellite_safety import (
     REAL_SATELLITE_SOURCE,
     SatelliteConfigurationError,
     require_payload_provenance,
-    require_real_provenance,
+    require_real_service,
     validate_credentials,
 )
 
@@ -441,13 +441,12 @@ class MockSatelliteService:
 def fetch_ndvi_for_field_date(db, field, target_date: date, *, service) -> Optional[dict]:
     """
     Fetch NDVI for a specific target date (±2 day window).
-    Works with both real SentinelHubService and MockSatelliteService.
+    Requires an explicitly real SentinelHubService identity.
 
     Returns the NDVI data dict if valid data was found, None otherwise.
     Does NOT save to DB — caller is responsible for that.
     """
-    if getattr(service, "is_mock", False):
-        require_real_provenance(getattr(service, "source", None))
+    require_real_service(service)
 
     from sqlalchemy import text
 
