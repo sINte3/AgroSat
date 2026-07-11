@@ -13,10 +13,15 @@ VERSIONS = BACKEND / "alembic" / "versions"
 BASELINE = VERSIONS / "0001_baseline_existing_schema_baseline_existing_supabase_schema.py"
 REPAIR = VERSIONS / "0004_repair_core_constraints.py"
 IMMUTABLE_HASHES = {
-    "0002_create_satellite_index_records.py": "0a264805efe5fb9a7d4c2a168a2f6c67751f28294ce9e28c07e419f317d22a34",
-    "0003_add_ndvi_unique_constraint.py": "56c5068ffa460006100d33c29a3224bd34514ca236b54b8653f4d41944f2a69b",
-    "478de3d1f6d0_add_alert_source_source_key.py": "0406463f76162a61718bc304230c84b65489fa1d4f66b0f96270a64ff0dbe950",
+    "0002_create_satellite_index_records.py": "82a17307b48100aba1c52b4ca22a66cbe007e22b4c029ff4efe3879d855ca08a",
+    "0003_add_ndvi_unique_constraint.py": "45082a8806f4e75f8d8668457a28e4aca5fc7e2510da60fd365ed6392da32108",
+    "478de3d1f6d0_add_alert_source_source_key.py": "827c4d8fc4c89a3be9f899e460b35451d8a8d9faff7e908c583a070ddb5020be",
 }
+
+
+def canonical_line_ending_sha256(content: bytes) -> str:
+    canonical = content.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def load(path: Path):
@@ -112,9 +117,19 @@ class MigrationSchemaContractTests(unittest.TestCase):
             imported = [n for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))]
             self.assertFalse(any((getattr(n, "module", "") or "").startswith("models") for n in imported), path.name)
 
-    def test_existing_migrations_remain_byte_identical(self):
+    def test_existing_migrations_remain_content_identical_across_line_endings(self):
         for name, expected in IMMUTABLE_HASHES.items():
-            self.assertEqual(expected, hashlib.sha256((VERSIONS / name).read_bytes()).hexdigest())
+            checked_out = (VERSIONS / name).read_bytes()
+            synthetic_lf = checked_out.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+            synthetic_crlf = synthetic_lf.replace(b"\n", b"\r\n")
+            mutation_index = next(index for index, byte in enumerate(synthetic_lf) if byte not in b"\r\n")
+            mutated = bytearray(synthetic_lf)
+            mutated[mutation_index] ^= 1
+
+            self.assertEqual(expected, canonical_line_ending_sha256(checked_out))
+            self.assertEqual(expected, canonical_line_ending_sha256(synthetic_lf))
+            self.assertEqual(expected, canonical_line_ending_sha256(synthetic_crlf))
+            self.assertNotEqual(expected, canonical_line_ending_sha256(bytes(mutated)))
 
     def test_repair_offline_upgrade_skips_duplicate_queries_and_executes_ddl(self):
         module = load(REPAIR)
