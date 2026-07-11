@@ -6,7 +6,7 @@ Revises: 478de3d1f6d0
 
 from typing import Sequence, Union
 
-from alembic import op
+from alembic import context, op
 import sqlalchemy as sa
 
 
@@ -21,7 +21,17 @@ ACTIVE_SOURCE_PREDICATE = (
 
 
 def _duplicate_group_count(sql: str) -> int:
-    return int(op.get_bind().execute(sa.text(sql)).scalar_one())
+    try:
+        offline = context.is_offline_mode()
+    except NameError:
+        # Unit tests exercise the migration function without an Alembic proxy.
+        offline = False
+    if offline:
+        # Offline SQL has no database result set to inspect.  The online
+        # migration path below always runs these prechecks before DDL.
+        return 0
+    bind = op.get_bind()
+    return int(bind.execute(sa.text(sql)).scalar_one())
 
 
 def upgrade() -> None:
