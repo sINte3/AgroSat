@@ -22,15 +22,57 @@ const PATH_VIEW_MAP = {
   '/alerts': 'alerts',
   '/enterprises': 'enterprises',
   '/reports': 'reports',
+  '/login': 'login',
+  '/unauthorized': 'unauthorized',
+};
+
+const parsePositiveId = (value) => {
+  const stringValue = String(value);
+  if (!/^\d+$/.test(stringValue)) return null;
+
+  const id = Number(stringValue);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+};
+
+const resolvePathname = (pathname) => {
+  const analyticsMatch = pathname.match(/^\/fields\/(\d+)\/analytics$/);
+  if (analyticsMatch) {
+    const selectedFieldId = parsePositiveId(analyticsMatch[1]);
+    if (selectedFieldId) {
+      return { view: 'field-analytics', selectedFieldId, selectedEnterpriseId: null };
+    }
+  }
+
+  const fieldMatch = pathname.match(/^\/fields\/(\d+)$/);
+  if (fieldMatch) {
+    const selectedFieldId = parsePositiveId(fieldMatch[1]);
+    if (selectedFieldId) {
+      return { view: 'field-detail', selectedFieldId, selectedEnterpriseId: null };
+    }
+  }
+
+  const enterpriseMatch = pathname.match(/^\/enterprises\/(\d+)$/);
+  if (enterpriseMatch) {
+    const selectedEnterpriseId = parsePositiveId(enterpriseMatch[1]);
+    if (selectedEnterpriseId) {
+      return { view: 'enterprise-detail', selectedFieldId: null, selectedEnterpriseId };
+    }
+  }
+
+  return {
+    view: PATH_VIEW_MAP[pathname] || 'dashboard',
+    selectedFieldId: null,
+    selectedEnterpriseId: null,
+  };
 };
 
 function AppLayout() {
   const location = useLocation();
   const navigate = useNavigate();
-  const pathView = PATH_VIEW_MAP[location.pathname] || 'dashboard';
-  const [view, setView] = useState(pathView);
-  const [selectedFieldId, setSelectedFieldId] = useState(null);
-  const [selectedEnterpriseId, setSelectedEnterpriseId] = useState(null);
+  const initialRoute = resolvePathname(location.pathname);
+  const [view, setView] = useState(initialRoute.view);
+  const [selectedFieldId, setSelectedFieldId] = useState(initialRoute.selectedFieldId);
+  const [selectedEnterpriseId, setSelectedEnterpriseId] = useState(initialRoute.selectedEnterpriseId);
   const [enterprises, setEnterprises] = useState([]);
 
   useEffect(() => {
@@ -39,21 +81,23 @@ function AppLayout() {
       .catch(() => console.error('Ошибка загрузки предприятий'));
   }, []);
 
-  // Sync view from URL changes (back/forward, manual URL entry, refresh)
-  // Only override local state when the URL is a known top-level path — ignore
-  // detail/internal views so back-button from field-detail goes to /fields.
+  // Sync view and detail selection from URL changes (back/forward, manual entry, refresh).
   useEffect(() => {
-    if (PATH_VIEW_MAP[location.pathname]) {
-      setView(pathView);
-      setSelectedFieldId(null);
-      setSelectedEnterpriseId(null);
-    }
-  }, [location.pathname, pathView]);
+    const route = resolvePathname(location.pathname);
+    setView(route.view);
+    setSelectedFieldId(route.selectedFieldId);
+    setSelectedEnterpriseId(route.selectedEnterpriseId);
+  }, [location.pathname]);
 
   const handleFieldClick = useCallback((fieldId) => {
-    setSelectedFieldId(fieldId);
+    const validFieldId = parsePositiveId(fieldId);
+    if (!validFieldId) return;
+
+    setSelectedFieldId(validFieldId);
+    setSelectedEnterpriseId(null);
     setView('field-detail');
-  }, []);
+    navigate(`/fields/${validFieldId}`);
+  }, [navigate]);
 
   const handleFieldHighlight = useCallback((fieldId) => {
     setSelectedFieldId(fieldId);
@@ -73,13 +117,26 @@ function AppLayout() {
         navigate('/fields', { replace: true });
         break;
       case 'field':
-        setSelectedFieldId(id);
+      case 'field-detail': {
+        const validFieldId = parsePositiveId(id);
+        if (!validFieldId) break;
+
+        setSelectedFieldId(validFieldId);
+        setSelectedEnterpriseId(null);
         setView('field-detail');
+        navigate(`/fields/${validFieldId}`);
         break;
-      case 'field-analytics':
-        setSelectedFieldId(id);
+      }
+      case 'field-analytics': {
+        const validFieldId = parsePositiveId(id);
+        if (!validFieldId) break;
+
+        setSelectedFieldId(validFieldId);
+        setSelectedEnterpriseId(null);
         setView('field-analytics');
+        navigate(`/fields/${validFieldId}/analytics`);
         break;
+      }
       case 'alerts':
         setView('alerts');
         setSelectedFieldId(null);
@@ -95,10 +152,16 @@ function AppLayout() {
         setSelectedEnterpriseId(id);
         setView('fields');
         break;
-      case 'enterprise-detail':
-        setSelectedEnterpriseId(id);
+      case 'enterprise-detail': {
+        const validEnterpriseId = parsePositiveId(id);
+        if (!validEnterpriseId) break;
+
+        setSelectedFieldId(null);
+        setSelectedEnterpriseId(validEnterpriseId);
         setView('enterprise-detail');
+        navigate(`/enterprises/${validEnterpriseId}`);
         break;
+      }
       case 'reports':
         setView('reports');
         setSelectedFieldId(null);
@@ -136,14 +199,14 @@ function AppLayout() {
         return (
           <FieldDetailPage
             fieldId={selectedFieldId}
-            onBack={() => { setSelectedFieldId(null); setView('fields'); }}
+            onBack={() => { setSelectedFieldId(null); setSelectedEnterpriseId(null); setView('fields'); navigate('/fields'); }}
           />
         );
       case 'field-analytics':
         return (
           <FieldAnalyticsPage
             fieldId={selectedFieldId}
-            onBack={() => { setSelectedFieldId(null); setView('fields'); }}
+            onBack={() => { setSelectedFieldId(null); setSelectedEnterpriseId(null); setView('fields'); navigate('/fields'); }}
           />
         );
       case 'alerts':
@@ -154,7 +217,7 @@ function AppLayout() {
         return (
           <EnterpriseDetailPage
             enterpriseId={selectedEnterpriseId}
-            onBack={() => { setSelectedEnterpriseId(null); setView('enterprises'); }}
+            onBack={() => { setSelectedFieldId(null); setSelectedEnterpriseId(null); setView('enterprises'); navigate('/enterprises'); }}
           />
         );
       case 'reports':
