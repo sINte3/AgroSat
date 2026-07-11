@@ -230,8 +230,8 @@ export default function EnterpriseDashboard({ enterprise, fields, alerts, loadin
       gap: 10,
       marginBottom: 20,
     }}>
-      {cards.map(c => (
-        <KpiCard key={c.key} {...c} />
+      {cards.map(({ key, ...props }) => (
+        <KpiCard key={key} {...props} />
       ))}
     </div>
   );

@@ -429,13 +429,7 @@ export default function EnterpriseFieldsTable({
             fontSize: 12,
             fontFamily: "'Inter', 'Segoe UI', system-ui, sans-serif",
           }}>
-            <colgroup>
-              <col style={{ width: '30%' }} />   {/* Контур */}
-              <col style={{ width: '22%' }} />   {/* Культура */}
-              <col style={{ width: '16%' }} />   {/* Площадь (га) */}
-              <col style={{ width: '16%' }} />   {/* NDVI */}
-              <col style={{ width: '16%' }} />   {/* Предупреждения */}
-            </colgroup>
+            <colgroup>{columnHeaders.map(ch => <col key={ch.key} style={{ width: ch.width }} />)}</colgroup>
             <thead style={{
               position: 'sticky',
               top: 0,
