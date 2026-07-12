@@ -77,14 +77,16 @@ call :require_free_port 5173 || exit /b 1
 set "FRONTEND_LINK_CREATED=0"
 if /I "%FRONTEND_DEP_MODE%"=="shared" (
     for /f "delims=" %%G in ('powershell -NoProfile -Command "[guid]::NewGuid().ToString('N')"') do set "RUN_ID=%%G"
-    if not defined RUN_ID exit /b 1
+)
+if /I "%FRONTEND_DEP_MODE%"=="shared" powershell -NoProfile -Command "if('%RUN_ID%' -notmatch '^[0-9a-f]{32}$'){exit 1}" || exit /b 1
+if /I "%FRONTEND_DEP_MODE%"=="shared" (
     call :create_frontend_link "%FRONTEND_TARGET%" "%RUN_ID%" || exit /b 1
 )
 echo Starting backend from "%BACKEND_DIR%"
 start "AgroSat Backend" /D "%BACKEND_DIR%" /min "%ComSpec%" /k ""%PY_EXE%" -m uvicorn main:app --host 127.0.0.1 --port 8000"
 echo Starting frontend from "%FRONTEND_DIR%"
 if "%FRONTEND_LINK_CREATED%"=="1" (
-    start "AgroSat Frontend" /D "%FRONTEND_DIR%" /min "%ComSpec%" /c "call npm run dev ^& call ^"%LAUNCHER_ROOT%\start.bat^" --cleanup-frontend-link ^"%FRONTEND_TARGET%^" ^"%RUN_ID%^""
+    start "AgroSat Frontend" /D "%FRONTEND_DIR%" /min "%ComSpec%" /c call npm run dev -- --host 127.0.0.1 ^& call "%LAUNCHER_ROOT%\start.bat" --cleanup-frontend-link "%FRONTEND_TARGET%" "%RUN_ID%"
 ) else (
     start "AgroSat Frontend" /D "%FRONTEND_DIR%" /min "%ComSpec%" /k "npm run dev"
 )
