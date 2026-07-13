@@ -1,9 +1,33 @@
+import os
 from pathlib import Path
 
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 
 BACKEND_DIR = Path(__file__).resolve().parent
+RUNTIME_ENV_FILE_VARIABLE = "AGROSAT_RUNTIME_ENV_FILE"
+
+
+def _resolve_runtime_env_file() -> Path:
+    explicit_path = os.environ.get(RUNTIME_ENV_FILE_VARIABLE)
+    if explicit_path is None:
+        return BACKEND_DIR / ".env"
+
+    candidate = Path(explicit_path)
+    if not candidate.is_absolute():
+        raise RuntimeError("Runtime configuration file path must be absolute.")
+
+    try:
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise RuntimeError("Runtime configuration file is unavailable.") from None
+
+    if not resolved.is_file():
+        raise RuntimeError("Runtime configuration file is not a regular file.")
+    return resolved
+
+
+RUNTIME_ENV_FILE = _resolve_runtime_env_file()
 
 # Lowercase known weak / placeholder keys that must never be accepted.
 _FORBIDDEN_SECRETS = frozenset({
@@ -53,7 +77,7 @@ class Settings(BaseSettings):
     telegram_notifications_enabled: bool = False
 
     class Config:
-        env_file = BACKEND_DIR / ".env"
+        env_file = RUNTIME_ENV_FILE
         case_sensitive = False
         extra = "ignore"
 

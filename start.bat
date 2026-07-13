@@ -45,6 +45,22 @@ if not defined PRIMARY_COMMON goto :identity_error
 if /I not "%PRIMARY_COMMON%"=="%LAUNCHER_COMMON%" goto :identity_error
 echo Verified dependency root: "%PRIMARY_ROOT%"
 
+set "RUNTIME_CONFIG_MODE=local"
+set "AGROSAT_RUNTIME_ENV_FILE=%BACKEND_DIR%\.env"
+if not exist "%AGROSAT_RUNTIME_ENV_FILE%" (
+    set "RUNTIME_CONFIG_MODE=verified-primary"
+    set "AGROSAT_RUNTIME_ENV_FILE=%PRIMARY_ROOT%\backend\.env"
+)
+if not exist "%AGROSAT_RUNTIME_ENV_FILE%" (
+    echo [ERROR] Runtime configuration file could not be resolved safely.
+    exit /b 1
+)
+if exist "%AGROSAT_RUNTIME_ENV_FILE%\" (
+    echo [ERROR] Runtime configuration source is not a regular file.
+    exit /b 1
+)
+echo runtime config mode = %RUNTIME_CONFIG_MODE%
+
 set "PY_EXE=%BACKEND_DIR%\venv\Scripts\python.exe"
 if not exist "%PY_EXE%" set "PY_EXE=%PRIMARY_ROOT%\backend\venv\Scripts\python.exe"
 if not exist "%PY_EXE%" (
