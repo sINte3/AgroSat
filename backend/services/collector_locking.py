@@ -49,7 +49,7 @@ def _atexit_cleanup():
         release_lock(_held_lock_path)
 
 
-def _create_mutex() -> int:
+def _create_mutex(mutex_name: str = MUTEX_NAME) -> int:
     """Create or open a named mutex using Win32 API. Returns handle."""
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
@@ -60,7 +60,7 @@ def _create_mutex() -> int:
     kernel32.CloseHandle.restype = wintypes.BOOL
 
     # SECURITY_ATTRIBUTES with NULL (default security)
-    handle = kernel32.CreateMutexW(None, False, MUTEX_NAME)
+    handle = kernel32.CreateMutexW(None, False, mutex_name)
     if not handle:
         err = ctypes.get_last_error()
         raise RuntimeError(f"CreateMutexW failed: error {err}")
@@ -133,6 +133,7 @@ def acquire_lock(
     lock_file: str | None = None,
     force: bool = False,
     dry_run: bool = False,
+    mutex_name: str = MUTEX_NAME,
 ) -> str | None:
     """
     Acquire cross-process lock via Win32 named mutex.
@@ -170,7 +171,7 @@ def acquire_lock(
         return None
 
     try:
-        mutex_handle = _create_mutex()
+        mutex_handle = _create_mutex(mutex_name)
     except RuntimeError as e:
         print(f"  LOCK ERROR: {e}", file=sys.stderr)
         sys.exit(3)
@@ -185,7 +186,7 @@ def acquire_lock(
             # Force: open existing mutex, release it, re-create
             print(f"  LOCK: Force-override previous lock")
             try:
-                force_handle = _create_mutex()
+                force_handle = _create_mutex(mutex_name)
                 _wait_mutex(force_handle, timeout_ms=5000)
                 if _held_mutex_handle:
                     _close_handle(_held_mutex_handle)
