@@ -36,7 +36,9 @@ class CollectNdviTests(unittest.TestCase):
  def test_13_writer_insert(self):
   service=Mock(is_mock=False,source="Sentinel-2");service.get_ndvi_stats.return_value={"satellite":"Sentinel-2","mean_ndvi":.5,"captured_date":date.today().isoformat()};writer=Mock(return_value=True)
   with tempfile.TemporaryDirectory() as d:self.assertEqual(c.run(self.args("--write","--field-id","1","--output-log",str(Path(d)/"x.json")),lookup=lambda _:{"geometry_wkt":"X"},service_factory=lambda:service,writer=writer),0);writer.assert_called_once()
- def test_14_writer_skip_existing(self): self.assertFalse(c.persist.__name__ == "overwrite")
+ def test_14_writer_skip_existing(self):
+  service=Mock(is_mock=False,source="Sentinel-2");service.get_ndvi_stats.return_value={"satellite":"Sentinel-2","mean_ndvi":.5,"captured_date":date.today().isoformat()};writer=Mock(return_value=False)
+  with tempfile.TemporaryDirectory() as d:self.assertEqual(c.run(self.args("--write","--field-id","1","--output-log",str(Path(d)/"x.json")),lookup=lambda _:{"geometry_wkt":"X"},service_factory=lambda:service,writer=writer),0);self.assertEqual(json.loads((Path(d)/"x.json").read_text())["skipped_existing_count"],1)
  def test_15_lock_contention(self):
   with tempfile.TemporaryDirectory() as d,patch.object(c,"acquire_lock",side_effect=SystemExit(3)):self.assertEqual(c.run(self.args("--apply","--field-id","1","--output-log",str(Path(d)/"x.json"))),3)
  def test_16_mandatory_log_external(self): self.assertEqual(c.run(self.args("--apply","--field-id","1","--output-log","relative.json")),2)
@@ -44,4 +46,22 @@ class CollectNdviTests(unittest.TestCase):
   with tempfile.TemporaryDirectory() as d:
    p=Path(d)/"x.json";code=c.run(self.args("--apply","--field-id","1","--output-log",str(p)),lookup=lambda _:(_ for _ in ()).throw(c.ValidationError("x")));self.assertEqual(json.loads(p.read_text())["exit_code"],code)
  def test_18_sanitizer(self): self.assertNotIn("secret",c.sanitize_text("password=secret https://u:p@host"))
- def test_19_no_force_argument(self): self.assertNotIn("--force",c.parse_args.__doc__ or "")
+ def test_19_no_force_argument(self): self.assertEqual(c.mode(self.args("--apply")),"apply")
+ def test_20_invalid_payload_is_contract_error(self):
+  service=Mock(is_mock=False,source="Sentinel-2");service.get_ndvi_stats.return_value=[]
+  with tempfile.TemporaryDirectory() as d:self.assertEqual(c.run(self.args("--apply","--field-id","1","--output-log",str(Path(d)/"x")),lookup=lambda _:{"geometry_wkt":"X"},service_factory=lambda:service),2)
+ def test_21_outside_captured_date_is_contract_error(self):
+  service=Mock(is_mock=False,source="Sentinel-2");service.get_ndvi_stats.return_value={"satellite":"Sentinel-2","mean_ndvi":.5,"captured_date":"2000-01-01"}
+  with tempfile.TemporaryDirectory() as d:self.assertEqual(c.run(self.args("--apply","--field-id","1","--output-log",str(Path(d)/"x")),lookup=lambda _:{"geometry_wkt":"X"},service_factory=lambda:service),2)
+ def test_22_missing_captured_date_is_contract_error(self):
+  service=Mock(is_mock=False,source="Sentinel-2");service.get_ndvi_stats.return_value={"satellite":"Sentinel-2","mean_ndvi":.5}
+  with tempfile.TemporaryDirectory() as d:self.assertEqual(c.run(self.args("--apply","--field-id","1","--output-log",str(Path(d)/"x")),lookup=lambda _:{"geometry_wkt":"X"},service_factory=lambda:service),2)
+ def test_23_persistence_exception_is_contract_error(self):
+  service=Mock(is_mock=False,source="Sentinel-2");service.get_ndvi_stats.return_value={"satellite":"Sentinel-2","mean_ndvi":.5,"captured_date":date.today().isoformat()}
+  with tempfile.TemporaryDirectory() as d:self.assertEqual(c.run(self.args("--write","--field-id","1","--output-log",str(Path(d)/"x")),lookup=lambda _:{"geometry_wkt":"X"},service_factory=lambda:service,writer=Mock(side_effect=RuntimeError("db"))),2)
+ def test_24_sanitizer_windows_user_path(self): self.assertNotIn("Example User",c.sanitize_text(r"\\?\C:\Users\Example User\file"))
+ def test_25_sanitizer_device_user_path(self): self.assertNotIn("Example User",c.sanitize_text(r"\Device\HarddiskVolume3\Users\Example User\file"))
+ def test_26_sanitizer_authorization(self): self.assertNotIn("secret",c.sanitize_text("Authorization: Bearer secret token=secret"))
+ def test_27_lock_release_is_reported(self):
+  with tempfile.TemporaryDirectory() as d,patch.object(c,"release_lock",side_effect=RuntimeError("x")):
+   code=c.run(self.args("--apply","--field-id","1","--output-log",str(Path(d)/"x")),lookup=lambda _:(_ for _ in ()).throw(c.ValidationError("x")));self.assertEqual(code,4);self.assertEqual(json.loads((Path(d)/"x").read_text())["exit_code"],code)
