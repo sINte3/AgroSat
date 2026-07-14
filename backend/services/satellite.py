@@ -146,6 +146,7 @@ class SentinelHubService:
 
     STATISTICAL_API_URL = "https://services.sentinel-hub.com/api/v1/statistics"
     TOKEN_URL = "https://services.sentinel-hub.com/auth/realms/main/protocol/openid-connect/token"
+    PROCESS_API_URL = "https://services.sentinel-hub.com/api/v1/process"
 
     source = REAL_SATELLITE_SOURCE
     is_mock = False
@@ -188,6 +189,18 @@ class SentinelHubService:
         self._access_token = token_data["access_token"]
         self._token_expires_at = time.time() + token_data.get("expires_in", 3600)
         return self._access_token
+
+    def get_process_png(self, payload: dict):
+        """Request a Process API PNG using the existing OAuth token path."""
+        token = self._get_access_token()
+        timeout = httpx.Timeout(connect=10.0, read=45.0, write=10.0, pool=10.0)
+        return httpx.post(
+            self.PROCESS_API_URL,
+            json=payload,
+            headers={"Authorization": f"Bearer {token}", "Accept": "image/png"},
+            timeout=timeout,
+            follow_redirects=False,
+        )
 
     def get_ndvi_stats(
         self,

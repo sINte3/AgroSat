@@ -4,6 +4,7 @@ Reduces repeated queries to Supabase (London) from Bukhara.
 """
 import json
 import logging
+import base64
 from typing import Optional, Any
 import redis
 from config import settings
@@ -36,6 +37,30 @@ def cache_set(key: str, value: Any, ttl_seconds: int = 120) -> bool:
         return False
     try:
         _redis.setex(key, ttl_seconds, json.dumps(value, default=str))
+        return True
+    except Exception:
+        return False
+
+
+def cache_get_binary(key: str) -> Optional[bytes]:
+    """Return base64-encoded binary data safely with decode_responses=True Redis."""
+    if not CACHE_AVAILABLE or not _redis:
+        return None
+    try:
+        value = _redis.get(key)
+        if not value:
+            return None
+        return base64.b64decode(value.encode("ascii"), validate=True)
+    except Exception:
+        return None
+
+
+def cache_set_binary(key: str, value: bytes, ttl_seconds: int) -> bool:
+    """Store binary data as ASCII base64 without changing existing JSON cache behavior."""
+    if not CACHE_AVAILABLE or not _redis:
+        return False
+    try:
+        _redis.setex(key, ttl_seconds, base64.b64encode(value).decode("ascii"))
         return True
     except Exception:
         return False
