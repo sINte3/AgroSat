@@ -57,6 +57,68 @@ class CycleTests(unittest.TestCase):
             self.assertEqual(code,0); self.assertTrue(state.exists()); self.assertEqual(json.loads((run_dir/'cycle_summary.json').read_text())['exit_code'],code); self.assertIn('SUCCESS',(run_dir/'field_results.jsonl').read_text())
     def test_lock_release_failure_is_exit_four(self):
         with patch.object(r,'acquire_lock',return_value='x'),patch.object(r,'release_lock',side_effect=RuntimeError('x')): self.assertEqual(r.run(self.args('--field-ids','1'),child_runner=self.child()),4)
+    def test_active_query_is_read_only_and_closed(self):
+        class Result:
+            def all(self): return [(1,), (2,)]
+        class Session:
+            def __init__(self): self.calls=[];self.rolled=False;self.closed=False
+            def execute(self, statement): self.calls.append(str(statement));return Result()
+            def rollback(self): self.rolled=True
+            def close(self): self.closed=True
+        session=Session(); import types
+        with patch.dict(sys.modules, {'database':types.SimpleNamespace(SessionLocal=lambda:session)}): self.assertEqual(r.query_active(),[1,2])
+        self.assertIn('SET TRANSACTION READ ONLY',session.calls[0]);self.assertIn('SELECT',session.calls[1]);self.assertTrue(session.rolled);self.assertTrue(session.closed);self.assertNotIn('COMMIT',' '.join(session.calls).upper())
+    def test_child_schema_wrong_type_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'x';p.write_text(json.dumps({'schema_version':'1'}))
+            with self.assertRaises(r.ValidationError): r.parse_child(p)
+    def test_child_schema_mismatch_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'x';p.write_text(json.dumps({'schema_version':2}))
+            with self.assertRaises(r.ValidationError): r.parse_child(p)
+    def test_child_json_reader_is_bounded_and_rejects_oversize(self):
+        class Stream(io.BytesIO):
+            def read(self,size=-1): self.size=size;return super().read(size)
+        class File:
+            def __init__(self): self.stream=Stream(b'x'*(r.CHILD_JSON_LIMIT+1))
+            def __enter__(self): return self.stream
+            def __exit__(self,*_): return False
+        fake=File()
+        with patch.object(Path,'open',return_value=fake):
+            with self.assertRaises(r.ValidationError): r.read_child_json_bounded(Path('offline'))
+        self.assertEqual(fake.stream.size,r.CHILD_JSON_LIMIT+1)
+    def test_timeout_skips_child_parser_and_retries_to_success(self):
+        calls=[]
+        def runner(cmd,_):
+            calls.append(cmd)
+            if len(calls)==1:return {'exit_code':1,'timed_out':True,'stdout':'','stderr':''}
+            return self.child()(cmd,_)
+        with patch.object(r,'parse_child',wraps=r.parse_child) as parser:
+            code=self.execute_run(self.args('--field-ids','1','--max-attempts','2'),child_runner=runner,sleeper=lambda _:None)
+        self.assertEqual(code,0);self.assertEqual(parser.call_count,1)
+    def test_timeout_exhaustion_is_ordinary_failure(self):
+        def runner(_cmd,_): return {'exit_code':1,'timed_out':True,'stdout':'','stderr':''}
+        with tempfile.TemporaryDirectory() as d:
+            state=Path(d)/'state.json';code=self.execute_run(self.args('--apply','--all-active-fields','--batch-size','2','--max-attempts','2','--state-file',str(state),'--output-dir',d),field_query=lambda:[1,2],child_runner=runner,sleeper=lambda _:None)
+            summary=json.loads(next(Path(d).glob('cycle_*/cycle_summary.json')).read_text())
+        self.assertEqual(code,1);self.assertEqual(summary['timeout_count'],4);self.assertEqual(summary['failed_field_ids'],[1,2]);self.assertEqual(summary['retry_queue_after'],[1,2])
+    def test_lock_release_failure_restores_persisted_state_and_summary(self):
+        with tempfile.TemporaryDirectory() as d:
+            state=Path(d)/'state.json'
+            with patch.object(r,'acquire_lock',return_value='offline'),patch.object(r,'release_lock',side_effect=RuntimeError('offline')):
+                code=r.run(self.args('--apply','--all-active-fields','--batch-size','2','--state-file',str(state),'--output-dir',d),field_query=lambda:[1,2],child_runner=self.child())
+            summary=json.loads(next(Path(d).glob('cycle_*/cycle_summary.json')).read_text())
+            self.assertEqual(code,4);self.assertEqual(summary['exit_code'],code);self.assertFalse(summary['state_advanced']);self.assertEqual(json.loads(state.read_text()),r.state_default())
+    def test_restore_failure_is_diagnosed_and_remains_nonzero(self):
+        with tempfile.TemporaryDirectory() as d:
+            state=Path(d)/'state.json'; original=r.atomic_json
+            def flaky(path,data):
+                if Path(path)==state and Path(path).exists(): raise OSError('restore offline')
+                return original(path,data)
+            with patch.object(r,'atomic_json',side_effect=flaky),patch.object(r,'acquire_lock',return_value='offline'),patch.object(r,'release_lock',side_effect=RuntimeError('offline')):
+                code=r.run(self.args('--apply','--all-active-fields','--batch-size','2','--state-file',str(state),'--output-dir',d),field_query=lambda:[1,2],child_runner=self.child())
+            summary=json.loads(next(Path(d).glob('cycle_*/cycle_summary.json')).read_text())
+        self.assertEqual(code,4);self.assertTrue(summary['state_advanced']);self.assertIn('state restore failed',' '.join(summary['diagnostics']));self.assertEqual(summary['exit_code'],code)
 
 
 def _case(name, action):

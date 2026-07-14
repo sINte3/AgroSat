@@ -65,3 +65,27 @@ class CollectNdviTests(unittest.TestCase):
  def test_27_lock_release_is_reported(self):
   with tempfile.TemporaryDirectory() as d,patch.object(c,"release_lock",side_effect=RuntimeError("x")):
    code=c.run(self.args("--apply","--field-id","1","--output-log",str(Path(d)/"x")),lookup=lambda _:(_ for _ in ()).throw(c.ValidationError("x")));self.assertEqual(code,4);self.assertEqual(json.loads((Path(d)/"x").read_text())["exit_code"],code)
+ def test_28_field_lookup_is_read_only_and_closed(self):
+  class Result:
+   def mappings(self): return self
+   def first(self): return {"id":1,"geometry_wkt":"X"}
+  class Session:
+   def __init__(self): self.calls=[];self.rollback_called=False;self.closed=False
+   def execute(self, statement, *values): self.calls.append(str(statement));return Result()
+   def rollback(self): self.rollback_called=True
+   def close(self): self.closed=True
+  session=Session()
+  import types
+  with patch.dict(sys.modules,{"database":types.SimpleNamespace(SessionLocal=lambda:session)}):
+   self.assertEqual(c.field_lookup(1)["id"],1)
+  self.assertIn("SET TRANSACTION READ ONLY",session.calls[0]);self.assertIn("SELECT",session.calls[1]);self.assertTrue(session.rollback_called);self.assertTrue(session.closed);self.assertNotIn("COMMIT"," ".join(session.calls).upper())
+ def test_29_field_lookup_rolls_back_when_select_fails(self):
+  class Session:
+   def __init__(self): self.rollback_called=False;self.closed=False
+   def execute(self, statement, *values):
+    if "SELECT" in str(statement): raise RuntimeError("offline")
+   def rollback(self): self.rollback_called=True
+   def close(self): self.closed=True
+  session=Session();import types
+  with patch.dict(sys.modules,{"database":types.SimpleNamespace(SessionLocal=lambda:session)}),self.assertRaises(RuntimeError): c.field_lookup(1)
+  self.assertTrue(session.rollback_called);self.assertTrue(session.closed)

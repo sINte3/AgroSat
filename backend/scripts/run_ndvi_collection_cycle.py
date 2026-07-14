@@ -26,6 +26,7 @@ MAX_DRY = 25
 MAX_ATTEMPTS = 5
 MAX_BACKOFF = 300
 CAPTURE = 16384
+CHILD_JSON_LIMIT = 65536
 DEFAULT_LOCK = Path(tempfile.gettempdir()) / "agrosat_ndvi_cycle.lock"
 MUTEX = "Global\\AgroSatNdviCollectionCycle_v1"
 
@@ -192,8 +193,10 @@ def query_active() -> list[int]:
     from sqlalchemy import text
     session = SessionLocal()
     try:
+        session.execute(text("SET TRANSACTION READ ONLY"))
         return [int(row[0]) for row in session.execute(text("SELECT id FROM fields WHERE is_active=true AND geometry IS NOT NULL AND NOT ST_IsEmpty(geometry) ORDER BY id ASC")).all()]
     finally:
+        session.rollback()
         session.close()
 
 
@@ -241,14 +244,27 @@ def execute(cmd: list[str], timeout: int) -> dict[str, Any]:
                 pass
 
 
-def parse_child(path: Path, *, field_id: int | None = None, current_mode: str | None = None, start: date | None = None, end: date | None = None, process_exit: int | None = None) -> dict[str, Any]:
+def read_child_json_bounded(path: Path) -> Any:
+    """Read a bounded UTF-8 child summary; invalid UTF-8 is rejected."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        with path.open("rb") as handle:
+            raw = handle.read(CHILD_JSON_LIMIT + 1)
+        if len(raw) > CHILD_JSON_LIMIT:
+            raise ValidationError("child JSON summary exceeds size limit")
+        return json.loads(raw.decode("utf-8", errors="strict"))
     except Exception as exc:
+        if isinstance(exc, ValidationError):
+            raise
         raise ValidationError("child JSON summary is missing or malformed") from exc
+
+
+def parse_child(path: Path, *, field_id: int | None = None, current_mode: str | None = None, start: date | None = None, end: date | None = None, process_exit: int | None = None) -> dict[str, Any]:
+    data = read_child_json_bounded(path)
     required = {"schema_version", "field_id", "mode", "date_from", "date_to", "exit_code", "inserted_count", "skipped_existing_count", "quality_blocked_count", "error_count"}
     if not isinstance(data, dict) or not required.issubset(data):
         raise ValidationError("child JSON summary is malformed")
+    if type(data["schema_version"]) is not int or data["schema_version"] != SCHEMA:
+        raise ValidationError("child schema_version is invalid")
     if type(data["exit_code"]) is not int or data["exit_code"] not in (0, 1, 2, 3, 4):
         raise ValidationError("child exit_code is invalid")
     for key in ("inserted_count", "skipped_existing_count", "quality_blocked_count", "error_count"):
@@ -371,6 +387,11 @@ def run(args: argparse.Namespace, *, field_query: Callable[[], list[int]] = quer
                     outcome = sanitize(child_runner(command(field_id, start, end, current_mode, log, Path(str(lock_override or DEFAULT_LOCK) + f".child.{field_id}")), args.field_timeout_seconds))
                     totals["attempts"] += 1
                     totals["timeouts"] += int(bool(outcome.get("timed_out")))
+                    if outcome.get("timed_out"):
+                        results.append({"field_id": field_id, "attempt": attempt, **outcome, "classification": "TIMEOUT_RETRYABLE"})
+                        if attempt < args.max_attempts:
+                            sleeper(min(args.retry_base_seconds * 2 ** (attempt - 1), MAX_BACKOFF))
+                        continue
                     process_exit = outcome.get("exit_code")
                     if type(process_exit) is not int or process_exit not in (0, 1, 2, 3, 4):
                         raise ValidationError("child process exit code is invalid")
@@ -430,40 +451,58 @@ def run(args: argparse.Namespace, *, field_query: Callable[[], list[int]] = quer
         summary["diagnostics"].append(sanitize_text(exc))
     finally:
         summary.update(finished_at=now(), duration_seconds=round(time.monotonic() - started, 3))
+
+        def write_summary() -> None:
+            summary["exit_code"] = final_exit_code
+            summary["state_advanced"] = state_advanced
+            atomic_json(run_dir / "cycle_summary.json", summary)
+
+        def restore_prior_state() -> bool:
+            nonlocal state_advanced
+            if not state_advanced or state_file is None:
+                return True
+            try:
+                atomic_json(state_file, state)
+                state_advanced = False
+                summary["state_advanced"] = False
+                return True
+            except Exception as exc:
+                summary["diagnostics"].append(sanitize_text(f"state restore failed: {exc}"))
+                return False
+
         if run_dir is not None:
             try:
                 atomic_jsonl(run_dir / "field_results.jsonl", results)
-                summary["exit_code"] = final_exit_code
-                atomic_json(run_dir / "cycle_summary.json", summary)
+                # This provisional evidence is deliberately written before state changes.
+                write_summary()
                 if next_state is not None and final_exit_code in (0, 1):
                     atomic_json(state_file, next_state)
                     state_advanced = True
                     summary["state_advanced"] = True
-                summary["exit_code"] = final_exit_code
-                atomic_json(run_dir / "cycle_summary.json", summary)
             except Exception as exc:
                 final_exit_code = 2
                 summary["diagnostics"].append(sanitize_text(exc))
-                if state_advanced and state_file is not None:
-                    try:
-                        atomic_json(state_file, state)
-                        state_advanced = False
-                        summary["state_advanced"] = False
-                    except Exception as restore_exc:
-                        summary["diagnostics"].append(sanitize_text(f"state restore failed: {restore_exc}"))
+                restore_prior_state()
         if lock is not None:
             try:
                 release_lock(lock)
             except Exception as exc:
                 final_exit_code = 4
                 summary["diagnostics"].append(sanitize_text(f"lock release failed: {exc}"))
+        if final_exit_code in (2, 4):
+            restore_prior_state()
         if run_dir is not None:
-            summary["exit_code"] = final_exit_code
             try:
-                atomic_json(run_dir / "cycle_summary.json", summary)
-            except Exception:
+                write_summary()
+            except Exception as exc:
                 final_exit_code = 2
-                summary["exit_code"] = final_exit_code
+                summary["diagnostics"].append(sanitize_text(f"final summary write failed: {exc}"))
+                restore_prior_state()
+                # Exactly one recovery attempt: the final durable summary must match return.
+                try:
+                    write_summary()
+                except Exception as recovery_exc:
+                    summary["diagnostics"].append(sanitize_text(f"error summary write failed: {recovery_exc}"))
     return final_exit_code
 
 

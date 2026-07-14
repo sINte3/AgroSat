@@ -119,11 +119,13 @@ def field_lookup(field_id: int) -> dict[str, Any]:
 
     session = SessionLocal()
     try:
+        session.execute(text("SET TRANSACTION READ ONLY"))
         row = session.execute(text("SELECT id, ST_AsText(geometry) AS geometry_wkt FROM fields WHERE id=:id AND is_active=true AND geometry IS NOT NULL AND NOT ST_IsEmpty(geometry)"), {"id": field_id}).mappings().first()
         if not row:
             raise ValidationError("field is missing, inactive, or has empty geometry")
         return dict(row)
     finally:
+        session.rollback()
         session.close()
 
 
