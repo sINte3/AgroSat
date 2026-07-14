@@ -39,6 +39,10 @@ class RasterServiceTests(unittest.TestCase):
         geometry = {"type": "Polygon", "coordinates": [[[64.1, 39.5], [64.2, 39.5], [64.2, 39.6], [64.1, 39.5]]]}
         payload = self.service.build_process_payload(geometry, date(2026, 7, 14), 512)
         data = payload["input"]["data"][0]
+        self.assertEqual(set(payload.keys()), {"input", "output", "evalscript"})
+        self.assertEqual(payload["evalscript"], self.service.EVALSCRIPT)
+        self.assertNotIn("evalscript", payload["input"])
+        self.assertNotIn("evalscript", data)
         self.assertEqual(data["type"], "sentinel-2-l2a")
         self.assertEqual(data["dataFilter"]["timeRange"]["from"], "2026-07-14T00:00:00Z")
         self.assertEqual(data["dataFilter"]["timeRange"]["to"], "2026-07-15T00:00:00Z")
@@ -46,7 +50,7 @@ class RasterServiceTests(unittest.TestCase):
         self.assertEqual(payload["output"]["width"], 512)
         self.assertEqual(payload["output"]["height"], 512)
         self.assertEqual(payload["output"]["responses"][0]["format"]["type"], "image/png")
-        script = data["evalscript"]
+        script = payload["evalscript"]
         self.assertIn("dataMask", script)
         self.assertIn("SCL", script)
         self.assertIn("[0, 1, 3, 8, 9, 10, 11]", script)
@@ -109,6 +113,21 @@ class RasterServiceTests(unittest.TestCase):
             with self.assertRaises(self.service.RasterUpstreamTimeout):
                 self.service.request_process_png(geometry, date(2026, 7, 14), 256)
 
+    def test_legacy_json_cache_set_success_and_exception_are_offline(self):
+        from services import cache
+
+        redis_client = Mock()
+        with patch.object(cache, "CACHE_AVAILABLE", True), patch.object(cache, "_redis", redis_client):
+            self.assertTrue(cache.cache_set("legacy-key", {"captured": date(2026, 7, 14)}, 60))
+        redis_client.setex.assert_called_once_with(
+            "legacy-key", 60, json.dumps({"captured": date(2026, 7, 14)}, default=str)
+        )
+
+        redis_client = Mock()
+        redis_client.setex.side_effect = RuntimeError("offline Redis failure")
+        with patch.object(cache, "CACHE_AVAILABLE", True), patch.object(cache, "_redis", redis_client):
+            self.assertFalse(cache.cache_set("legacy-key", {"value": 1}, 60))
+
 
 class RouterTests(unittest.TestCase):
     def setUp(self):
@@ -119,6 +138,16 @@ class RouterTests(unittest.TestCase):
             field_id=16, observation_date=date(2026, 7, 14), satellite="Sentinel-2",
             geometry={"type": "Polygon", "coordinates": []}, west=64.1, south=39.5, east=64.2, north=39.6,
         )
+
+    def assert_accepted_row_sql_contract(self, sql):
+        self.assertIn("n.mean_ndvi IS NOT NULL", sql)
+        self.assertIn("n.satellite = 'Sentinel-2'", sql)
+        self.assertIn("n.satellite AS satellite", sql)
+        self.assertNotIn("COALESCE", sql.upper())
+        self.assertNotIn("n.mean_ndvi >", sql)
+        self.assertNotIn("n.mean_ndvi >=", sql)
+        self.assertNotIn("n.mean_ndvi <=", sql)
+        self.assertNotIn("cloud_cover_pct", sql)
 
     def test_metadata_selects_accepted_latest_and_no_dml_or_lazy_loading(self):
         db = Mock()
@@ -132,6 +161,7 @@ class RouterTests(unittest.TestCase):
         self.assertIn("ORDER BY n.captured_date DESC", sql)
         self.assertIn("LIMIT 1", sql)
         self.assertIn("Box2D(f.geometry)", sql)
+        self.assert_accepted_row_sql_contract(sql)
         db.commit.assert_not_called(); db.flush.assert_not_called(); db.add.assert_not_called()
 
     def test_tenant_scope_hides_foreign_field_and_global_role_has_no_tenant_clause(self):
@@ -154,6 +184,7 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(response.headers["X-AgroSat-Raster-Cache"], "MISS")
         sql = str(db.execute.call_args.args[0])
         self.assertIn("n.captured_date = :observation_date", sql)
+        self.assert_accepted_row_sql_contract(sql)
         self.assertNotIn("INSERT", sql.upper())
         self.assertNotIn("UPDATE", sql.upper())
         self.assertNotIn("DELETE", sql.upper())

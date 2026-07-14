@@ -51,7 +51,7 @@ def _scoped_observation_row(db: Session, field_id: int, current_user: User, date
     row = db.execute(text(f"""
         SELECT f.id AS field_id,
                n.captured_date AS observation_date,
-               COALESCE(n.satellite, 'Sentinel-2') AS satellite,
+               n.satellite AS satellite,
                {geometry_select}
                ST_XMin(Box2D(f.geometry)) AS west,
                ST_YMin(Box2D(f.geometry)) AS south,
@@ -61,9 +61,8 @@ def _scoped_observation_row(db: Session, field_id: int, current_user: User, date
         JOIN ndvi_records n ON n.field_id = f.id
         WHERE f.id = :field_id{tenant_clause}
           AND {date_clause}
-          AND COALESCE(n.satellite, 'Sentinel-2') = 'Sentinel-2'
-          AND n.mean_ndvi > 0 AND n.mean_ndvi <= 1
-          AND (n.cloud_cover_pct IS NULL OR n.cloud_cover_pct <= 30)
+          AND n.mean_ndvi IS NOT NULL
+          AND n.satellite = 'Sentinel-2'
         ORDER BY n.captured_date DESC
         LIMIT 1
     """), params).fetchone()
@@ -128,7 +127,7 @@ async def get_raster_image(
         media_type="image/png",
         headers={
             "X-AgroSat-Observation-Date": row.observation_date.isoformat(),
-            "X-AgroSat-Satellite": "Sentinel-2",
+            "X-AgroSat-Satellite": row.satellite,
             "X-AgroSat-Raster-Cache": cache_state,
             "Cache-Control": "private, max-age=86400",
         },

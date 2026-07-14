@@ -101,10 +101,10 @@ def build_process_payload(geometry: dict[str, Any], observation_date: date, size
                 "type": "sentinel-2-l2a",
                 "dataFilter": {"timeRange": {"from": f"{observation_date.isoformat()}T00:00:00Z", "to": f"{next_day.isoformat()}T00:00:00Z"}},
                 "processing": {"harmonizeValues": True},
-                "evalscript": EVALSCRIPT,
             }],
         },
         "output": {"width": size, "height": size, "responses": [{"identifier": "default", "format": {"type": "image/png"}}]},
+        "evalscript": EVALSCRIPT,
     }
 
 
