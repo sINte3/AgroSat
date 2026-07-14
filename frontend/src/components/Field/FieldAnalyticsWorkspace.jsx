@@ -15,6 +15,7 @@ import INDEX_METADATA, {
   FRESHNESS_STATUS_CONFIG,
 } from '../../config/indexMetadata';
 import FieldAnalyticsCharts from './FieldAnalyticsCharts';
+import AgronomicInterpretationPanel from './AgronomicInterpretationPanel';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -808,6 +809,8 @@ export default function FieldAnalyticsWorkspace({ fieldId, onBack }) {
           loading={loading && !dataLoaded}
           hasAnyData={hasAnyData}
         />
+
+        <AgronomicInterpretationPanel fieldId={fieldId} />
 
         {/* D. Single-index deep dive */}
         {deepDiveIndex && (
