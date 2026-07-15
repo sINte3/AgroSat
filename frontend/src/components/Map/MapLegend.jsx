@@ -96,7 +96,7 @@ const LEGEND_DISCLAIMERS = {
   ndre: 'Цвет показывает относительное значение NDRE, не является диагнозом урожайности.',
 };
 
-export default function MapLegend({ activeColorMode, onClose }) {
+export default function MapLegend({ activeColorMode, rasterMetadata, onClose }) {
   const legend = MODE_LEGENDS[activeColorMode] || MODE_LEGENDS.crop;
   const disclaimer = LEGEND_DISCLAIMERS[activeColorMode];
 
@@ -155,6 +155,21 @@ export default function MapLegend({ activeColorMode, onClose }) {
       {disclaimer && (
         <div className="border-t border-gray-100 px-3 py-2 text-[10px] text-gray-400 leading-relaxed">
           {disclaimer}
+        </div>
+      )}
+
+      {rasterMetadata?.legend?.length > 0 && (
+        <div className="border-t border-gray-100 px-3 py-2">
+          <div className="mb-1.5 text-xs font-semibold text-gray-700">Пиксельный NDVI</div>
+          <div className="space-y-1.5">
+            {rasterMetadata.legend.map((item, index) => (
+              <div key={`${item.label}-${index}`} className="flex items-center gap-2">
+                <span className="h-3 w-5 flex-shrink-0 rounded-sm" style={{ backgroundColor: item.color }} />
+                <span className="min-w-0 text-gray-600">{item.from ?? '−∞'}–{item.to}: {item.label}</span>
+              </div>
+            ))}
+          </div>
+          {rasterMetadata.limitations?.map((limitation, index) => <p key={index} className="mt-1 text-[10px] leading-relaxed text-gray-400">{limitation}</p>)}
         </div>
       )}
     </div>

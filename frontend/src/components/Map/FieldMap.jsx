@@ -6,6 +6,7 @@ import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css';
 import apiClient from '../../api/client';
 import MapLegend from './MapLegend';
 import MapHoverPopup from './MapHoverPopup';
+import NDVIRasterControl from './NDVIRasterControl';
 import { getIndexColor } from '../../config/indexMetadata';
 
 // ─── Constants ──────────────────────────────────────────────────────────────────
@@ -322,6 +323,8 @@ export default function FieldMap({
   const [showLegend, setShowLegend] = useState(false);
   const [hoveredFeature, setHoveredFeature] = useState(null);
   const [hoverPosition, setHoverPosition] = useState(null);
+  const [mapInstance, setMapInstance] = useState(null);
+  const [rasterMetadata, setRasterMetadata] = useState(null);
   const mapContainerRef = useRef(null);
   const mapRef = useRef(null);
   const drawRef = useRef(null);
@@ -501,6 +504,7 @@ export default function FieldMap({
 
       const m = mapRef.current;
       if (!m || !isMountedRef.current) return;
+      setMapInstance(m);
 
       abortControllerRef.current = new AbortController();
 
@@ -957,6 +961,12 @@ export default function FieldMap({
     <div className="relative w-full h-full">
       <div ref={mapContainerRef} className="w-full h-full" />
 
+      <NDVIRasterControl
+        map={mapInstance}
+        fieldId={selectedFieldId}
+        onMetadataChange={setRasterMetadata}
+      />
+
       {/* Style switcher */}
       <div className="absolute top-3 right-3 z-10 flex gap-1">
         {Object.entries(MAP_STYLES).map(([key, s]) => (
@@ -1004,6 +1014,7 @@ export default function FieldMap({
         {showLegend && (
           <MapLegend
             activeColorMode={activeColorMode}
+            rasterMetadata={rasterMetadata}
             onClose={() => setShowLegend(false)}
           />
         )}
