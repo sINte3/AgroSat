@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import AttentionFilters from '../components/Attention/AttentionFilters';
 import AttentionSummaryCards from '../components/Attention/AttentionSummaryCards';
 import AttentionFieldCard from '../components/Attention/AttentionFieldCard';
+import InspectionCreateModal from '../components/Inspections/InspectionCreateModal';
 
 function localDate() {
   const now = new Date();
@@ -39,6 +40,7 @@ export default function FieldAttentionPage({ onNavigate, enterprises }) {
   const [error, setError] = useState(null);
   const [cropOptions, setCropOptions] = useState([]);
   const [refreshGeneration, setRefreshGeneration] = useState(0);
+  const [selectedAttention, setSelectedAttention] = useState(null);
   const controllerRef = useRef(null);
   const requestGenerationRef = useRef(0);
   const mountedRef = useRef(false);
@@ -104,6 +106,12 @@ export default function FieldAttentionPage({ onNavigate, enterprises }) {
     setApplied(defaults);
   }, []);
   const handleRefresh = useCallback(() => setRefreshGeneration((value) => value + 1), []);
+  const createSource = useMemo(() => {
+    if (!selectedAttention) return null;
+    const field = selectedAttention.field || {}, spectral = selectedAttention.spectral_summary || {};
+    const codes = Array.from(new Set((Array.isArray(selectedAttention.reasons) ? selectedAttention.reasons : []).map(reason => typeof reason?.code === 'string' ? reason.code : '').filter(code => /^[a-z][a-z0-9_]{1,63}$/.test(code))));
+    return { source:'attention_queue', field_id:field.id, field_name:field.name, enterprise_id:field.enterprise_id, enterprise_name:field.enterprise_name, priority:selectedAttention.priority, attention_score:selectedAttention.attention_score, observation_date:spectral.latest_observation_date, reason_codes:codes, recommended_checks:Array.isArray(selectedAttention.recommended_checks)?selectedAttention.recommended_checks:[] };
+  }, [selectedAttention]);
 
   return (
     <div className="h-full overflow-y-auto overflow-x-hidden p-4 pt-16 md:p-6 md:pt-16">
@@ -126,10 +134,11 @@ export default function FieldAttentionPage({ onNavigate, enterprises }) {
 
           {state === 'ready' && items.length > 0 && <div className="space-y-4">{items.map((item) => {
             const id = Number(item?.field?.id);
-            return Number.isSafeInteger(id) && id > 0 ? <AttentionFieldCard key={id} item={item} onNavigate={onNavigate} /> : null;
+            return Number.isSafeInteger(id) && id > 0 ? <AttentionFieldCard key={id} item={item} onNavigate={onNavigate} canCreateInspection={user?.role !== 'viewer'} onCreateInspection={setSelectedAttention} /> : null;
           })}</div>}
         </div>
       </div>
+      {createSource && <InspectionCreateModal source={createSource} user={user} assignees={[]} onClose={() => setSelectedAttention(null)} onSuccess={(inspection) => { setSelectedAttention(null); if (inspection?.id) onNavigate('field-inspection-detail', inspection.id); }} />}
     </div>
   );
 }

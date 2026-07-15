@@ -3,6 +3,7 @@ const NAV_ITEMS = [
   { key: 'dashboard',   label: 'Обзор',          icon: DashboardIcon },
   { key: 'alerts',      label: 'Алерты',         icon: BellIcon },
   { key: 'field-attention', label: 'Требуют внимания', icon: AttentionIcon },
+  { key: 'field-inspections', label: 'Осмотры полей', icon: InspectionIcon },
   { key: 'enterprises', label: 'Предприятия',    icon: BuildingIcon },
   { key: 'reports',     label: 'Отчёты',         icon: ReportIcon },
 ];
@@ -96,6 +97,10 @@ function AttentionIcon({ className }) {
       <path d="M12 3l9 16H3L12 3zM12 9v4m0 3h.01" />
     </svg>
   );
+}
+
+function InspectionIcon({ className }) {
+  return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className={className}><path d="M9 5h6m-6 4h6m-6 4h3M7 3h10a2 2 0 012 2v14H5V5a2 2 0 012-2zM9 19v2m6-2v2"/></svg>;
 }
 
 function ReportIcon({ className }) {

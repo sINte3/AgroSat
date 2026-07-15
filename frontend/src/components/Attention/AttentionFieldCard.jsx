@@ -28,7 +28,7 @@ function stringList(value) {
   return Array.isArray(value) ? value.filter((item) => typeof item === 'string' && item.trim()).map((item) => item.trim()) : [];
 }
 
-export default function AttentionFieldCard({ item, onNavigate }) {
+export default function AttentionFieldCard({ item, onNavigate, onCreateInspection, canCreateInspection }) {
   const field = item?.field && typeof item.field === 'object' ? item.field : {};
   const fieldId = Number(field.id);
   const validFieldId = Number.isSafeInteger(fieldId) && fieldId > 0;
@@ -85,6 +85,7 @@ export default function AttentionFieldCard({ item, onNavigate }) {
       </div>
 
       <div className="flex flex-wrap gap-2 border-t border-agro-border pt-3">
+        {canCreateInspection && validFieldId && <button type="button" onClick={() => onCreateInspection(item)} className="btn-primary rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-agro-accent">Назначить осмотр</button>}
         <button type="button" disabled={!validFieldId} onClick={() => validFieldId && onNavigate('field-detail', fieldId)} className="btn-primary rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-agro-accent disabled:opacity-50">Открыть поле</button>
         <button type="button" disabled={!validFieldId} onClick={() => validFieldId && onNavigate('field-analytics', fieldId)} className="btn-secondary rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-agro-accent disabled:opacity-50">Аналитика</button>
       </div>

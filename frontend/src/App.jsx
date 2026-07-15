@@ -13,6 +13,7 @@ import EnterprisesPage from './pages/EnterprisesPage';
 import EnterpriseDetailPage from './pages/EnterpriseDetailPage';
 import ReportsPage from './pages/ReportsPage';
 import FieldAttentionPage from './pages/FieldAttentionPage';
+import FieldInspectionsPage from './pages/FieldInspectionsPage';
 import LoginPage from './pages/LoginPage';
 import UnauthorizedPage from './pages/UnauthorizedPage';
 import { getCachedEnterprises } from './api/client';
@@ -22,6 +23,7 @@ const PATH_VIEW_MAP = {
   '/fields': 'fields',
   '/alerts': 'alerts',
   '/attention': 'field-attention',
+  '/inspections': 'field-inspections',
   '/enterprises': 'enterprises',
   '/reports': 'reports',
   '/login': 'login',
@@ -37,6 +39,11 @@ const parsePositiveId = (value) => {
 };
 
 const resolvePathname = (pathname) => {
+  const inspectionMatch = pathname.match(/^\/inspections\/(\d+)$/);
+  if (inspectionMatch) {
+    const selectedInspectionId = parsePositiveId(inspectionMatch[1]);
+    if (selectedInspectionId) return { view: 'field-inspection-detail', selectedInspectionId, selectedFieldId: null, selectedEnterpriseId: null };
+  }
   const analyticsMatch = pathname.match(/^\/fields\/(\d+)\/analytics$/);
   if (analyticsMatch) {
     const selectedFieldId = parsePositiveId(analyticsMatch[1]);
@@ -65,6 +72,7 @@ const resolvePathname = (pathname) => {
     view: PATH_VIEW_MAP[pathname] || 'dashboard',
     selectedFieldId: null,
     selectedEnterpriseId: null,
+    selectedInspectionId: null,
   };
 };
 
@@ -75,6 +83,7 @@ function AppLayout() {
   const [view, setView] = useState(initialRoute.view);
   const [selectedFieldId, setSelectedFieldId] = useState(initialRoute.selectedFieldId);
   const [selectedEnterpriseId, setSelectedEnterpriseId] = useState(initialRoute.selectedEnterpriseId);
+  const [selectedInspectionId, setSelectedInspectionId] = useState(initialRoute.selectedInspectionId);
   const [enterprises, setEnterprises] = useState([]);
 
   useEffect(() => {
@@ -89,6 +98,7 @@ function AppLayout() {
     setView(route.view);
     setSelectedFieldId(route.selectedFieldId);
     setSelectedEnterpriseId(route.selectedEnterpriseId);
+    setSelectedInspectionId(route.selectedInspectionId);
   }, [location.pathname]);
 
   const handleFieldClick = useCallback((fieldId) => {
@@ -150,6 +160,12 @@ function AppLayout() {
         setSelectedEnterpriseId(null);
         navigate('/attention');
         break;
+      case 'field-inspections':
+        setView('field-inspections'); setSelectedInspectionId(null); navigate('/inspections'); break;
+      case 'field-inspection-detail': {
+        const validInspectionId = parsePositiveId(id); if (!validInspectionId) break;
+        setView('field-inspection-detail'); setSelectedInspectionId(validInspectionId); navigate(`/inspections/${validInspectionId}`); break;
+      }
       case 'enterprises':
         setView('enterprises');
         setSelectedFieldId(null);
@@ -189,6 +205,8 @@ function AppLayout() {
       case 'field-analytics': return { title: 'Аналитика поля', subtitle: selectedFieldId ? `#${selectedFieldId}` : null };
       case 'alerts':      return { title: 'Предупреждения' };
       case 'field-attention': return { title: 'Требуют внимания' };
+      case 'field-inspections': return { title: 'Осмотры полей' };
+      case 'field-inspection-detail': return { title: 'Осмотры полей', subtitle: selectedInspectionId ? `Осмотр #${selectedInspectionId}` : null };
       case 'reports':     return { title: 'Отчёты' };
       case 'enterprise-detail': return { title: 'Предприятие', subtitle: selectedEnterpriseId ? `#${selectedEnterpriseId}` : null };
       default:            return { title: 'AgroSat' };
@@ -196,6 +214,7 @@ function AppLayout() {
   };
 
   const activeView = view === 'field-detail' || view === 'field-analytics' ? 'fields'
+    : view === 'field-inspection-detail' ? 'field-inspections'
     : view === 'enterprise-detail' ? 'enterprises'
     : view === 'reports' ? 'reports'
     : view;
@@ -222,6 +241,9 @@ function AppLayout() {
         return <AlertsPage onFieldClick={handleFieldClick} onFieldHighlight={handleFieldHighlight} />;
       case 'field-attention':
         return <FieldAttentionPage onNavigate={handleNavigate} enterprises={enterprises} />;
+      case 'field-inspections':
+      case 'field-inspection-detail':
+        return <FieldInspectionsPage onNavigate={handleNavigate} enterprises={enterprises} selectedInspectionId={selectedInspectionId} />;
       case 'enterprises':
         return <EnterprisesPage onNavigate={handleNavigate} />;
       case 'enterprise-detail':
