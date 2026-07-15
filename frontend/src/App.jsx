@@ -12,6 +12,7 @@ import AlertsPage from './pages/AlertsPage';
 import EnterprisesPage from './pages/EnterprisesPage';
 import EnterpriseDetailPage from './pages/EnterpriseDetailPage';
 import ReportsPage from './pages/ReportsPage';
+import FieldAttentionPage from './pages/FieldAttentionPage';
 import LoginPage from './pages/LoginPage';
 import UnauthorizedPage from './pages/UnauthorizedPage';
 import { getCachedEnterprises } from './api/client';
@@ -20,6 +21,7 @@ const PATH_VIEW_MAP = {
   '/dashboard': 'dashboard',
   '/fields': 'fields',
   '/alerts': 'alerts',
+  '/attention': 'field-attention',
   '/enterprises': 'enterprises',
   '/reports': 'reports',
   '/login': 'login',
@@ -78,7 +80,7 @@ function AppLayout() {
   useEffect(() => {
     getCachedEnterprises()
       .then(setEnterprises)
-      .catch(() => console.error('Ошибка загрузки предприятий'));
+      .catch(() => setEnterprises([]));
   }, []);
 
   // Sync view and detail selection from URL changes (back/forward, manual entry, refresh).
@@ -142,6 +144,12 @@ function AppLayout() {
         setSelectedFieldId(null);
         navigate('/alerts', { replace: true });
         break;
+      case 'field-attention':
+        setView('field-attention');
+        setSelectedFieldId(null);
+        setSelectedEnterpriseId(null);
+        navigate('/attention');
+        break;
       case 'enterprises':
         setView('enterprises');
         setSelectedFieldId(null);
@@ -180,6 +188,7 @@ function AppLayout() {
       case 'field-detail': return { title: 'Поле', subtitle: selectedFieldId ? `#${selectedFieldId}` : null };
       case 'field-analytics': return { title: 'Аналитика поля', subtitle: selectedFieldId ? `#${selectedFieldId}` : null };
       case 'alerts':      return { title: 'Предупреждения' };
+      case 'field-attention': return { title: 'Требуют внимания' };
       case 'reports':     return { title: 'Отчёты' };
       case 'enterprise-detail': return { title: 'Предприятие', subtitle: selectedEnterpriseId ? `#${selectedEnterpriseId}` : null };
       default:            return { title: 'AgroSat' };
@@ -211,6 +220,8 @@ function AppLayout() {
         );
       case 'alerts':
         return <AlertsPage onFieldClick={handleFieldClick} onFieldHighlight={handleFieldHighlight} />;
+      case 'field-attention':
+        return <FieldAttentionPage onNavigate={handleNavigate} enterprises={enterprises} />;
       case 'enterprises':
         return <EnterprisesPage onNavigate={handleNavigate} />;
       case 'enterprise-detail':

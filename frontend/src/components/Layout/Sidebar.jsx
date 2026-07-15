@@ -2,6 +2,7 @@ const NAV_ITEMS = [
   { key: 'fields',      label: 'Карта',         icon: MapIcon },
   { key: 'dashboard',   label: 'Обзор',          icon: DashboardIcon },
   { key: 'alerts',      label: 'Алерты',         icon: BellIcon },
+  { key: 'field-attention', label: 'Требуют внимания', icon: AttentionIcon },
   { key: 'enterprises', label: 'Предприятия',    icon: BuildingIcon },
   { key: 'reports',     label: 'Отчёты',         icon: ReportIcon },
 ];
@@ -30,6 +31,8 @@ export default function Sidebar({ activeView, onNavigate, enterprises = [] }) {
             <div key={item.key} className="relative group">
               <button
                 onClick={() => onNavigate(item.key)}
+                aria-label={item.label}
+                title={item.label}
                 className={`w-10 h-10 flex items-center justify-center rounded-lg transition-colors
                   ${active ? 'text-agro-accent' : 'text-agro-muted hover:text-agro-text hover:bg-agro-hover'}`}
               >
@@ -83,6 +86,14 @@ function BellIcon({ className }) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className={className}>
       <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 01-3.46 0"/>
+    </svg>
+  );
+}
+
+function AttentionIcon({ className }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className={className}>
+      <path d="M12 3l9 16H3L12 3zM12 9v4m0 3h.01" />
     </svg>
   );
 }
