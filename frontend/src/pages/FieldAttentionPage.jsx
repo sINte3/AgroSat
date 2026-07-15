@@ -5,6 +5,7 @@ import AttentionFilters from '../components/Attention/AttentionFilters';
 import AttentionSummaryCards from '../components/Attention/AttentionSummaryCards';
 import AttentionFieldCard from '../components/Attention/AttentionFieldCard';
 import InspectionCreateModal from '../components/Inspections/InspectionCreateModal';
+import { canWriteInspections, normalizeRole } from '../components/Inspections/inspectionPresentation';
 
 function localDate() {
   const now = new Date();
@@ -32,7 +33,9 @@ function classifyError(error) {
 
 export default function FieldAttentionPage({ onNavigate, enterprises }) {
   const { user } = useAuth();
-  const isGlobalRole = user?.role === 'admin' || user?.role === 'manager';
+  const role = normalizeRole(user?.role);
+  const isGlobalRole = role === 'admin' || role === 'manager';
+  const canCreateInspection = canWriteInspections(role);
   const [draft, setDraft] = useState(defaultFilters);
   const [applied, setApplied] = useState(defaultFilters);
   const [data, setData] = useState(null);
@@ -108,9 +111,28 @@ export default function FieldAttentionPage({ onNavigate, enterprises }) {
   const handleRefresh = useCallback(() => setRefreshGeneration((value) => value + 1), []);
   const createSource = useMemo(() => {
     if (!selectedAttention) return null;
-    const field = selectedAttention.field || {}, spectral = selectedAttention.spectral_summary || {};
-    const codes = Array.from(new Set((Array.isArray(selectedAttention.reasons) ? selectedAttention.reasons : []).map(reason => typeof reason?.code === 'string' ? reason.code : '').filter(code => /^[a-z][a-z0-9_]{1,63}$/.test(code))));
-    return { source:'attention_queue', field_id:field.id, field_name:field.name, enterprise_id:field.enterprise_id, enterprise_name:field.enterprise_name, priority:selectedAttention.priority, attention_score:selectedAttention.attention_score, observation_date:spectral.latest_observation_date, reason_codes:codes, recommended_checks:Array.isArray(selectedAttention.recommended_checks)?selectedAttention.recommended_checks:[] };
+    const field = selectedAttention.field || {};
+    const spectral = selectedAttention.spectral_summary || {};
+    const reasons = Array.isArray(selectedAttention.reasons) ? selectedAttention.reasons : [];
+    const codes = Array.from(new Set(
+      reasons
+        .map((reason) => typeof reason?.code === 'string' ? reason.code : '')
+        .filter((code) => /^[a-z][a-z0-9_]{1,63}$/.test(code)),
+    ));
+    return {
+      source: 'attention_queue',
+      field_id: field.id,
+      field_name: field.name,
+      enterprise_id: field.enterprise_id,
+      enterprise_name: field.enterprise_name,
+      priority: selectedAttention.priority,
+      attention_score: selectedAttention.attention_score,
+      observation_date: spectral.latest_observation_date,
+      reason_codes: codes,
+      recommended_checks: Array.isArray(selectedAttention.recommended_checks)
+        ? selectedAttention.recommended_checks
+        : [],
+    };
   }, [selectedAttention]);
 
   return (
@@ -134,7 +156,7 @@ export default function FieldAttentionPage({ onNavigate, enterprises }) {
 
           {state === 'ready' && items.length > 0 && <div className="space-y-4">{items.map((item) => {
             const id = Number(item?.field?.id);
-            return Number.isSafeInteger(id) && id > 0 ? <AttentionFieldCard key={id} item={item} onNavigate={onNavigate} canCreateInspection={user?.role !== 'viewer'} onCreateInspection={setSelectedAttention} /> : null;
+            return Number.isSafeInteger(id) && id > 0 ? <AttentionFieldCard key={id} item={item} onNavigate={onNavigate} canCreateInspection={canCreateInspection} onCreateInspection={setSelectedAttention} /> : null;
           })}</div>}
         </div>
       </div>
