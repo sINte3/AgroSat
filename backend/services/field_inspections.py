@@ -82,12 +82,11 @@ def _reload(db, inspection_id, user):
 
 
 def create(db, user, payload, key):
-    role = _role(user, True); _due(payload.due_date)
-    assigned = user.id if role == "agronomist" and payload.assigned_to_id is None else payload.assigned_to_id
-    if role == "agronomist" and assigned != user.id: raise HTTPException(403, "Agronomists may assign only themselves")
-    fp = fingerprint(user.id, payload, assigned)
-    db.begin()
     try:
+        role = _role(user, True); _due(payload.due_date)
+        assigned = user.id if role == "agronomist" and payload.assigned_to_id is None else payload.assigned_to_id
+        if role == "agronomist" and assigned != user.id: raise HTTPException(403, "Agronomists may assign only themselves")
+        fp = fingerprint(user.id, payload, assigned)
         existing = _one(db.execute(text("SELECT id, request_fingerprint FROM field_inspections WHERE client_request_id=:key"), {"key": key}))
         if existing:
             if existing["request_fingerprint"] != fp: raise HTTPException(409, "Idempotency key payload conflict")
@@ -109,9 +108,12 @@ def create(db, user, payload, key):
         db.rollback()
         same = _one(db.execute(text("SELECT id, request_fingerprint FROM field_inspections WHERE client_request_id=:key"), {"key": key}))
         if same:
-            if same["request_fingerprint"] != fp: raise HTTPException(409, "Idempotency key payload conflict")
+            if same["request_fingerprint"] != fp:
+                db.rollback(); raise HTTPException(409, "Idempotency key payload conflict")
+            db.rollback()
             return False, _reload(db, same["id"], user)
         active = _one(db.execute(text("SELECT id FROM field_inspections WHERE field_id=:fid AND status IN ('pending','in_progress')"), {"fid": payload.field_id}))
+        db.rollback()
         if active: raise HTTPException(409, f"Active inspection exists: {active['id']}")
         raise HTTPException(409, "Concurrent inspection conflict")
     except HTTPException:
@@ -133,34 +135,44 @@ def list_items(db, user, filters):
     if filters.get("due_before"): conditions.append("i.due_date <= :due_before"); params["due_before"]=filters["due_before"]
     if filters.get("created_after"): conditions.append("i.created_at >= :created_after"); params["created_after"]=filters["created_after"]
     where = " AND ".join(conditions) or "true"
-    windows = ", count(*) OVER() AS total_count, count(*) FILTER (WHERE i.status='pending') OVER() AS pending_count, count(*) FILTER (WHERE i.status='in_progress') OVER() AS in_progress_count, count(*) FILTER (WHERE i.status='completed') OVER() AS completed_count, count(*) FILTER (WHERE i.status='cancelled') OVER() AS cancelled_count, count(*) FILTER (WHERE i.status IN ('pending','in_progress') AND i.due_date < :today) OVER() AS overdue_count"
-    sql = ITEM_SELECT.replace("\nFROM field_inspections", windows + "\nFROM field_inspections") + " WHERE " + where + " ORDER BY CASE i.status WHEN 'in_progress' THEN 1 WHEN 'pending' THEN 2 WHEN 'completed' THEN 3 ELSE 4 END, CASE WHEN i.status IN ('pending','in_progress') AND i.due_date < :today THEN 0 ELSE 1 END, i.due_date ASC NULLS LAST, i.created_at DESC, i.id DESC LIMIT :lim OFFSET :off"
-    rows = _all(db.execute(text(sql), params)); zero={k:0 for k in ("total","pending","in_progress","completed","cancelled","overdue")}
-    if rows: zero={"total":rows[0]["total_count"],"pending":rows[0]["pending_count"],"in_progress":rows[0]["in_progress_count"],"completed":rows[0]["completed_count"],"cancelled":rows[0]["cancelled_count"],"overdue":rows[0]["overdue_count"]}
-    return {"generated_at": datetime.now(TASHKENT), "summary": zero, "limit":filters["limit"], "offset":filters["offset"], "items":[_item(r) for r in rows]}
+    order = "CASE status WHEN 'in_progress' THEN 1 WHEN 'pending' THEN 2 WHEN 'completed' THEN 3 ELSE 4 END, CASE WHEN status IN ('pending','in_progress') AND due_date < :today THEN 0 ELSE 1 END, due_date ASC NULLS LAST, created_at DESC, id DESC"
+    sql = f"""WITH filtered AS ({ITEM_SELECT} WHERE {where}),
+summary AS (SELECT count(*) AS total_count,
+ count(*) FILTER (WHERE status='pending') AS pending_count,
+ count(*) FILTER (WHERE status='in_progress') AS in_progress_count,
+ count(*) FILTER (WHERE status='completed') AS completed_count,
+ count(*) FILTER (WHERE status='cancelled') AS cancelled_count,
+ count(*) FILTER (WHERE status IN ('pending','in_progress') AND due_date < :today) AS overdue_count
+ FROM filtered),
+paged AS (SELECT * FROM filtered ORDER BY {order} LIMIT :lim OFFSET :off)
+SELECT paged.*, summary.* FROM summary LEFT JOIN paged ON true
+ORDER BY {order}"""
+    rows = _all(db.execute(text(sql), params))
+    summary_row = rows[0]
+    summary = {"total":summary_row["total_count"],"pending":summary_row["pending_count"],"in_progress":summary_row["in_progress_count"],"completed":summary_row["completed_count"],"cancelled":summary_row["cancelled_count"],"overdue":summary_row["overdue_count"]}
+    return {"generated_at": datetime.now(TASHKENT), "summary": summary, "limit":filters["limit"], "offset":filters["offset"], "items":[_item(r) for r in rows if r["id"] is not None]}
 
 
 def get(db, user, inspection_id): return _reload(db, inspection_id, user)
 
 
 def update(db, user, inspection_id, payload):
-    role=_role(user, True); _due(payload.due_date) if "due_date" in payload.model_fields_set else None
-    if role == "agronomist" and "assigned_to_id" in payload.model_fields_set: raise HTTPException(403, "Agronomists cannot reassign")
-    db.begin()
-    tenant=" AND enterprise_id=:eid" if role in TENANT_ROLES else ""; owner=" AND assigned_to_id=:uid" if role=="agronomist" else ""
-    data={"id":inspection_id,"ver":payload.expected_version,"uid":user.id};
-    if tenant: data["eid"]=user.enterprise_id
-    if "assigned_to_id" in payload.model_fields_set:
-        base=_one(db.execute(text("SELECT enterprise_id FROM field_inspections WHERE id=:id" + tenant), data))
-        if not base: db.rollback(); raise HTTPException(404,"Inspection not found")
-        _assignee(db,payload.assigned_to_id,base["enterprise_id"])
-    fields=[]
-    for k in ("assigned_to_id","title","instructions","due_date"):
-        if k in payload.model_fields_set: fields.append(f"{k}=:{k}"); data[k]=getattr(payload,k)
     try:
+        role=_role(user, True); _due(payload.due_date) if "due_date" in payload.model_fields_set else None
+        if role == "agronomist" and "assigned_to_id" in payload.model_fields_set: raise HTTPException(403, "Agronomists cannot reassign")
+        tenant=" AND enterprise_id=:eid" if role in TENANT_ROLES else ""; owner=" AND assigned_to_id=:uid" if role=="agronomist" else ""
+        data={"id":inspection_id,"ver":payload.expected_version,"uid":user.id}
+        if tenant: data["eid"]=user.enterprise_id
+        if "assigned_to_id" in payload.model_fields_set:
+            base=_one(db.execute(text("SELECT enterprise_id FROM field_inspections WHERE id=:id" + tenant), data))
+            if not base: raise HTTPException(404,"Inspection not found")
+            _assignee(db,payload.assigned_to_id,base["enterprise_id"])
+        fields=[]
+        for k in ("assigned_to_id","title","instructions","due_date"):
+            if k in payload.model_fields_set: fields.append(f"{k}=:{k}"); data[k]=getattr(payload,k)
         result=db.execute(text("UPDATE field_inspections SET "+", ".join(fields)+", version=version+1, updated_at=now() WHERE id=:id AND version=:ver AND status IN ('pending','in_progress')"+tenant+owner+" RETURNING id"),data)
         row=_one(result)
-        if not row: db.rollback(); _classify(db,user,inspection_id,payload.expected_version,"assigned")
+        if not row: _classify(db,user,inspection_id,payload.expected_version,"assigned")
         db.commit(); return _reload(db,inspection_id,user)
     except HTTPException: db.rollback(); raise
     except Exception: db.rollback(); raise
@@ -180,21 +192,19 @@ def _classify(db,user,i,version,ownership=None):
 
 
 def transition(db,user,i,payload,action):
-    role=_role(user,True); expected={"start":"pending","complete":"in_progress","cancel":None}[action]
-    db.begin()
-    if action=="cancel": state="status IN ('pending','in_progress')"; target="cancelled"; extra="cancellation_reason=:value, cancelled_at=now()"
-    elif action=="complete": state="status='in_progress'"; target="completed"; extra="completion_summary=:value, completed_at=now()"
-    else: state="status='pending'"; target="in_progress"; extra="started_at=now()"
-    tenant=" AND enterprise_id=:eid" if role in TENANT_ROLES else ""; ownership=""
-    if role=="agronomist":
-        ownership=" AND assigned_to_id=:uid" if action!="cancel" else " AND created_by_id=:uid AND status='pending'"
-    if action=="start": ownership += " AND assigned_to_id IS NOT NULL"
-    params={"id":i,"ver":payload.expected_version,"uid":user.id,"value":getattr(payload,"completion_summary",getattr(payload,"cancellation_reason",None))}
-    if tenant: params["eid"]=user.enterprise_id
     try:
+        role=_role(user,True)
+        if action=="cancel": state="status IN ('pending','in_progress')"; target="cancelled"; extra="cancellation_reason=:value, cancelled_at=now()"
+        elif action=="complete": state="status='in_progress'"; target="completed"; extra="completion_summary=:value, completed_at=now()"
+        else: state="status='pending'"; target="in_progress"; extra="started_at=now()"
+        tenant=" AND enterprise_id=:eid" if role in TENANT_ROLES else ""; ownership=""
+        if role=="agronomist":
+            ownership=" AND assigned_to_id=:uid" if action!="cancel" else " AND created_by_id=:uid AND status='pending'"
+        if action=="start": ownership += " AND assigned_to_id IS NOT NULL"
+        params={"id":i,"ver":payload.expected_version,"uid":user.id,"value":getattr(payload,"completion_summary",getattr(payload,"cancellation_reason",None))}
+        if tenant: params["eid"]=user.enterprise_id
         row=_one(db.execute(text(f"UPDATE field_inspections SET status='{target}', {extra}, version=version+1, updated_at=now() WHERE id=:id AND version=:ver AND {state}{tenant}{ownership} RETURNING id"),params))
         if not row:
-            db.rollback()
             ownership = "created" if action == "cancel" else "assigned"
             _classify(db,user,i,payload.expected_version,ownership)
         db.commit(); return _reload(db,i,user)
