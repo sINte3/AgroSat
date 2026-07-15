@@ -80,6 +80,7 @@ from api.satellite_data_quality import router as satellite_data_quality_router
 from api.agronomic_risk import router as agronomic_risk_router
 from api.agronomic_interpretation import router as agronomic_interpretation_router
 from api.ndvi_raster import router as ndvi_raster_router
+from api.field_attention import router as field_attention_router
 
 app.include_router(auth_router)
 app.include_router(enterprises_router)
@@ -96,6 +97,7 @@ app.include_router(satellite_data_quality_router)
 app.include_router(agronomic_risk_router)
 app.include_router(agronomic_interpretation_router)
 app.include_router(ndvi_raster_router)
+app.include_router(field_attention_router)
 
 
 # ─── Базовые эндпоинты ───────────────────────────────────────────────────────
