@@ -59,40 +59,63 @@ const ESRI_LABELS_SOURCE = {
 const GLYPHS = 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf';
 
 const MAP_STYLES = {
-  satellite: {
-    label: 'Спутник',
-    style: {
-      version: 8,
-      glyphs: GLYPHS,
-      sources: { satellite: ESRI_SATELLITE_SOURCE },
-      layers: [{ id: 'satellite', type: 'raster', source: 'satellite' }],
-    },
-  },
-  osm: {
-    label: 'Карта',
-    style: {
-      version: 8,
-      glyphs: GLYPHS,
-      sources: { osm: OSM_SOURCE },
-      layers: [{ id: 'osm', type: 'raster', source: 'osm' }],
-    },
-  },
-  hybrid: {
-    label: 'Гибрид',
-    style: {
-      version: 8,
-      glyphs: GLYPHS,
-      sources: {
-        satellite: ESRI_SATELLITE_SOURCE,
-        labels: ESRI_LABELS_SOURCE,
-      },
-      layers: [
-        { id: 'satellite', type: 'raster', source: 'satellite' },
-        { id: 'labels', type: 'raster', source: 'labels' },
-      ],
-    },
-  },
+  satellite: { label: 'Спутник' },
+  osm: { label: 'Карта' },
+  hybrid: { label: 'Гибрид' },
 };
+
+const BASE_MAP_SOURCE_IDS = {
+  satellite: 'agrosat-base-satellite-source',
+  osm: 'agrosat-base-osm-source',
+  hybridLabels: 'agrosat-base-hybrid-labels-source',
+};
+
+const BASE_MAP_LAYER_IDS = {
+  satellite: 'agrosat-base-satellite',
+  osm: 'agrosat-base-osm',
+  hybridLabels: 'agrosat-base-hybrid-labels',
+};
+
+const BASE_MAP_VISIBILITY = {
+  satellite: { satellite: 'visible', osm: 'none', hybridLabels: 'none' },
+  osm: { satellite: 'none', osm: 'visible', hybridLabels: 'none' },
+  hybrid: { satellite: 'visible', osm: 'none', hybridLabels: 'visible' },
+};
+
+const COMPOSITE_MAP_STYLE = {
+  version: 8,
+  glyphs: GLYPHS,
+  sources: {
+    [BASE_MAP_SOURCE_IDS.satellite]: ESRI_SATELLITE_SOURCE,
+    [BASE_MAP_SOURCE_IDS.osm]: OSM_SOURCE,
+    [BASE_MAP_SOURCE_IDS.hybridLabels]: ESRI_LABELS_SOURCE,
+  },
+  layers: [
+    { id: BASE_MAP_LAYER_IDS.satellite, type: 'raster', source: BASE_MAP_SOURCE_IDS.satellite, layout: { visibility: 'visible' }, paint: { 'raster-fade-duration': 0 } },
+    { id: BASE_MAP_LAYER_IDS.osm, type: 'raster', source: BASE_MAP_SOURCE_IDS.osm, layout: { visibility: 'none' }, paint: { 'raster-fade-duration': 0 } },
+    { id: BASE_MAP_LAYER_IDS.hybridLabels, type: 'raster', source: BASE_MAP_SOURCE_IDS.hybridLabels, layout: { visibility: 'none' }, paint: { 'raster-fade-duration': 0 } },
+  ],
+};
+
+function getBaseMapVisibility(styleKey) {
+  return BASE_MAP_VISIBILITY[styleKey] || null;
+}
+
+function applyBaseMapVisibility(map, styleKey) {
+  const visibility = getBaseMapVisibility(styleKey);
+  if (!map || !visibility) return false;
+  const entries = Object.entries(BASE_MAP_LAYER_IDS);
+  if (entries.some(([, layerId]) => !map.getLayer(layerId))) return false;
+  if (entries.every(([key, layerId]) =>
+    (map.getLayoutProperty(layerId, 'visibility') || 'visible') === visibility[key]
+  )) return true;
+  try {
+    entries.forEach(([key, layerId]) => map.setLayoutProperty(layerId, 'visibility', visibility[key]));
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
 
 const DEFAULT_CENTER = [64.4286, 39.7747];
 const DEFAULT_ZOOM = 7;
@@ -337,7 +360,6 @@ export default function FieldMap({
   const geojsonRef = useRef(null);
   const enrichedGeoJsonRef = useRef(null);
   const styleSwitchColorModeRef = useRef('crop');
-  const styleLoadHandlerRef = useRef(null);
   const coverageMapRef = useRef(null);
   const selectedMapModeRef = useRef('crop');
   const selectedFieldIdRef = useRef(selectedFieldId);
@@ -345,6 +367,9 @@ export default function FieldMap({
   const hoveredFeatureIdRef = useRef(null);
   const cameraMovingRef = useRef(false);
   const labelVisibilityBeforeMoveRef = useRef(null);
+  const fieldFillVisibilityBeforeMoveRef = useRef(null);
+  const fieldBorderWidthBeforeMoveRef = useRef(null);
+  const fieldBorderOpacityBeforeMoveRef = useRef(null);
   const fitBoundsTimeoutRef = useRef(null);
 
   const callbacksRef = useRef({
@@ -381,21 +406,53 @@ export default function FieldMap({
     }
   };
 
-  const suspendLabelsForMove = (map) => {
-    if (labelVisibilityBeforeMoveRef.current !== null || !map?.getLayer('fields-label')) return;
-    try {
-      labelVisibilityBeforeMoveRef.current = map.getLayoutProperty('fields-label', 'visibility') || 'visible';
-      map.setLayoutProperty('fields-label', 'visibility', 'none');
-    } catch (_) {
-      labelVisibilityBeforeMoveRef.current = null;
+  const suspendFieldRenderingForMove = (map) => {
+    if (map?.getLayer('fields-fill')) {
+      try {
+        fieldFillVisibilityBeforeMoveRef.current = map.getLayoutProperty('fields-fill', 'visibility') || 'visible';
+        map.setLayoutProperty('fields-fill', 'visibility', 'none');
+      } catch (_) { fieldFillVisibilityBeforeMoveRef.current = null; }
+    }
+    if (map?.getLayer('fields-label')) {
+      try {
+        labelVisibilityBeforeMoveRef.current = map.getLayoutProperty('fields-label', 'visibility') || 'visible';
+        map.setLayoutProperty('fields-label', 'visibility', 'none');
+      } catch (_) { labelVisibilityBeforeMoveRef.current = null; }
+    }
+    if (map?.getLayer('fields-border')) {
+      try {
+        fieldBorderWidthBeforeMoveRef.current = map.getPaintProperty('fields-border', 'line-width');
+        fieldBorderOpacityBeforeMoveRef.current = map.getPaintProperty('fields-border', 'line-opacity');
+        map.setPaintProperty('fields-border', 'line-width', 1);
+        map.setPaintProperty('fields-border', 'line-opacity', 0.75);
+      } catch (_) {
+        fieldBorderWidthBeforeMoveRef.current = null;
+        fieldBorderOpacityBeforeMoveRef.current = null;
+      }
     }
   };
 
-  const restoreLabelsAfterMove = (map) => {
-    const visibility = labelVisibilityBeforeMoveRef.current;
+  const restoreFieldRenderingAfterMove = (map) => {
+    const fillVisibility = fieldFillVisibilityBeforeMoveRef.current;
+    const labelVisibility = labelVisibilityBeforeMoveRef.current;
+    const borderWidth = fieldBorderWidthBeforeMoveRef.current;
+    const borderOpacity = fieldBorderOpacityBeforeMoveRef.current;
+    fieldFillVisibilityBeforeMoveRef.current = null;
     labelVisibilityBeforeMoveRef.current = null;
-    if (visibility === null || !map?.getLayer('fields-label')) return;
-    try { map.setLayoutProperty('fields-label', 'visibility', visibility); } catch (_) {}
+    fieldBorderWidthBeforeMoveRef.current = null;
+    fieldBorderOpacityBeforeMoveRef.current = null;
+    if (fillVisibility !== null && map?.getLayer('fields-fill')) {
+      try { map.setLayoutProperty('fields-fill', 'visibility', fillVisibility); } catch (_) {}
+    }
+    if (labelVisibility !== null && map?.getLayer('fields-label')) {
+      try { map.setLayoutProperty('fields-label', 'visibility', labelVisibility); } catch (_) {}
+    }
+    if (borderWidth !== null && map?.getLayer('fields-border')) {
+      try { map.setPaintProperty('fields-border', 'line-width', borderWidth); } catch (_) {}
+    }
+    if (borderOpacity !== null && map?.getLayer('fields-border')) {
+      try { map.setPaintProperty('fields-border', 'line-opacity', borderOpacity); } catch (_) {}
+    }
   };
 
   useEffect(() => {
@@ -535,7 +592,7 @@ export default function FieldMap({
 
     const map = new maplibregl.Map({
       container: mapContainerRef.current,
-      style: MAP_STYLES.satellite.style,
+      style: COMPOSITE_MAP_STYLE,
       center: DEFAULT_CENTER,
       zoom: DEFAULT_ZOOM,
       minZoom: MAP_MIN_ZOOM,
@@ -752,11 +809,11 @@ export default function FieldMap({
           hoverFrameRef.current = null;
           clearHoverState(m);
           m.getCanvas().style.cursor = '';
-          suspendLabelsForMove(m);
+          suspendFieldRenderingForMove(m);
         };
         handlersRef.current.onMoveEnd = () => {
           cameraMovingRef.current = false;
-          restoreLabelsAfterMove(m);
+          restoreFieldRenderingAfterMove(m);
         };
         m.on('movestart', handlersRef.current.onMoveStart);
         m.on('moveend', handlersRef.current.onMoveEnd);
@@ -787,11 +844,6 @@ export default function FieldMap({
         abortControllerRef.current = null;
       }
 
-      if (styleLoadHandlerRef.current && mapRef.current) {
-        mapRef.current.off('style.load', styleLoadHandlerRef.current);
-        styleLoadHandlerRef.current = null;
-      }
-
       disableDrawMode();
 
       if (mapRef.current) {
@@ -804,6 +856,9 @@ export default function FieldMap({
         clearHoverState(mapRef.current, false);
         cameraMovingRef.current = false;
         labelVisibilityBeforeMoveRef.current = null;
+        fieldFillVisibilityBeforeMoveRef.current = null;
+        fieldBorderWidthBeforeMoveRef.current = null;
+        fieldBorderOpacityBeforeMoveRef.current = null;
         LAYERS.forEach((layer) => {
           if (mapRef.current.getLayer(layer)) {
             if (layer === 'fields-fill' && handlersRef.current.onMouseMove) {
@@ -851,124 +906,7 @@ export default function FieldMap({
     const m = mapRef.current;
     if (!m) return;
     if (styleKey === activeStyle) return;
-    setActiveStyle(styleKey);
-
-    if (styleLoadHandlerRef.current) {
-      m.off('style.load', styleLoadHandlerRef.current);
-      styleLoadHandlerRef.current = null;
-    }
-
-    styleLoadHandlerRef.current = () => {
-      styleLoadHandlerRef.current = null;
-      if (!isMountedRef.current || !mapRef.current) return;
-      if (geojsonRef.current) {
-        rehydrateLayers(geojsonRef.current);
-      }
-    };
-
-    m.once('style.load', styleLoadHandlerRef.current);
-    m.setStyle(MAP_STYLES[styleKey].style);
-  };
-
-  // ─── Rehydrate layers after style switch ────────────────────────────────────
-  const rehydrateLayers = (data) => {
-    const m = mapRef.current;
-    if (!m || !isMountedRef.current) return;
-
-    const mode = styleSwitchColorModeRef.current;
-
-    // Re-enrich and recolor with current coverage + mode
-    const enriched = enrichGeoJsonFeatures(data, coverageMapRef.current);
-    enrichedGeoJsonRef.current = enriched;
-    const colored = addModeColorToFeatures(enriched, mode);
-    hoveredFeatureIdRef.current = null;
-    if (isMountedRef.current) {
-      setHoveredFeature(null);
-      setHoverPosition(null);
-    }
-
-    if (!m.getSource('fields-source')) {
-      m.addSource('fields-source', {
-        type: 'geojson',
-        data: colored,
-        promoteId: 'id',
-      });
-    } else {
-      m.getSource('fields-source').setData(colored);
-    }
-
-    if (!m.getLayer('fields-fill')) {
-      m.addLayer({
-        id: 'fields-fill',
-        type: 'fill',
-        source: 'fields-source',
-        paint: {
-          'fill-color': ['get', 'map_mode_color'],
-          'fill-opacity': 0.4,
-        },
-      });
-    } else {
-      m.setPaintProperty('fields-fill', 'fill-color', ['get', 'map_mode_color']);
-    }
-
-    if (!m.getLayer('fields-border')) {
-      m.addLayer({
-        id: 'fields-border',
-        type: 'line',
-        source: 'fields-source',
-        paint: {
-          'line-color': '#ffffff',
-          'line-width': [
-            'case',
-            ['==', ['get', 'id'], selectedFieldIdRef.current || -1], 3,
-            ['boolean', ['feature-state', 'agrosatHover'], false], 3,
-            2,
-          ],
-          'line-opacity': 1,
-        },
-      });
-    }
-
-    if (!m.getLayer('fields-label')) {
-      m.addLayer({
-        id: 'fields-label',
-        type: 'symbol',
-        source: 'fields-source',
-        minzoom: 12,
-        layout: {
-          'text-field': ['to-string', ['coalesce', ['get', 'name'], ['get', 'code'], ['get', 'id']]],
-          'text-font': ['Noto Sans Regular'],
-          'text-size': ['interpolate', ['linear'], ['zoom'], 12, 10, 16, 14, 22, 18],
-          'text-offset': [0, -0.5],
-          'text-anchor': 'center',
-          'visibility': cameraMovingRef.current ? 'none' : 'visible',
-        },
-        paint: {
-          'text-color': '#ffffff',
-          'text-halo-color': '#000000',
-          'text-halo-width': 1.5,
-          'text-halo-blur': 1,
-        },
-      });
-    }
-
-    // Re-attach interaction handlers after style switch
-    LAYERS.forEach((layer) => {
-      if (m.getLayer(layer)) {
-        if (layer === 'fields-fill' && handlersRef.current.onMouseMove) {
-          m.off('mousemove', layer, handlersRef.current.onMouseMove);
-          m.on('mousemove', layer, handlersRef.current.onMouseMove);
-        }
-        if (layer === 'fields-fill' && handlersRef.current.onMouseLeave) {
-          m.off('mouseleave', layer, handlersRef.current.onMouseLeave);
-          m.on('mouseleave', layer, handlersRef.current.onMouseLeave);
-        }
-        if (handlersRef.current.onFieldClick) {
-          m.off('click', layer, handlersRef.current.onFieldClick);
-          m.on('click', layer, handlersRef.current.onFieldClick);
-        }
-      }
-    });
+    if (applyBaseMapVisibility(m, styleKey)) setActiveStyle(styleKey);
   };
 
   // ─── Switch color mode ─────────────────────────────────────────────────────
