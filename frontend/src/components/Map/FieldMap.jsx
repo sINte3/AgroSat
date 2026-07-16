@@ -241,6 +241,7 @@ function addModeColorToFeatures(geojson, mode) {
       const props = f.properties || {};
       return {
         ...f,
+        id: Number(props.id),
         properties: {
           ...props,
           map_mode_color: computeModeColor(props, mode),
@@ -339,6 +340,12 @@ export default function FieldMap({
   const styleLoadHandlerRef = useRef(null);
   const coverageMapRef = useRef(null);
   const selectedMapModeRef = useRef('crop');
+  const selectedFieldIdRef = useRef(selectedFieldId);
+  const hoverFrameRef = useRef(null);
+  const hoveredFeatureIdRef = useRef(null);
+  const cameraMovingRef = useRef(false);
+  const labelVisibilityBeforeMoveRef = useRef(null);
+  const fitBoundsTimeoutRef = useRef(null);
 
   const callbacksRef = useRef({
     onFieldSelect,
@@ -353,9 +360,43 @@ export default function FieldMap({
     onMouseLeave: null,
     onFieldClick: null,
     onDrawCreate: null,
+    onMoveStart: null,
+    onMoveEnd: null,
   });
 
-  const hoverTimeoutRef = useRef(null);
+  const clearHoverState = (map, clearTooltip = true) => {
+    const hoveredId = hoveredFeatureIdRef.current;
+    if (hoveredId !== null && map?.getSource('fields-source')) {
+      try {
+        map.setFeatureState(
+          { source: 'fields-source', id: hoveredId },
+          { agrosatHover: false }
+        );
+      } catch (_) {}
+    }
+    hoveredFeatureIdRef.current = null;
+    if (clearTooltip && isMountedRef.current) {
+      setHoveredFeature(null);
+      setHoverPosition(null);
+    }
+  };
+
+  const suspendLabelsForMove = (map) => {
+    if (labelVisibilityBeforeMoveRef.current !== null || !map?.getLayer('fields-label')) return;
+    try {
+      labelVisibilityBeforeMoveRef.current = map.getLayoutProperty('fields-label', 'visibility') || 'visible';
+      map.setLayoutProperty('fields-label', 'visibility', 'none');
+    } catch (_) {
+      labelVisibilityBeforeMoveRef.current = null;
+    }
+  };
+
+  const restoreLabelsAfterMove = (map) => {
+    const visibility = labelVisibilityBeforeMoveRef.current;
+    labelVisibilityBeforeMoveRef.current = null;
+    if (visibility === null || !map?.getLayer('fields-label')) return;
+    try { map.setLayoutProperty('fields-label', 'visibility', visibility); } catch (_) {}
+  };
 
   useEffect(() => {
     callbacksRef.current = {
@@ -379,6 +420,10 @@ export default function FieldMap({
   useEffect(() => {
     selectedMapModeRef.current = selectedMapMode || 'crop';
   }, [selectedMapMode]);
+
+  useEffect(() => {
+    selectedFieldIdRef.current = selectedFieldId;
+  }, [selectedFieldId]);
 
   // ─── Disable draw mode ──────────────────────────────────────────────────────
   const disableDrawMode = () => {
@@ -567,7 +612,12 @@ export default function FieldMap({
             source: 'fields-source',
             paint: {
               'line-color': '#ffffff',
-              'line-width': 2,
+              'line-width': [
+                'case',
+                ['==', ['get', 'id'], selectedFieldIdRef.current || -1], 3,
+                ['boolean', ['feature-state', 'agrosatHover'], false], 3,
+                2,
+              ],
               'line-opacity': 1,
             },
           });
@@ -620,7 +670,10 @@ export default function FieldMap({
             }
           }
           if (hasCoords && !bounds.isEmpty()) {
-            setTimeout(() => {
+            if (fitBoundsTimeoutRef.current) clearTimeout(fitBoundsTimeoutRef.current);
+            fitBoundsTimeoutRef.current = setTimeout(() => {
+              fitBoundsTimeoutRef.current = null;
+              if (mapRef.current !== m || !isMountedRef.current || m._removed) return;
               try { m.fitBounds(bounds, { padding: 60, duration: 0, maxZoom: 15 }); } catch (_) {}
             }, 100);
           }
@@ -629,10 +682,10 @@ export default function FieldMap({
         // Interaction handlers
         LAYERS.forEach((layer) => {
           if (m.getLayer(layer)) {
-            if (handlersRef.current.onMouseMove) {
+            if (layer === 'fields-fill' && handlersRef.current.onMouseMove) {
               m.off('mousemove', layer, handlersRef.current.onMouseMove);
             }
-            if (handlersRef.current.onMouseLeave) {
+            if (layer === 'fields-fill' && handlersRef.current.onMouseLeave) {
               m.off('mouseleave', layer, handlersRef.current.onMouseLeave);
             }
             if (handlersRef.current.onFieldClick) {
@@ -642,46 +695,36 @@ export default function FieldMap({
         });
 
         handlersRef.current.onMouseMove = (e) => {
-          if (isDrawingRef.current) return;
-          if (e.features?.length > 0) {
+          if (isDrawingRef.current || cameraMovingRef.current || !e.features?.length) return;
+          const feat = e.features[0];
+          const featureId = Number(feat.id ?? feat.properties?.id);
+          const props = feat.properties || {};
+          const point = { x: e.point.x, y: e.point.y };
+          if (hoverFrameRef.current) cancelAnimationFrame(hoverFrameRef.current);
+          hoverFrameRef.current = requestAnimationFrame(() => {
+            hoverFrameRef.current = null;
+            if (cameraMovingRef.current || !isMountedRef.current || mapRef.current !== m) return;
+            if (!m.getSource('fields-source') || hoveredFeatureIdRef.current === featureId) return;
+            clearHoverState(m, false);
+            try {
+              m.setFeatureState(
+                { source: 'fields-source', id: featureId },
+                { agrosatHover: true }
+              );
+            } catch (_) { return; }
+            hoveredFeatureIdRef.current = featureId;
             m.getCanvas().style.cursor = 'pointer';
-            if (m.getLayer('fields-border')) {
-              m.setPaintProperty('fields-border', 'line-width', [
-                'case',
-                ['==', ['get', 'id'], e.features[0].properties.id],
-                3,
-                2,
-              ]);
-              m.setPaintProperty('fields-border', 'line-opacity', [
-                'case',
-                ['==', ['get', 'id'], e.features[0].properties.id],
-                1,
-                1,
-              ]);
-            }
-
-            // Update hover popup with debounce
-            if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current);
-            hoverTimeoutRef.current = setTimeout(() => {
-              if (!isMountedRef.current) return;
-              const feat = e.features[0];
-              const props = feat.properties || {};
-              setHoveredFeature(props);
-              setHoverPosition({ x: e.point.x, y: e.point.y });
-            }, 50);
-          }
+            setHoveredFeature(props);
+            setHoverPosition(point);
+          });
         };
 
         handlersRef.current.onMouseLeave = () => {
           if (isDrawingRef.current) return;
           m.getCanvas().style.cursor = '';
-          if (m.getLayer('fields-border')) {
-            m.setPaintProperty('fields-border', 'line-width', 2);
-            m.setPaintProperty('fields-border', 'line-opacity', 1);
-          }
-          if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current);
-          setHoveredFeature(null);
-          setHoverPosition(null);
+          if (hoverFrameRef.current) cancelAnimationFrame(hoverFrameRef.current);
+          hoverFrameRef.current = null;
+          clearHoverState(m);
         };
 
         handlersRef.current.onFieldClick = (e) => {
@@ -694,11 +737,29 @@ export default function FieldMap({
 
         LAYERS.forEach((layer) => {
           if (m.getLayer(layer)) {
-            m.on('mousemove', layer, handlersRef.current.onMouseMove);
-            m.on('mouseleave', layer, handlersRef.current.onMouseLeave);
+            if (layer === 'fields-fill') {
+              m.on('mousemove', layer, handlersRef.current.onMouseMove);
+              m.on('mouseleave', layer, handlersRef.current.onMouseLeave);
+            }
             m.on('click', layer, handlersRef.current.onFieldClick);
           }
         });
+
+        handlersRef.current.onMoveStart = () => {
+          if (cameraMovingRef.current) return;
+          cameraMovingRef.current = true;
+          if (hoverFrameRef.current) cancelAnimationFrame(hoverFrameRef.current);
+          hoverFrameRef.current = null;
+          clearHoverState(m);
+          m.getCanvas().style.cursor = '';
+          suspendLabelsForMove(m);
+        };
+        handlersRef.current.onMoveEnd = () => {
+          cameraMovingRef.current = false;
+          restoreLabelsAfterMove(m);
+        };
+        m.on('movestart', handlersRef.current.onMoveStart);
+        m.on('moveend', handlersRef.current.onMoveEnd);
 
         callbacksRef.current.onMapReady?.(m);
       } catch (err) {
@@ -716,7 +777,10 @@ export default function FieldMap({
       isMountedRef.current = false;
       sessionPurgedRef.current = true;
       window.removeEventListener('agrosat:logout', handleLogout);
-      if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current);
+      if (hoverFrameRef.current) cancelAnimationFrame(hoverFrameRef.current);
+      hoverFrameRef.current = null;
+      if (fitBoundsTimeoutRef.current) clearTimeout(fitBoundsTimeoutRef.current);
+      fitBoundsTimeoutRef.current = null;
 
       if (abortControllerRef.current) {
         abortControllerRef.current.abort();
@@ -731,12 +795,21 @@ export default function FieldMap({
       disableDrawMode();
 
       if (mapRef.current) {
+        if (handlersRef.current.onMoveStart) {
+          mapRef.current.off('movestart', handlersRef.current.onMoveStart);
+        }
+        if (handlersRef.current.onMoveEnd) {
+          mapRef.current.off('moveend', handlersRef.current.onMoveEnd);
+        }
+        clearHoverState(mapRef.current, false);
+        cameraMovingRef.current = false;
+        labelVisibilityBeforeMoveRef.current = null;
         LAYERS.forEach((layer) => {
           if (mapRef.current.getLayer(layer)) {
-            if (handlersRef.current.onMouseMove) {
+            if (layer === 'fields-fill' && handlersRef.current.onMouseMove) {
               mapRef.current.off('mousemove', layer, handlersRef.current.onMouseMove);
             }
-            if (handlersRef.current.onMouseLeave) {
+            if (layer === 'fields-fill' && handlersRef.current.onMouseLeave) {
               mapRef.current.off('mouseleave', layer, handlersRef.current.onMouseLeave);
             }
             if (handlersRef.current.onFieldClick) {
@@ -759,8 +832,8 @@ export default function FieldMap({
       if (m.getLayer('fields-border')) {
         m.setPaintProperty('fields-border', 'line-width', [
           'case',
-          ['==', ['get', 'id'], selectedFieldId || -1],
-          3,
+          ['==', ['get', 'id'], selectedFieldId || -1], 3,
+          ['boolean', ['feature-state', 'agrosatHover'], false], 3,
           2,
         ]);
         m.setPaintProperty('fields-border', 'line-opacity', [
@@ -808,6 +881,11 @@ export default function FieldMap({
     const enriched = enrichGeoJsonFeatures(data, coverageMapRef.current);
     enrichedGeoJsonRef.current = enriched;
     const colored = addModeColorToFeatures(enriched, mode);
+    hoveredFeatureIdRef.current = null;
+    if (isMountedRef.current) {
+      setHoveredFeature(null);
+      setHoverPosition(null);
+    }
 
     if (!m.getSource('fields-source')) {
       m.addSource('fields-source', {
@@ -840,7 +918,12 @@ export default function FieldMap({
         source: 'fields-source',
         paint: {
           'line-color': '#ffffff',
-          'line-width': 2,
+          'line-width': [
+            'case',
+            ['==', ['get', 'id'], selectedFieldIdRef.current || -1], 3,
+            ['boolean', ['feature-state', 'agrosatHover'], false], 3,
+            2,
+          ],
           'line-opacity': 1,
         },
       });
@@ -858,6 +941,7 @@ export default function FieldMap({
           'text-size': ['interpolate', ['linear'], ['zoom'], 12, 10, 16, 14, 22, 18],
           'text-offset': [0, -0.5],
           'text-anchor': 'center',
+          'visibility': cameraMovingRef.current ? 'none' : 'visible',
         },
         paint: {
           'text-color': '#ffffff',
@@ -871,11 +955,11 @@ export default function FieldMap({
     // Re-attach interaction handlers after style switch
     LAYERS.forEach((layer) => {
       if (m.getLayer(layer)) {
-        if (handlersRef.current.onMouseMove) {
+        if (layer === 'fields-fill' && handlersRef.current.onMouseMove) {
           m.off('mousemove', layer, handlersRef.current.onMouseMove);
           m.on('mousemove', layer, handlersRef.current.onMouseMove);
         }
-        if (handlersRef.current.onMouseLeave) {
+        if (layer === 'fields-fill' && handlersRef.current.onMouseLeave) {
           m.off('mouseleave', layer, handlersRef.current.onMouseLeave);
           m.on('mouseleave', layer, handlersRef.current.onMouseLeave);
         }
