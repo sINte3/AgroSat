@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { getCachedDashboardSummary, getAlerts, getSatelliteCoverage } from '../api/client';
 import SummaryCards from '../components/Dashboard/SummaryCards';
 import { COVERAGE_STATUS_CONFIG, FRESHNESS_STATUS_CONFIG, COVERAGE_PRIORITY_LABELS } from '../config/indexMetadata';
@@ -21,6 +21,7 @@ const ALERT_TYPE_LABELS = {
 export default function DashboardPage({ onNavigate, onFieldClick, onFieldHighlight }) {
   const [summary, setSummary] = useState(null);
   const [allAlerts, setAllAlerts] = useState([]);
+  const [alertsStatus, setAlertsStatus] = useState('loading');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [coverage, setCoverage] = useState(null);
@@ -28,9 +29,12 @@ export default function DashboardPage({ onNavigate, onFieldClick, onFieldHighlig
   const [coverageError, setCoverageError] = useState(null);
   const [attentionCount, setAttentionCount] = useState(null);
   const [activeInspectionCount, setActiveInspectionCount] = useState(null);
+  const requestGeneration = useRef(0);
 
   const loadData = useCallback(async () => {
+    const generation = ++requestGeneration.current;
     setLoading(true);
+    setAlertsStatus('loading');
     setError(null);
     setCoverageError(null);
     setCoverage(null);
@@ -42,23 +46,29 @@ export default function DashboardPage({ onNavigate, onFieldClick, onFieldHighlig
         getFieldAttentionQueue({ limit: 1 }),
         listFieldInspections({ limit: 1, offset: 0 }),
       ]);
+      if (generation !== requestGeneration.current) return;
       const [summaryResult, alertsResult, coverageResult, attentionResult, inspectionsResult] = results;
       setSummary(summaryResult.status === 'fulfilled' ? summaryResult.value : null);
-      setAllAlerts(alertsResult.status === 'fulfilled' && Array.isArray(alertsResult.value) ? alertsResult.value : []);
+      const alertsAvailable = alertsResult.status === 'fulfilled' && Array.isArray(alertsResult.value);
+      setAllAlerts(alertsAvailable ? alertsResult.value : []);
+      setAlertsStatus(alertsAvailable ? 'available' : 'failed');
       setCoverage(coverageResult.status === 'fulfilled' ? coverageResult.value : null);
       setCoverageError(coverageResult.status === 'rejected' ? 'Не удалось загрузить данные покрытия' : null);
       setAttentionCount(attentionResult.status === 'fulfilled' && Number.isFinite(attentionResult.value?.summary?.total) ? attentionResult.value.summary.total : null);
       const inspectionSummary = inspectionsResult.status === 'fulfilled' ? inspectionsResult.value?.summary : null;
       setActiveInspectionCount(inspectionSummary ? Number(inspectionSummary.pending || 0) + Number(inspectionSummary.in_progress || 0) : null);
-      if (summaryResult.status === 'rejected' && alertsResult.status === 'rejected') setError('Часть оперативных данных недоступна');
+      if (results.every((result) => result.status === 'rejected')) setError('Оперативные данные недоступны');
     } finally {
-      setLoading(false);
-      setCoverageLoading(false);
+      if (generation === requestGeneration.current) {
+        setLoading(false);
+        setCoverageLoading(false);
+      }
     }
   }, []);
 
   useEffect(() => {
     loadData();
+    return () => { requestGeneration.current += 1; };
   }, [loadData]);
 
   // Alert severity breakdown
@@ -184,7 +194,7 @@ export default function DashboardPage({ onNavigate, onFieldClick, onFieldHighlig
           {[
             ['Поля требуют внимания', attentionCount, 'field-attention'],
             ['Открытые осмотры', activeInspectionCount, 'field-inspections'],
-            ['Активные предупреждения', allAlerts.length, 'alerts'],
+            ['Активные предупреждения', alertsStatus === 'available' ? allAlerts.length : null, 'alerts'],
             ['Последний спутниковый снимок', coverage?.summary?.latest_captured_date ? new Date(coverage.summary.latest_captured_date).toLocaleDateString('ru-RU') : null, 'fields'],
           ].map(([label, value, target]) => (
             <button key={label} type="button" onClick={() => onNavigate(target)} className="card p-4 text-left focus:outline-none focus:ring-2 focus:ring-agro-accent">
@@ -204,7 +214,7 @@ export default function DashboardPage({ onNavigate, onFieldClick, onFieldHighlig
                 <h2 className="text-sm font-semibold text-agro-text">
                   Приоритетные действия
                 </h2>
-                {allAlerts.length > 0 && (
+                {alertsStatus === 'available' && allAlerts.length > 0 && (
                   <button
                     onClick={() => onNavigate('alerts')}
                     className="text-xs text-agro-accent hover:underline font-medium"
@@ -214,7 +224,15 @@ export default function DashboardPage({ onNavigate, onFieldClick, onFieldHighlig
                 )}
               </div>
 
-              {allAlerts.length === 0 ? (
+              {alertsStatus === 'failed' ? (
+                <div className="py-4">
+                  <p className="text-sm font-medium text-agro-text">Данные предупреждений недоступны.</p>
+                  <p className="mt-1 text-sm text-agro-muted">Повторите загрузку, чтобы проверить приоритетные действия.</p>
+                  <button type="button" onClick={loadData} className="mt-3 text-sm font-medium text-agro-accent underline hover:no-underline focus:outline-none focus:ring-2 focus:ring-agro-accent">
+                    Повторить загрузку
+                  </button>
+                </div>
+              ) : allAlerts.length === 0 ? (
                 <div className="flex items-center gap-3 py-4">
                   <div className="w-10 h-10 rounded-full bg-green-100 flex items-center justify-center">
                     <svg className="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">

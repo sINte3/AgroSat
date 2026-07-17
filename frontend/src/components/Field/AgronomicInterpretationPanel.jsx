@@ -16,18 +16,6 @@ const CONTEXT_LABELS = {
   inspection_evidence: 'результаты осмотров',
 };
 const SIGNAL_LABELS = { within_field_range: 'в обычном диапазоне истории поля', above_field_range: 'выше обычного диапазона поля', below_field_range: 'ниже обычного диапазона поля', insufficient_history: 'недостаточно истории поля' };
-const QUALITY_FLAG_LABELS = {
-  no_data: 'Нет данных',
-  single_observation: 'Только одно наблюдение',
-  insufficient_history: 'Недостаточно истории',
-  stale: 'Данные устарели',
-  low_valid_pixels: 'Мало пригодных пикселей',
-  high_cloud_cover: 'Высокая облачность',
-  missing_dispersion: 'Нет данных о разбросе',
-  duplicate_date: 'Повтор наблюдения за одну дату',
-  future_observation_date: 'Дата наблюдения находится в будущем',
-};
-
 function operatorText(value, dictionary = {}) {
   if (typeof value !== 'string' || !value) return 'Нет доступного пояснения';
   if (dictionary[value]) return dictionary[value];
@@ -79,7 +67,6 @@ export default function AgronomicInterpretationPanel({ fieldId }) {
   const generated = data?.generated_at ? new Date(data.generated_at).toLocaleString('ru-RU') : '—';
   const summary = data?.summary || {};
   const missingContext = Array.isArray(data?.context?.missing_context) ? data.context.missing_context : [];
-  const qualityFlags = Array.isArray(summary.quality_flags) ? summary.quality_flags : [];
   return <section className="space-y-4" aria-labelledby="agronomic-interpretation-title">
     <div className="card space-y-3 p-4"><div className="flex flex-wrap items-start justify-between gap-3">
       <div><h3 id="agronomic-interpretation-title" className="text-lg font-bold text-agro-text">Агрономическая интерпретация</h3><p className="mt-1 text-xs text-agro-muted">Спутниковые индексы — косвенные сигналы. Выводы нужно подтвердить осмотром поля.</p></div>
@@ -93,7 +80,6 @@ export default function AgronomicInterpretationPanel({ fieldId }) {
       </div>
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-agro-muted"><span>Поле: <b className="text-agro-text">{data?.field?.name || 'не указано'}</b></span>{data?.field?.crop_name && <span>Культура: {data.field.crop_name}</span>}<span>Период: {displayDate(data?.range?.date_from)} — {displayDate(data?.range?.date_to)}</span><span>Сформировано: {generated}</span></div>
       {summary.primary_signals?.length > 0 && <div><p className="text-sm font-medium text-agro-text">Основные сигналы</p><ul className="mt-1 list-disc pl-5 text-sm text-agro-muted">{summary.primary_signals.map((signal) => <li key={signal}>{operatorText(signal)}</li>)}</ul></div>}
-      {qualityFlags.length > 0 && <div><p className="text-sm font-medium text-agro-text">Качество данных</p><ul className="mt-1 list-disc pl-5 text-sm text-agro-muted">{qualityFlags.map((flag) => <li key={flag}>{QUALITY_FLAG_LABELS[flag] || 'Дополнительное ограничение качества данных'}</li>)}</ul></div>}
       {summary.recommended_next_checks?.length > 0 && <div><p className="text-sm font-medium text-agro-text">Что проверить дальше</p><ul className="mt-1 list-disc pl-5 text-sm text-agro-muted">{summary.recommended_next_checks.map((check, index) => <li key={`${check}-${index}`}>{operatorText(check)}</li>)}</ul></div>}
       {missingContext.length > 0 && <p className="rounded-lg bg-slate-50 p-3 text-sm text-agro-muted">Для более точной интерпретации не хватает контекста: {missingContext.map((item) => CONTEXT_LABELS[item] || 'дополнительные полевые данные').join(', ')}.</p>}
       <p className="text-sm text-agro-muted">{summary.disclaimer || 'Спутниковые индексы — косвенные сигналы. Выводы нужно подтвердить осмотром поля.'}</p>

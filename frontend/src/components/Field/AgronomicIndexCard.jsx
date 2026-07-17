@@ -11,6 +11,17 @@ const TREND_STRENGTH = { weak: 'Слабая выраженность', moderate
 const POSITION = { within_field_range: 'В обычном диапазоне истории поля', above_field_range: 'Выше обычного диапазона поля', below_field_range: 'Ниже обычного диапазона поля', insufficient_history: 'Недостаточно истории поля' };
 const HETEROGENEITY = { low: 'Низкая неоднородность', moderate: 'Умеренная неоднородность', high: 'Высокая неоднородность', unknown: 'Недостаточно данных', insufficient: 'Недостаточно данных' };
 const SIGNAL = { strong: 'сильное отклонение от истории поля', notable: 'заметное отклонение от истории поля', normal: 'в обычном диапазоне истории поля', insufficient: 'недостаточно истории' };
+const QUALITY_FLAG_LABELS = {
+  no_data: 'Нет данных',
+  single_observation: 'Только одно наблюдение',
+  insufficient_history: 'Недостаточно истории',
+  stale: 'Данные устарели',
+  low_valid_pixels: 'Мало пригодных пикселей',
+  high_cloud_cover: 'Высокая облачность',
+  missing_dispersion: 'Нет данных о разбросе',
+  duplicate_date: 'Повтор наблюдения за одну дату',
+  future_observation_date: 'Дата наблюдения находится в будущем',
+};
 
 function formatNumber(value) {
   return value != null && Number.isFinite(Number(value)) ? Number(value).toFixed(4) : '—';
@@ -58,6 +69,7 @@ export default function AgronomicIndexCard({ item }) {
   const freshness = Number.isFinite(Number(latest?.freshness_days)) ? `${latest.freshness_days} дн. назад` : 'Возраст снимка не указан';
   const checks = item?.recommended_checks?.length ? item.recommended_checks : ['Сравните сигнал с фактическим состоянием растений.'];
   const usefulFor = Array.isArray(item?.useful_for) ? item.useful_for : item?.useful_for ? [item.useful_for] : [];
+  const qualityFlags = [...new Set(Array.isArray(item?.data_quality?.quality_flags) ? item.data_quality.quality_flags : [])];
   return (
     <article className="card p-4 space-y-3 min-w-0">
       <div className="flex items-start justify-between gap-2">
@@ -78,6 +90,14 @@ export default function AgronomicIndexCard({ item }) {
         {expanded ? 'Скрыть детали' : 'Показать детали'}
       </button>
       {expanded && <div id={detailsId} className="border-t border-agro-surface2 pt-3 space-y-3 text-xs text-agro-text">
+        <div>
+          <p className="font-medium">Качество данных</p>
+          {qualityFlags.length > 0 ? (
+            <ul className="mt-1 list-disc space-y-1 pl-4">
+              {qualityFlags.map((flag, index) => <li key={`${String(flag)}-${index}`}>{QUALITY_FLAG_LABELS[flag] || 'Дополнительное ограничение качества данных'}</li>)}
+            </ul>
+          ) : <p className="mt-1">Дополнительных ограничений качества не отмечено.</p>}
+        </div>
         <p><span className="font-medium">Что показывает индекс: </span>{item.plain_language_meaning || item.meaning || 'Описание не указано.'}</p>
         <div>
           <p className="font-medium">Для чего полезен:</p>

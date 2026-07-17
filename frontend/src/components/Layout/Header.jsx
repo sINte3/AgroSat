@@ -1,6 +1,23 @@
 export default function Header({ title, subtitle, currentView, alertCount, mobileNavigationOpen, onMobileNavigationToggle }) {
-  // Hidden entirely on map page
-  if (currentView === 'fields' || currentView === 'field-detail') return null;
+  const isMapView = currentView === 'fields' || currentView === 'field-detail';
+
+  if (isMapView) {
+    return (
+      <header className="pointer-events-none absolute left-3 top-3 z-40 md:hidden">
+        <button
+          type="button"
+          className="pointer-events-auto inline-flex h-11 w-11 items-center justify-center rounded-lg border border-agro-border bg-white/95 text-agro-text shadow-sm backdrop-blur-sm hover:bg-agro-hover focus:outline-none focus:ring-2 focus:ring-agro-accent"
+          aria-label="Открыть основную навигацию"
+          aria-expanded={mobileNavigationOpen}
+          onClick={onMobileNavigationToggle}
+        >
+          <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+            <path d="M4 7h16M4 12h16M4 17h16" />
+          </svg>
+        </button>
+      </header>
+    );
+  }
 
   return (
     <header className="absolute inset-x-0 top-0 z-20 pointer-events-none">
