@@ -101,8 +101,9 @@ export default function InspectionActionModal({ mode, item, user, assignees, onC
       <form onSubmit={submit} className="card max-h-[calc(100vh-1.5rem)] w-full max-w-lg overflow-y-auto p-5">
         <div className="flex justify-between gap-3">
 <h2 id="action-title" className="text-lg font-bold">{label}</h2>
-<button type="button" onClick={onClose} disabled={pending} aria-label="Закрыть">✕</button>
+<button type="button" onClick={onClose} disabled={pending} aria-label="Закрыть" className="rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-agro-accent">✕</button>
 </div>
+        <p className="mt-2 text-sm text-agro-muted">Осмотр: {item?.title || `#${item?.id}`}. Изменение будет подтверждено сервером.</p>
         {mode === 'edit' && <div className="mt-4 space-y-3">
 <label className="block text-sm">Заголовок<input ref={initialFocusRef} className="input mt-1 w-full p-2" value={title} onChange={(event) => setTitle(event.target.value)} maxLength={255} />
 </label>

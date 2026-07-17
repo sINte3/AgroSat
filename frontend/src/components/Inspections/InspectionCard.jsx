@@ -25,7 +25,7 @@ export default function InspectionCard({ inspection: item, user, onNavigate, onA
   const id = positiveId(item?.id);
   const actions = allowedActions(item, user);
   return (
-    <article className="card min-w-0 space-y-3 p-4">
+    <article className="card min-w-0 space-y-3 p-4 focus-within:ring-1 focus-within:ring-agro-accent">
       <div className="flex flex-wrap justify-between gap-2">
         <div>
           <p className="text-xs text-agro-muted">Осмотр #{id || '—'} · Версия {finiteInteger(item?.version)}</p>

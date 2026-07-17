@@ -57,6 +57,7 @@ export default function AgronomicIndexCard({ item }) {
   const noData = !latest;
   const freshness = Number.isFinite(Number(latest?.freshness_days)) ? `${latest.freshness_days} дн. назад` : 'Возраст снимка не указан';
   const checks = item?.recommended_checks?.length ? item.recommended_checks : ['Сравните сигнал с фактическим состоянием растений.'];
+  const usefulFor = Array.isArray(item?.useful_for) ? item.useful_for : item?.useful_for ? [item.useful_for] : [];
   return (
     <article className="card p-4 space-y-3 min-w-0">
       <div className="flex items-start justify-between gap-2">
@@ -69,7 +70,7 @@ export default function AgronomicIndexCard({ item }) {
         <p className="text-xs text-agro-muted">Сигнал: <span className="text-agro-text">{SIGNAL[item.change?.statistical_signal] || SIGNAL.insufficient}</span></p>
         <p className="text-sm text-agro-muted">Тренд: <span className="text-agro-text">{TREND[item.trend?.direction] || TREND.unknown} · {TREND_STRENGTH[item.trend?.strength] || TREND_STRENGTH.unknown}{Number.isFinite(item.trend?.duration_days) ? ` · ${item.trend.duration_days} дн.` : ''}</span></p>
         <p className="text-sm text-agro-muted">Контекстная уверенность: <span className="text-agro-text">{CONTEXT_CONFIDENCE[item.confidence?.contextual_level] || CONTEXT_CONFIDENCE.none}</span></p>
-        <p className="text-sm text-agro-muted">Неоднородность: <span className="text-agro-text">{HETEROGENEITY[item.heterogeneity?.classification || item.heterogeneity?.level] || HETEROGENEITY.unknown}</span>. Она сама по себе не устанавливает заболевание или причину.</p>
+        <p className="text-sm text-agro-muted">Неоднородность: <span className="text-agro-text">{HETEROGENEITY[item.heterogeneity?.classification || item.heterogeneity?.level] || HETEROGENEITY.unknown}</span>. Сигнал сам по себе не устанавливает причину.</p>
         <p className="text-sm text-agro-muted">Качество данных: {item.data_quality?.observation_count ?? 0} наблюдений{Number.isFinite(item.data_quality?.valid_pixels_pct) ? ` · пригодно ${item.data_quality.valid_pixels_pct}% пикселей` : ''}.</p>
         <Baseline baseline={item.baseline} latestValue={latest.value} />
       </>}
@@ -78,9 +79,16 @@ export default function AgronomicIndexCard({ item }) {
       </button>
       {expanded && <div id={detailsId} className="border-t border-agro-surface2 pt-3 space-y-3 text-xs text-agro-text">
         <p><span className="font-medium">Что показывает индекс: </span>{item.plain_language_meaning || item.meaning || 'Описание не указано.'}</p>
-        <p><span className="font-medium">Для чего полезен: </span>{item.useful_for || 'Дополнительное назначение не указано.'}</p>
+        <div>
+          <p className="font-medium">Для чего полезен:</p>
+          {usefulFor.length ? <ul className="mt-1 list-disc space-y-1 pl-4">{usefulFor.map((value, index) => <li key={`${value}-${index}`}>{value}</li>)}</ul> : <p>Дополнительное назначение не указано.</p>}
+        </div>
         <div><p className="font-medium mb-1">Уверенность</p><ul className="list-disc pl-4 space-y-1">{(item.confidence?.reasons || []).map((reason, index) => <li key={`${reason}-${index}`}>{confidenceReason(reason)}</li>)}</ul></div>
-        <div><p className="font-medium mb-1">Возможные причины для проверки</p>{item.hypotheses?.length ? item.hypotheses.map((hypothesis, index) => <div key={`${hypothesis.code}-${index}`} className="mb-2"><p>Возможная причина, требующая проверки: {hypothesis.label || hypothesis.title}. Требуется проверка в поле. {hypothesis.rationale || hypothesis.reason}</p></div>) : <p>Согласованного отклонения нескольких индексов не выявлено.</p>}<p className="mt-2 font-medium">Что проверить в поле</p><ul className="list-disc pl-4 mt-1 space-y-1">{checks.map((check, index) => <li key={`${check}-${index}`}>{check}</li>)}</ul></div>
+        <div><p className="mb-1 font-medium">Возможные причины для проверки</p>
+          {item.hypotheses?.length ? item.hypotheses.map((hypothesis, index) => <div key={`${hypothesis.code}-${index}`} className="mb-2"><p>Возможная причина, требующая проверки: {hypothesis.label || hypothesis.title}. Требуется проверка в поле. {hypothesis.rationale || hypothesis.reason}</p></div>) : <p>Согласованного отклонения нескольких индексов не выявлено.</p>}
+          <p className="mt-2 font-medium">Что проверить в поле</p>
+          <ul className="mt-1 list-disc space-y-1 pl-4">{checks.map((check, index) => <li key={`${check}-${index}`}>{check}</li>)}</ul>
+        </div>
         <div><p className="font-medium mb-1">Ограничения</p><ul className="list-disc pl-4 space-y-1">{(item.limitations || []).map((limitation, index) => <li key={`${limitation}-${index}`}>{limitation}</li>)}</ul></div>
       </div>}
     </article>

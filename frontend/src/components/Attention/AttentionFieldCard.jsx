@@ -42,7 +42,7 @@ export default function AttentionFieldCard({ item, onNavigate, onCreateInspectio
   const topAlerts = Array.isArray(alertSummary.top_alerts) ? alertSummary.top_alerts.filter((alert) => alert && typeof alert === 'object').slice(0, 3) : [];
 
   return (
-    <article className="card p-4 md:p-5 space-y-4 min-w-0">
+    <article className="card min-w-0 space-y-4 p-4 focus-within:ring-1 focus-within:ring-agro-accent md:p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="text-xs font-semibold uppercase tracking-wide text-agro-muted">Место #{count(item?.rank)}</p>
@@ -76,7 +76,12 @@ export default function AttentionFieldCard({ item, onNavigate, onCreateInspectio
         const indices = stringList(reason.indices);
         const code = text(reason.code, 'signal');
         const key = `${code}:${indices.join('-')}`;
-        return <li key={key} className="flex flex-wrap justify-between gap-2 rounded-lg bg-agro-surface2 px-3 py-2 text-sm"><span className="text-agro-text">{text(reason.label, 'Сигнал')} {indices.length ? <span className="text-agro-muted">({indices.join(', ')})</span> : null} {count(reason.count) > 1 ? <span className="text-agro-muted">× {count(reason.count)}</span> : null}</span><span className="font-semibold text-agro-text">{Number.isFinite(reason.points) ? `${reason.points} балл.` : 'Баллы не указаны'}</span></li>;
+        return (
+          <li key={key} className="flex flex-wrap justify-between gap-2 rounded-lg bg-agro-surface2 px-3 py-2 text-sm">
+            <span className="text-agro-text">{text(reason.label, 'Сигнал')} {indices.length ? <span className="text-agro-muted">({indices.join(', ')})</span> : null} {count(reason.count) > 1 ? <span className="text-agro-muted">× {count(reason.count)}</span> : null}</span>
+            <span className="font-semibold text-agro-text">{Number.isFinite(reason.points) ? `${reason.points} балл.` : 'Баллы не указаны'}</span>
+          </li>
+        );
       })}</ul> : <p className="mt-1 text-sm text-agro-muted">Сигналы не указаны.</p>}</section>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">

@@ -85,6 +85,7 @@ function AppLayout() {
   const [selectedEnterpriseId, setSelectedEnterpriseId] = useState(initialRoute.selectedEnterpriseId);
   const [selectedInspectionId, setSelectedInspectionId] = useState(initialRoute.selectedInspectionId);
   const [enterprises, setEnterprises] = useState([]);
+  const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
 
   useEffect(() => {
     getCachedEnterprises()
@@ -116,6 +117,7 @@ function AppLayout() {
   }, []);
 
   const handleNavigate = useCallback((target, id) => {
+    setMobileNavigationOpen(false);
     switch (target) {
       case 'dashboard':
         setView('dashboard');
@@ -268,17 +270,21 @@ function AppLayout() {
   };
 
   return (
-    <div className="flex h-screen bg-slate-50 overflow-hidden pb-16 md:pb-0">
+    <div className="flex h-screen overflow-hidden bg-slate-50">
       <Sidebar
         activeView={activeView}
         onNavigate={handleNavigate}
         enterprises={enterprises}
+        mobileOpen={mobileNavigationOpen}
+        onMobileClose={() => setMobileNavigationOpen(false)}
       />
 
       <main className="flex-1 overflow-hidden relative">
         <Header
           {...getHeaderInfo()}
           currentView={view}
+          mobileNavigationOpen={mobileNavigationOpen}
+          onMobileNavigationToggle={() => setMobileNavigationOpen(open => !open)}
         />
         {renderContent()}
       </main>

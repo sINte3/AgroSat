@@ -32,7 +32,7 @@ export default function InspectionFilters({
         <label className="text-xs font-medium text-agro-muted">Создано после<input type="datetime-local" className={controlClass} value={draft.createdAfter} onChange={(event) => onChange('createdAfter', event.target.value)} /></label>
       </div>
       <div className="flex flex-wrap gap-2">
-        <button disabled={loading} className="btn-primary rounded-lg px-4 py-2 text-sm">Применить</button>
+        <button disabled={loading} className="btn-primary rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-agro-accent disabled:opacity-60">Применить</button>
         <button type="button" disabled={loading} onClick={onReset} className="btn-secondary rounded-lg px-4 py-2 text-sm">Сбросить</button>
         <button type="button" disabled={loading} onClick={onRefresh} className="btn-secondary rounded-lg px-4 py-2 text-sm">Обновить</button>
       </div>

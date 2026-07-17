@@ -22,7 +22,7 @@ export default function AttentionFilters({
   const safeCrops = Array.isArray(cropOptions) ? cropOptions : [];
 
   return (
-    <form onSubmit={onApply} className="card p-4 space-y-3" aria-label="Фильтры очереди">
+    <form onSubmit={onApply} className="card space-y-4 p-4" aria-label="Фильтры очереди внимания">
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
         {isGlobalRole ? (
           <label className="block min-w-0 text-xs font-medium text-agro-muted">

@@ -3,6 +3,8 @@ import { getCachedDashboardSummary, getAlerts, getSatelliteCoverage } from '../a
 import SummaryCards from '../components/Dashboard/SummaryCards';
 import { COVERAGE_STATUS_CONFIG, FRESHNESS_STATUS_CONFIG, COVERAGE_PRIORITY_LABELS } from '../config/indexMetadata';
 import INDEX_METADATA from '../config/indexMetadata';
+import { getFieldAttentionQueue } from '../api/fieldAttention';
+import { listFieldInspections } from '../api/fieldInspections';
 
 const ALERT_TYPE_LABELS = {
   ndvi_low:    'NDVI ниже нормы для фазы роста',
@@ -24,6 +26,8 @@ export default function DashboardPage({ onNavigate, onFieldClick, onFieldHighlig
   const [coverage, setCoverage] = useState(null);
   const [coverageLoading, setCoverageLoading] = useState(true);
   const [coverageError, setCoverageError] = useState(null);
+  const [attentionCount, setAttentionCount] = useState(null);
+  const [activeInspectionCount, setActiveInspectionCount] = useState(null);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -31,20 +35,22 @@ export default function DashboardPage({ onNavigate, onFieldClick, onFieldHighlig
     setCoverageError(null);
     setCoverage(null);
     try {
-      const [summaryData, alertsData, coverageData] = await Promise.all([
+      const results = await Promise.allSettled([
         getCachedDashboardSummary(),
         getAlerts({ is_active: true, limit: 20 }),
-        getSatelliteCoverage({ include_empty: true, active_only: true }).catch(e => {
-          setCoverageError(e?.message || 'Не удалось загрузить данные покрытия');
-          return null;
-        }),
+        getSatelliteCoverage({ include_empty: true, active_only: true }),
+        getFieldAttentionQueue({ limit: 1 }),
+        listFieldInspections({ limit: 1, offset: 0 }),
       ]);
-      setSummary(summaryData);
-      setAllAlerts(Array.isArray(alertsData) ? alertsData : []);
-      if (coverageData) setCoverage(coverageData);
-    } catch (err) {
-      setError('Не удалось загрузить данные дашборда');
-      console.error(err);
+      const [summaryResult, alertsResult, coverageResult, attentionResult, inspectionsResult] = results;
+      setSummary(summaryResult.status === 'fulfilled' ? summaryResult.value : null);
+      setAllAlerts(alertsResult.status === 'fulfilled' && Array.isArray(alertsResult.value) ? alertsResult.value : []);
+      setCoverage(coverageResult.status === 'fulfilled' ? coverageResult.value : null);
+      setCoverageError(coverageResult.status === 'rejected' ? 'Не удалось загрузить данные покрытия' : null);
+      setAttentionCount(attentionResult.status === 'fulfilled' && Number.isFinite(attentionResult.value?.summary?.total) ? attentionResult.value.summary.total : null);
+      const inspectionSummary = inspectionsResult.status === 'fulfilled' ? inspectionsResult.value?.summary : null;
+      setActiveInspectionCount(inspectionSummary ? Number(inspectionSummary.pending || 0) + Number(inspectionSummary.in_progress || 0) : null);
+      if (summaryResult.status === 'rejected' && alertsResult.status === 'rejected') setError('Часть оперативных данных недоступна');
     } finally {
       setLoading(false);
       setCoverageLoading(false);
@@ -173,6 +179,20 @@ export default function DashboardPage({ onNavigate, onFieldClick, onFieldHighlig
 
         {/* Summary cards */}
         <SummaryCards summary={summary} loading={false} />
+
+        <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4" aria-label="Оперативные показатели">
+          {[
+            ['Поля требуют внимания', attentionCount, 'field-attention'],
+            ['Открытые осмотры', activeInspectionCount, 'field-inspections'],
+            ['Активные предупреждения', allAlerts.length, 'alerts'],
+            ['Последний спутниковый снимок', coverage?.summary?.latest_captured_date ? new Date(coverage.summary.latest_captured_date).toLocaleDateString('ru-RU') : null, 'fields'],
+          ].map(([label, value, target]) => (
+            <button key={label} type="button" onClick={() => onNavigate(target)} className="card p-4 text-left focus:outline-none focus:ring-2 focus:ring-agro-accent">
+              <span className="text-sm text-agro-muted">{label}</span>
+              <span className="mt-2 block text-2xl font-bold text-agro-text">{value ?? 'Нет данных'}</span>
+            </button>
+          ))}
+        </section>
 
         {/* Two-column management overview */}
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">

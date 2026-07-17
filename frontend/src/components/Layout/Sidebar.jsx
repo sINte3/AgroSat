@@ -1,3 +1,6 @@
+import { useEffect } from 'react';
+import { useAuth } from '../../context/AuthContext';
+
 const NAV_ITEMS = [
   { key: 'dashboard',   label: 'Сегодня',        icon: DashboardIcon },
   { key: 'fields',      label: 'Поля',           icon: MapIcon },
@@ -8,7 +11,21 @@ const NAV_ITEMS = [
   { key: 'reports',     label: 'Отчёты',         icon: ReportIcon },
 ];
 
-export default function Sidebar({ activeView, onNavigate, enterprises = [] }) {
+const ROLE_LABELS = { admin: 'Администратор', manager: 'Менеджер', agronomist: 'Агроном', viewer: 'Только просмотр' };
+
+export default function Sidebar({ activeView, onNavigate, mobileOpen, onMobileClose }) {
+  const { user, logout } = useAuth();
+  const profileName = user?.name || user?.full_name || user?.username || 'Профиль';
+  const roleLabel = ROLE_LABELS[user?.role] || 'Профиль';
+
+  useEffect(() => {
+    if (!mobileOpen) return undefined;
+    const handleKeyDown = event => {
+      if (event.key === 'Escape') onMobileClose();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [mobileOpen, onMobileClose]);
   const isActive = (key) => {
     if (activeView === 'field-detail') return key === 'fields';
     if (activeView === 'enterprise-detail') return key === 'enterprises';
@@ -16,25 +33,30 @@ export default function Sidebar({ activeView, onNavigate, enterprises = [] }) {
   };
 
   return (
-    <aside className="fixed inset-x-0 bottom-0 z-30 flex h-16 flex-shrink-0 bg-white border-t border-agro-border md:static md:h-screen md:w-64 md:flex-col md:border-r md:border-t-0">
+    <>
+      {mobileOpen && (
+        <button type="button" className="fixed inset-0 z-30 bg-slate-950/40 md:hidden" aria-label="Закрыть навигацию" onClick={onMobileClose} />
+      )}
+    <aside className={`${mobileOpen ? 'translate-x-0' : '-translate-x-full'} fixed inset-y-0 left-0 z-40 flex w-72 flex-shrink-0 flex-col border-r border-agro-border bg-white transition-transform md:static md:h-screen md:w-64 md:translate-x-0`}>
       {/* Logo */}
-      <div className="hidden h-16 items-center gap-3 border-b border-agro-border px-5 md:flex">
+      <div className="flex h-16 items-center gap-3 border-b border-agro-border px-5">
         <div className="w-7 h-7 rounded-full bg-agro-accent flex items-center justify-center">
           <span className="text-white font-bold text-xs">A</span>
         </div>
-        <div><p className="text-base font-bold text-agro-text">AgroSat</p><p className="text-xs text-agro-muted">Мониторинг полей</p></div>
+        <div className="min-w-0 flex-1"><p className="text-base font-bold text-agro-text">AgroSat</p><p className="text-xs text-agro-muted">Мониторинг полей</p></div>
+        <button type="button" onClick={onMobileClose} aria-label="Закрыть навигацию" className="rounded-lg p-2 text-agro-muted hover:bg-agro-hover focus:outline-none focus:ring-2 focus:ring-agro-accent md:hidden">×</button>
       </div>
 
       {/* Navigation */}
-      <nav className="flex flex-1 items-center gap-1 overflow-x-auto px-2 py-2 md:flex-col md:items-stretch md:overflow-visible md:px-3 md:py-5" aria-label="Основная навигация">
+      <nav className="flex flex-1 flex-col items-stretch gap-1 overflow-y-auto px-3 py-5" aria-label="Основная навигация">
         {NAV_ITEMS.map((item) => {
           const active = isActive(item.key);
           return (
-            <div key={item.key} className="relative min-w-14 flex-1 md:min-w-0 md:flex-none">
+            <div key={item.key} className="relative">
               <button
                 onClick={() => onNavigate(item.key)}
                 aria-current={active ? 'page' : undefined}
-                className={`flex min-h-11 w-full flex-col items-center justify-center gap-1 rounded-xl px-2 text-[11px] font-medium transition-colors md:flex-row md:justify-start md:gap-3 md:px-3 md:text-sm
+                className={`flex min-h-11 w-full items-center justify-start gap-3 rounded-xl px-3 text-sm font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-agro-accent
                   ${active ? 'bg-emerald-50 text-agro-accent' : 'text-slate-600 hover:text-agro-text hover:bg-agro-hover'}`}
               >
                 <item.icon className="w-5 h-5" />
@@ -46,15 +68,17 @@ export default function Sidebar({ activeView, onNavigate, enterprises = [] }) {
       </nav>
 
       {/* Bottom */}
-      <div className="hidden items-center gap-3 border-t border-agro-border p-4 md:flex">
+      <div className="flex items-center gap-3 border-t border-agro-border p-4">
         <div className="relative group">
           <div className="w-7 h-7 rounded-full bg-agro-card flex items-center justify-center text-agro-muted text-xs">
             U
           </div>
         </div>
-        <div><p className="text-sm font-medium text-agro-text">Пользователь</p><p className="text-xs text-agro-muted">Рабочий профиль</p></div>
+        <div className="min-w-0 flex-1"><p className="truncate text-sm font-medium text-agro-text">{profileName}</p><p className="text-xs text-agro-muted">{roleLabel}</p></div>
+        <button type="button" onClick={logout} className="rounded-lg px-2 py-1 text-xs font-medium text-agro-muted hover:bg-agro-hover hover:text-agro-text focus:outline-none focus:ring-2 focus:ring-agro-accent">Выйти</button>
       </div>
     </aside>
+    </>
   );
 }
 

@@ -97,7 +97,7 @@ export default function InspectionDetailDrawer({
           <button type="button" autoFocus onClick={onClose} className="rounded p-2 focus:ring-2 focus:ring-agro-accent" aria-label="Закрыть осмотр">✕</button>
         </div>
         <div className="flex-1 overflow-y-auto overflow-x-hidden p-4" aria-live="polite">
-          {state === 'loading' && <p>Загружаем осмотр…</p>}
+          {state === 'loading' && <p role="status">Загружаем осмотр…</p>}
           {state === '403' && <p role="alert">Недостаточно прав для просмотра осмотра.</p>}
           {state === '404' && <p role="alert">Осмотр не найден или недоступен.</p>}
           {state === 'error' && <div role="alert"><p>{error}</p><button type="button" onClick={onRetry} className="btn-primary mt-3 px-3 py-2">Повторить</button></div>}

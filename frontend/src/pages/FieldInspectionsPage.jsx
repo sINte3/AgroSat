@@ -140,7 +140,7 @@ export default function FieldInspectionsPage({ onNavigate, enterprises = [], sel
 
   const items = Array.isArray(data?.items) ? data.items : [];
   return (
-    <div className="h-full overflow-y-auto overflow-x-hidden p-4 pt-16 md:p-8 md:pt-20">
+    <main className="h-full overflow-y-auto overflow-x-hidden p-4 pt-16 md:p-8 md:pt-20" aria-label="Осмотры полей">
       <div className="mx-auto max-w-7xl space-y-6">
         <div className="flex flex-wrap justify-between gap-3">
           <p className="text-sm text-agro-muted">Планирование, выполнение и результаты полевых проверок.</p>
@@ -149,7 +149,7 @@ export default function FieldInspectionsPage({ onNavigate, enterprises = [], sel
         <InspectionFilters draft={draft} onChange={changeFilter} onApply={applyFilters} onReset={resetFilters} onRefresh={reloadList} enterprises={enterprises} assignees={assignees} role={role} loading={state === 'loading'} />
         {data && <InspectionSummaryCards data={data} />}
         <div aria-live="polite">
-          {state === 'loading' && <div className="card p-5">Загружаем осмотры полей…</div>}
+          {state === 'loading' && <div className="card p-5" role="status">Загружаем осмотры полей…</div>}
           {['403', '422', 'error'].includes(state) && <div className="card p-5" role="alert">
 <p>{error}</p>
 <button type="button" onClick={reloadList} className="btn-primary mt-3 px-3 py-2">Повторить</button>
@@ -169,6 +169,6 @@ export default function FieldInspectionsPage({ onNavigate, enterprises = [], sel
       {createOpen && <InspectionCreateModal user={user} assignees={assignees} onClose={() => setCreateOpen(false)} onSuccess={handleCreateSuccess} />}
       {action && <InspectionActionModal {...action} user={user} assignees={assignees} onClose={() => setAction(null)} onSuccess={handleMutationSuccess} onReload={handleConflictReload} />}
       {selectedInspectionId && <InspectionDetailDrawer id={selectedInspectionId} user={user} onNavigate={onNavigate} onClose={() => onNavigate('field-inspections')} onAction={(mode, item) => setAction({ mode, item })} reloadToken={detailReloadToken} onRetry={reloadDetail} suspendEscape={Boolean(action)} />}
-    </div>
+    </main>
   );
 }

@@ -157,8 +157,9 @@ export default function InspectionCreateModal({ source, user, assignees, onClose
       <form onSubmit={submit} className="card max-h-[calc(100vh-1.5rem)] w-full max-w-xl overflow-y-auto p-5">
         <div className="flex justify-between">
 <h2 id="create-title" className="text-lg font-bold">Создать осмотр</h2>
-<button type="button" onClick={onClose} disabled={pending} aria-label="Закрыть">✕</button>
+<button type="button" onClick={onClose} disabled={pending} aria-label="Закрыть" className="rounded-lg p-2 focus:outline-none focus:ring-2 focus:ring-agro-accent">✕</button>
 </div>
+        <p className="mt-2 text-sm text-agro-muted">Укажите поле, задачу и срок полевой проверки.</p>
         <div className="mt-4 space-y-3">
           {attentionSource ? <div className="rounded-lg bg-agro-surface2 p-3 text-sm">
 <p>Поле: {source.field_name || '—'}</p>

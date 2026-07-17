@@ -638,7 +638,6 @@ export default function FieldAnalyticsWorkspace({ fieldId, onBack }) {
       if (mountedRef.current) {
         setError('Ошибка загрузки спутниковых данных');
         setLoading(false);
-        console.error(err);
       }
     }
   }, [fieldId, dayRange]);
@@ -759,7 +758,7 @@ export default function FieldAnalyticsWorkspace({ fieldId, onBack }) {
   const hasAnyData = ALL_INDEX_CODES.some(code => perIndexState[code]?.record != null);
 
   return (
-    <div className="h-full flex flex-col print:bg-white">
+    <div className="flex h-full min-w-0 flex-col print:bg-white" aria-label="Рабочая область аналитики поля">
       {/* Sticky top bar */}
       <div className="flex items-center justify-between px-4 py-2.5 border-b border-agro-surface2 bg-agro-surface print:bg-white print:border-gray-300 print:hidden">
         <button
@@ -790,7 +789,7 @@ export default function FieldAnalyticsWorkspace({ fieldId, onBack }) {
       </div>
 
       {/* Scrollable content */}
-      <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-5 print:overflow-visible print:p-4">
+      <div className="flex-1 space-y-5 overflow-y-auto overflow-x-hidden p-4 md:p-6 print:overflow-visible print:p-4">
         {/* A. Header */}
         <AnalyticsHeader field={field} coverage={coverage} perIndexState={perIndexState} />
 

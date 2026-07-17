@@ -136,7 +136,7 @@ export default function FieldAttentionPage({ onNavigate, enterprises }) {
   }, [selectedAttention]);
 
   return (
-    <div className="h-full overflow-y-auto overflow-x-hidden p-4 pt-16 md:p-8 md:pt-20">
+    <main className="h-full overflow-y-auto overflow-x-hidden p-4 pt-16 md:p-8 md:pt-20" aria-label="Очередь внимания">
       <div className="mx-auto max-w-7xl space-y-6">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <p className="text-sm text-agro-muted">Поля, требующие проверки, в порядке, сформированном сервером.</p>
@@ -161,6 +161,6 @@ export default function FieldAttentionPage({ onNavigate, enterprises }) {
         </div>
       </div>
       {createSource && <InspectionCreateModal source={createSource} user={user} assignees={[]} onClose={() => setSelectedAttention(null)} onSuccess={(inspection) => { setSelectedAttention(null); if (inspection?.id) onNavigate('field-inspection-detail', inspection.id); }} />}
-    </div>
+    </main>
   );
 }
