@@ -27,7 +27,7 @@ export default function AttentionSummaryCards({ summary, generatedAt, dateTo, lo
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-3">
         {CARD_FIELDS.map(([field, label]) => (
           <div key={field} className="card p-4 min-w-0">
-            <p className="text-xs text-agro-muted">{label}</p>
+            <p className="text-sm font-medium text-agro-muted">{label}</p>
             <p className="mt-1 text-2xl font-bold text-agro-text tabular-nums">{safeCount(safeSummary[field])}</p>
           </div>
         ))}

@@ -1,9 +1,9 @@
 const NAV_ITEMS = [
-  { key: 'fields',      label: 'Карта',         icon: MapIcon },
-  { key: 'dashboard',   label: 'Обзор',          icon: DashboardIcon },
-  { key: 'alerts',      label: 'Алерты',         icon: BellIcon },
-  { key: 'field-attention', label: 'Требуют внимания', icon: AttentionIcon },
-  { key: 'field-inspections', label: 'Осмотры полей', icon: InspectionIcon },
+  { key: 'dashboard',   label: 'Сегодня',        icon: DashboardIcon },
+  { key: 'fields',      label: 'Поля',           icon: MapIcon },
+  { key: 'field-attention', label: 'Внимание', icon: AttentionIcon },
+  { key: 'field-inspections', label: 'Осмотры', icon: InspectionIcon },
+  { key: 'alerts',      label: 'Предупреждения', icon: BellIcon },
   { key: 'enterprises', label: 'Предприятия',    icon: BuildingIcon },
   { key: 'reports',     label: 'Отчёты',         icon: ReportIcon },
 ];
@@ -16,50 +16,43 @@ export default function Sidebar({ activeView, onNavigate, enterprises = [] }) {
   };
 
   return (
-    <aside className="w-14 flex flex-col bg-white border-r border-agro-border flex-shrink-0 z-30">
+    <aside className="fixed inset-x-0 bottom-0 z-30 flex h-16 flex-shrink-0 bg-white border-t border-agro-border md:static md:h-screen md:w-64 md:flex-col md:border-r md:border-t-0">
       {/* Logo */}
-      <div className="flex items-center justify-center h-12 border-b border-agro-border">
+      <div className="hidden h-16 items-center gap-3 border-b border-agro-border px-5 md:flex">
         <div className="w-7 h-7 rounded-full bg-agro-accent flex items-center justify-center">
           <span className="text-white font-bold text-xs">A</span>
         </div>
+        <div><p className="text-base font-bold text-agro-text">AgroSat</p><p className="text-xs text-agro-muted">Мониторинг полей</p></div>
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 flex flex-col items-center gap-1 py-3">
+      <nav className="flex flex-1 items-center gap-1 overflow-x-auto px-2 py-2 md:flex-col md:items-stretch md:overflow-visible md:px-3 md:py-5" aria-label="Основная навигация">
         {NAV_ITEMS.map((item) => {
           const active = isActive(item.key);
           return (
-            <div key={item.key} className="relative group">
+            <div key={item.key} className="relative min-w-14 flex-1 md:min-w-0 md:flex-none">
               <button
                 onClick={() => onNavigate(item.key)}
-                aria-label={item.label}
-                title={item.label}
-                className={`w-10 h-10 flex items-center justify-center rounded-lg transition-colors
-                  ${active ? 'text-agro-accent' : 'text-agro-muted hover:text-agro-text hover:bg-agro-hover'}`}
+                aria-current={active ? 'page' : undefined}
+                className={`flex min-h-11 w-full flex-col items-center justify-center gap-1 rounded-xl px-2 text-[11px] font-medium transition-colors md:flex-row md:justify-start md:gap-3 md:px-3 md:text-sm
+                  ${active ? 'bg-emerald-50 text-agro-accent' : 'text-slate-600 hover:text-agro-text hover:bg-agro-hover'}`}
               >
                 <item.icon className="w-5 h-5" />
+                <span className="truncate">{item.label}</span>
               </button>
-              {/* Active indicator bar */}
-              {active && <div className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 bg-agro-accent rounded-r" />}
-              {/* Tooltip */}
-              <div className="absolute left-full ml-2 px-2 py-1 bg-agro-text text-white text-xs rounded opacity-0 group-hover:opacity-100 pointer-events-none whitespace-nowrap z-50 shadow-lg">
-                {item.label}
-              </div>
             </div>
           );
         })}
       </nav>
 
       {/* Bottom */}
-      <div className="flex items-center justify-center h-12 border-t border-agro-border">
+      <div className="hidden items-center gap-3 border-t border-agro-border p-4 md:flex">
         <div className="relative group">
           <div className="w-7 h-7 rounded-full bg-agro-card flex items-center justify-center text-agro-muted text-xs">
             U
           </div>
-          <div className="absolute left-full ml-2 px-2 py-1 bg-agro-text text-white text-xs rounded opacity-0 group-hover:opacity-100 pointer-events-none whitespace-nowrap z-50 shadow-lg">
-            Пользователь
-          </div>
         </div>
+        <div><p className="text-sm font-medium text-agro-text">Пользователь</p><p className="text-xs text-agro-muted">Рабочий профиль</p></div>
       </div>
     </aside>
   );

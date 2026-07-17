@@ -199,7 +199,7 @@ function AppLayout() {
 
   const getHeaderInfo = () => {
     switch (view) {
-      case 'dashboard':   return { title: 'Главная' };
+      case 'dashboard':   return { title: 'Сегодня', subtitle: 'Оперативная сводка по доступным данным' };
       case 'fields':      return { title: 'Поля' };
       case 'field-detail': return { title: 'Поле', subtitle: selectedFieldId ? `#${selectedFieldId}` : null };
       case 'field-analytics': return { title: 'Аналитика поля', subtitle: selectedFieldId ? `#${selectedFieldId}` : null };
@@ -268,7 +268,7 @@ function AppLayout() {
   };
 
   return (
-    <div className="flex h-screen bg-agro-dark overflow-hidden">
+    <div className="flex h-screen bg-slate-50 overflow-hidden pb-16 md:pb-0">
       <Sidebar
         activeView={activeView}
         onNavigate={handleNavigate}

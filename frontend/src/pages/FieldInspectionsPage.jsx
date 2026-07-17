@@ -140,13 +140,10 @@ export default function FieldInspectionsPage({ onNavigate, enterprises = [], sel
 
   const items = Array.isArray(data?.items) ? data.items : [];
   return (
-    <div className="h-full overflow-y-auto overflow-x-hidden p-4 pt-16 md:p-6 md:pt-16">
-      <div className="mx-auto max-w-7xl space-y-4">
+    <div className="h-full overflow-y-auto overflow-x-hidden p-4 pt-16 md:p-8 md:pt-20">
+      <div className="mx-auto max-w-7xl space-y-6">
         <div className="flex flex-wrap justify-between gap-3">
-          <div>
-<h1 className="text-2xl font-bold">Осмотры полей</h1>
-<p className="text-sm text-agro-muted">Рабочее пространство полевых осмотров в порядке сервера.</p>
-</div>
+          <p className="text-sm text-agro-muted">Планирование, выполнение и результаты полевых проверок.</p>
           {canWrite && <button type="button" onClick={() => setCreateOpen(true)} className="btn-primary rounded-lg px-4 py-2">Создать осмотр</button>}
         </div>
         <InspectionFilters draft={draft} onChange={changeFilter} onApply={applyFilters} onReset={resetFilters} onRefresh={reloadList} enterprises={enterprises} assignees={assignees} role={role} loading={state === 'loading'} />

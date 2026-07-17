@@ -136,10 +136,10 @@ export default function FieldAttentionPage({ onNavigate, enterprises }) {
   }, [selectedAttention]);
 
   return (
-    <div className="h-full overflow-y-auto overflow-x-hidden p-4 pt-16 md:p-6 md:pt-16">
-      <div className="mx-auto max-w-7xl space-y-4">
+    <div className="h-full overflow-y-auto overflow-x-hidden p-4 pt-16 md:p-8 md:pt-20">
+      <div className="mx-auto max-w-7xl space-y-6">
         <div className="flex flex-wrap items-start justify-between gap-3">
-          <div><h1 className="text-2xl font-bold text-agro-text">Требуют внимания</h1><p className="mt-1 text-sm text-agro-muted">Ежедневная очередь полей в порядке, сформированном сервером.</p></div>
+          <p className="text-sm text-agro-muted">Поля, требующие проверки, в порядке, сформированном сервером.</p>
           <button type="button" onClick={handleRefresh} disabled={state === 'loading'} className="btn-secondary rounded-lg px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-agro-accent disabled:opacity-60">Обновить</button>
         </div>
 

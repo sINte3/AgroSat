@@ -161,13 +161,14 @@ export default function DashboardPage({ onNavigate, onFieldClick, onFieldHighlig
 
   return (
     <div className="flex flex-col h-full">
-      <div className="p-4 lg:p-6 pt-16 space-y-4">
+      <div className="h-full overflow-y-auto p-4 pt-16 lg:p-8 lg:pt-20 space-y-6">
         {/* Sub-header with cluster info and last update */}
-        <div>
-          <p className="text-sm text-agro-muted">
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <div><p className="text-sm text-agro-muted">
             Бухоро Агрокластер
             {lastUpdated && ` · Данные от ${lastUpdated}`}
-          </p>
+          </p></div>
+          <div className="flex flex-wrap gap-2"><button type="button" onClick={() => onNavigate('field-attention')} className="btn-primary rounded-lg px-4 py-2 text-sm">Открыть очередь внимания</button><button type="button" onClick={() => onNavigate('fields')} className="btn-secondary rounded-lg px-4 py-2 text-sm">Перейти к полям</button></div>
         </div>
 
         {/* Summary cards */}
@@ -181,7 +182,7 @@ export default function DashboardPage({ onNavigate, onFieldClick, onFieldHighlig
             <div className="card">
               <div className="flex items-center justify-between mb-3">
                 <h2 className="text-sm font-semibold text-agro-text">
-                  Сводка предупреждений
+                  Приоритетные действия
                 </h2>
                 {allAlerts.length > 0 && (
                   <button
@@ -201,8 +202,8 @@ export default function DashboardPage({ onNavigate, onFieldClick, onFieldHighlig
                     </svg>
                   </div>
                   <div>
-                    <p className="text-sm font-medium text-agro-text">Все поля в норме</p>
-                    <p className="text-xs text-agro-muted">Активных предупреждений нет</p>
+                    <p className="text-sm font-medium text-agro-text">Нет срочных действий по доступным данным.</p>
+                    <p className="text-sm text-agro-muted">Продолжайте плановый мониторинг полей.</p>
                   </div>
                 </div>
               ) : (
@@ -246,7 +247,7 @@ export default function DashboardPage({ onNavigate, onFieldClick, onFieldHighlig
             {summary && (
               <div className="card">
                 <h2 className="text-sm font-semibold text-agro-text mb-3">
-                  Состояние полей
+                  Состояние мониторинга
                 </h2>
                 <div className="grid grid-cols-3 gap-3">
                   <div className="p-3 rounded-lg bg-green-50 border border-green-200">
@@ -370,7 +371,7 @@ export default function DashboardPage({ onNavigate, onFieldClick, onFieldHighlig
           <div className="card">
             <div className="flex items-center justify-between mb-3">
               <h2 className="text-sm font-semibold text-agro-text">
-                Покрытие спутниковыми индексами
+                Покрытие и свежесть спутниковых данных
               </h2>
               {coverage.summary.latest_captured_date && (
                 <span className="text-xs text-agro-muted">

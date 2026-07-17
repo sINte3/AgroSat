@@ -1,6 +1,6 @@
 export function InterpretationLoading() {
   return (
-    <div className="card space-y-3" role="status" aria-live="polite">
+    <div className="card min-h-64 space-y-3" role="status" aria-live="polite">
       <div className="h-5 w-64 rounded bg-agro-surface2 animate-pulse" />
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-3">
         {[0, 1, 2, 3, 4].map((item) => <div key={item} className="h-44 rounded-lg bg-agro-surface2 animate-pulse" />)}
