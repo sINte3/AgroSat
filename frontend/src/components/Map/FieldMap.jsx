@@ -82,6 +82,12 @@ const BASE_MAP_VISIBILITY = {
   hybrid: { satellite: 'visible', osm: 'none', hybridLabels: 'visible' },
 };
 
+const DEFERRED_SATELLITE_PIPELINE_ENABLED =
+  import.meta.env.VITE_DEFERRED_SATELLITE_PIPELINE !== 'false';
+const SATELLITE_REVEAL_DELAY_MS = 220;
+const HYBRID_LABELS_FALLBACK_MS = 1800;
+const SATELLITE_SLOW_STATUS_MS = 5000;
+
 const COMPOSITE_MAP_STYLE = {
   version: 8,
   glyphs: GLYPHS,
@@ -91,8 +97,8 @@ const COMPOSITE_MAP_STYLE = {
     [BASE_MAP_SOURCE_IDS.hybridLabels]: ESRI_LABELS_SOURCE,
   },
   layers: [
-    { id: BASE_MAP_LAYER_IDS.satellite, type: 'raster', source: BASE_MAP_SOURCE_IDS.satellite, layout: { visibility: 'visible' }, paint: { 'raster-fade-duration': 0 } },
-    { id: BASE_MAP_LAYER_IDS.osm, type: 'raster', source: BASE_MAP_SOURCE_IDS.osm, layout: { visibility: 'none' }, paint: { 'raster-fade-duration': 0 } },
+    { id: BASE_MAP_LAYER_IDS.osm, type: 'raster', source: BASE_MAP_SOURCE_IDS.osm, layout: { visibility: DEFERRED_SATELLITE_PIPELINE_ENABLED ? 'visible' : 'none' }, paint: { 'raster-fade-duration': 0 } },
+    { id: BASE_MAP_LAYER_IDS.satellite, type: 'raster', source: BASE_MAP_SOURCE_IDS.satellite, layout: { visibility: DEFERRED_SATELLITE_PIPELINE_ENABLED ? 'none' : 'visible' }, paint: { 'raster-fade-duration': 0 } },
     { id: BASE_MAP_LAYER_IDS.hybridLabels, type: 'raster', source: BASE_MAP_SOURCE_IDS.hybridLabels, layout: { visibility: 'none' }, paint: { 'raster-fade-duration': 0 } },
   ],
 };
@@ -111,6 +117,18 @@ function applyBaseMapVisibility(map, styleKey) {
   )) return true;
   try {
     entries.forEach(([key, layerId]) => map.setLayoutProperty(layerId, 'visibility', visibility[key]));
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function setBaseLayerVisibility(map, layerId, visibility) {
+  if (!map || map._removed || !map.getLayer(layerId)) return false;
+  try {
+    if ((map.getLayoutProperty(layerId, 'visibility') || 'visible') !== visibility) {
+      map.setLayoutProperty(layerId, 'visibility', visibility);
+    }
     return true;
   } catch (_) {
     return false;
@@ -373,6 +391,7 @@ export default function FieldMap({
   onMapModeChange,
 }) {
   const [activeStyle, setActiveStyle] = useState('satellite');
+  const [satellitePipelineStatus, setSatellitePipelineStatus] = useState('idle');
   const [activeColorMode, setActiveColorMode] = useState('crop');
   const [showLegend, setShowLegend] = useState(false);
   const [hoveredFeature, setHoveredFeature] = useState(null);
@@ -398,6 +417,14 @@ export default function FieldMap({
   const cameraMovingRef = useRef(false);
   const labelVisibilityBeforeMoveRef = useRef(null);
   const fitBoundsTimeoutRef = useRef(null);
+  const activeBaseModeRef = useRef('satellite');
+  const satelliteRevealTimeoutRef = useRef(null);
+  const hybridLabelsFallbackTimeoutRef = useRef(null);
+  const satelliteSlowStatusTimeoutRef = useRef(null);
+  const satellitePipelineGenerationRef = useRef(0);
+  const satelliteSourceLoadedRef = useRef(false);
+  const hybridLabelsSourceLoadedRef = useRef(false);
+  const satellitePipelineStatusRef = useRef('idle');
 
   const callbacksRef = useRef({
     onFieldSelect,
@@ -414,7 +441,120 @@ export default function FieldMap({
     onDrawCreate: null,
     onMoveStart: null,
     onMoveEnd: null,
+    onSourceData: null,
   });
+
+  const updateSatellitePipelineStatus = (status) => {
+    if (satellitePipelineStatusRef.current === status) return;
+    satellitePipelineStatusRef.current = status;
+    if (isMountedRef.current) setSatellitePipelineStatus(status);
+  };
+
+  const clearPipelineTimers = () => {
+    if (satelliteRevealTimeoutRef.current) clearTimeout(satelliteRevealTimeoutRef.current);
+    if (hybridLabelsFallbackTimeoutRef.current) clearTimeout(hybridLabelsFallbackTimeoutRef.current);
+    if (satelliteSlowStatusTimeoutRef.current) clearTimeout(satelliteSlowStatusTimeoutRef.current);
+    satelliteRevealTimeoutRef.current = null;
+    hybridLabelsFallbackTimeoutRef.current = null;
+    satelliteSlowStatusTimeoutRef.current = null;
+  };
+
+  const cancelDeferredBasePipeline = ({ updateStatus = true } = {}) => {
+    clearPipelineTimers();
+    satellitePipelineGenerationRef.current += 1;
+    satelliteSourceLoadedRef.current = false;
+    hybridLabelsSourceLoadedRef.current = false;
+    if (updateStatus) updateSatellitePipelineStatus('idle');
+    return satellitePipelineGenerationRef.current;
+  };
+
+  const applyImmediateBaseMode = (map, mode) => {
+    const applied = applyBaseMapVisibility(map, mode);
+    if (applied) updateSatellitePipelineStatus('idle');
+    return applied;
+  };
+
+  const applyNavigationFallback = (map, mode = activeBaseModeRef.current) => {
+    if (!DEFERRED_SATELLITE_PIPELINE_ENABLED || mode === 'osm') {
+      return applyImmediateBaseMode(map, mode);
+    }
+    const applied = [
+      setBaseLayerVisibility(map, BASE_MAP_LAYER_IDS.osm, 'visible'),
+      setBaseLayerVisibility(map, BASE_MAP_LAYER_IDS.satellite, 'none'),
+      setBaseLayerVisibility(map, BASE_MAP_LAYER_IDS.hybridLabels, 'none'),
+    ].every(Boolean);
+    if (applied) updateSatellitePipelineStatus('navigation');
+    return applied;
+  };
+
+  const completeHybridLabelsLoad = (map, generation) => {
+    if (
+      generation !== satellitePipelineGenerationRef.current ||
+      activeBaseModeRef.current !== 'hybrid' ||
+      !satelliteSourceLoadedRef.current
+    ) return false;
+    hybridLabelsSourceLoadedRef.current = true;
+    if (hybridLabelsFallbackTimeoutRef.current) clearTimeout(hybridLabelsFallbackTimeoutRef.current);
+    hybridLabelsFallbackTimeoutRef.current = null;
+    updateSatellitePipelineStatus('idle');
+    return setBaseLayerVisibility(map, BASE_MAP_LAYER_IDS.hybridLabels, 'visible');
+  };
+
+  const completeSatelliteLoad = (map, generation) => {
+    if (
+      generation !== satellitePipelineGenerationRef.current ||
+      !['satellite', 'hybrid'].includes(activeBaseModeRef.current) ||
+      !satelliteRevealTimeoutRef.current && satellitePipelineStatusRef.current !== 'loading-satellite' && satellitePipelineStatusRef.current !== 'slow'
+    ) return false;
+    satelliteSourceLoadedRef.current = true;
+    if (satelliteSlowStatusTimeoutRef.current) clearTimeout(satelliteSlowStatusTimeoutRef.current);
+    satelliteSlowStatusTimeoutRef.current = null;
+    setBaseLayerVisibility(map, BASE_MAP_LAYER_IDS.osm, 'none');
+    setBaseLayerVisibility(map, BASE_MAP_LAYER_IDS.satellite, 'visible');
+    if (activeBaseModeRef.current === 'hybrid') {
+      setBaseLayerVisibility(map, BASE_MAP_LAYER_IDS.hybridLabels, 'visible');
+      updateSatellitePipelineStatus(
+        hybridLabelsSourceLoadedRef.current ? 'idle' : 'loading-labels'
+      );
+    } else {
+      setBaseLayerVisibility(map, BASE_MAP_LAYER_IDS.hybridLabels, 'none');
+      updateSatellitePipelineStatus('idle');
+    }
+    return true;
+  };
+
+  const beginDeferredSatelliteReveal = (map, mode = activeBaseModeRef.current) => {
+    if (!DEFERRED_SATELLITE_PIPELINE_ENABLED || mode === 'osm') {
+      return applyImmediateBaseMode(map, mode);
+    }
+    clearPipelineTimers();
+    satelliteSourceLoadedRef.current = false;
+    hybridLabelsSourceLoadedRef.current = false;
+    const generation = ++satellitePipelineGenerationRef.current;
+    applyNavigationFallback(map, mode);
+    satelliteRevealTimeoutRef.current = setTimeout(() => {
+      satelliteRevealTimeoutRef.current = null;
+      if (generation !== satellitePipelineGenerationRef.current || activeBaseModeRef.current !== mode) return;
+      setBaseLayerVisibility(map, BASE_MAP_LAYER_IDS.osm, 'visible');
+      setBaseLayerVisibility(map, BASE_MAP_LAYER_IDS.satellite, 'visible');
+      setBaseLayerVisibility(map, BASE_MAP_LAYER_IDS.hybridLabels, 'none');
+      updateSatellitePipelineStatus('loading-satellite');
+      satelliteSlowStatusTimeoutRef.current = setTimeout(() => {
+        satelliteSlowStatusTimeoutRef.current = null;
+        if (generation === satellitePipelineGenerationRef.current && !satelliteSourceLoadedRef.current) {
+          updateSatellitePipelineStatus('slow');
+        }
+      }, SATELLITE_SLOW_STATUS_MS);
+      if (mode === 'hybrid') {
+        hybridLabelsFallbackTimeoutRef.current = setTimeout(() => {
+          hybridLabelsFallbackTimeoutRef.current = null;
+          if (generation !== satellitePipelineGenerationRef.current || activeBaseModeRef.current !== 'hybrid') return;
+          setBaseLayerVisibility(map, BASE_MAP_LAYER_IDS.hybridLabels, 'visible');
+        }, HYBRID_LABELS_FALLBACK_MS);
+      }
+    }, SATELLITE_REVEAL_DELAY_MS);
+    return true;
+  };
 
   const clearHoverState = (map, clearTooltip = true) => {
     const hoveredId = hoveredFeatureIdRef.current;
@@ -607,12 +747,26 @@ export default function FieldMap({
     mapRef.current = map;
     map.addControl(new maplibregl.NavigationControl(), 'top-right');
 
+    handlersRef.current.onSourceData = (event) => {
+      if (!DEFERRED_SATELLITE_PIPELINE_ENABLED || mapRef.current !== map || !isMountedRef.current) return;
+      const generation = satellitePipelineGenerationRef.current;
+      const mode = activeBaseModeRef.current;
+      if (event.isSourceLoaded !== true) return;
+      if (event.sourceId === BASE_MAP_SOURCE_IDS.satellite && ['satellite', 'hybrid'].includes(mode)) {
+        completeSatelliteLoad(map, generation);
+      } else if (event.sourceId === BASE_MAP_SOURCE_IDS.hybridLabels && mode === 'hybrid') {
+        completeHybridLabelsLoad(map, generation);
+      }
+    };
+    map.on('sourcedata', handlersRef.current.onSourceData);
+
     handlersRef.current.onLoad = async () => {
       sessionPurgedRef.current = false;
 
       const m = mapRef.current;
       if (!m || !isMountedRef.current) return;
       setMapInstance(m);
+      beginDeferredSatelliteReveal(m, activeBaseModeRef.current);
 
       abortControllerRef.current = new AbortController();
 
@@ -816,10 +970,17 @@ export default function FieldMap({
           clearHoverState(m);
           m.getCanvas().style.cursor = '';
           suspendLabelsForMove(m);
+          if (['satellite', 'hybrid'].includes(activeBaseModeRef.current)) {
+            cancelDeferredBasePipeline({ updateStatus: false });
+            applyNavigationFallback(m, activeBaseModeRef.current);
+          }
         };
         handlersRef.current.onMoveEnd = () => {
           cameraMovingRef.current = false;
           restoreLabelsAfterMove(m);
+          if (['satellite', 'hybrid'].includes(activeBaseModeRef.current)) {
+            beginDeferredSatelliteReveal(m, activeBaseModeRef.current);
+          }
         };
         m.on('movestart', handlersRef.current.onMoveStart);
         m.on('moveend', handlersRef.current.onMoveEnd);
@@ -839,6 +1000,8 @@ export default function FieldMap({
     return () => {
       isMountedRef.current = false;
       sessionPurgedRef.current = true;
+      cancelDeferredBasePipeline({ updateStatus: false });
+      satellitePipelineStatusRef.current = 'idle';
       window.removeEventListener('agrosat:logout', handleLogout);
       if (hoverFrameRef.current) cancelAnimationFrame(hoverFrameRef.current);
       hoverFrameRef.current = null;
@@ -853,6 +1016,10 @@ export default function FieldMap({
       disableDrawMode();
 
       if (mapRef.current) {
+        if (handlersRef.current.onSourceData) {
+          mapRef.current.off('sourcedata', handlersRef.current.onSourceData);
+          handlersRef.current.onSourceData = null;
+        }
         if (handlersRef.current.onMoveStart) {
           mapRef.current.off('movestart', handlersRef.current.onMoveStart);
         }
@@ -908,8 +1075,20 @@ export default function FieldMap({
   const switchMapStyle = (styleKey) => {
     const m = mapRef.current;
     if (!m) return;
-    if (styleKey === activeStyle) return;
-    if (applyBaseMapVisibility(m, styleKey)) setActiveStyle(styleKey);
+    if (styleKey === activeBaseModeRef.current) {
+      if (satellitePipelineStatusRef.current === 'slow') beginDeferredSatelliteReveal(m, styleKey);
+      return;
+    }
+    cancelDeferredBasePipeline({ updateStatus: false });
+    activeBaseModeRef.current = styleKey;
+    let applied = false;
+    if (!DEFERRED_SATELLITE_PIPELINE_ENABLED || styleKey === 'osm') {
+      applied = applyImmediateBaseMode(m, styleKey);
+    } else {
+      applied = applyNavigationFallback(m, styleKey);
+      if (applied && !cameraMovingRef.current) beginDeferredSatelliteReveal(m, styleKey);
+    }
+    if (applied) setActiveStyle(styleKey);
   };
 
   // ─── Switch color mode ─────────────────────────────────────────────────────
@@ -1006,6 +1185,17 @@ export default function FieldMap({
       </div>
 
       {/* Map mode selector — compact row */}
+      {activeStyle !== 'osm' && satellitePipelineStatus !== 'idle' && (
+        <div className="pointer-events-none absolute top-12 left-3 z-10 max-w-[min(320px,calc(100%-24px))] rounded-md border border-slate-200 bg-white/90 px-3 py-1.5 text-[13px] font-medium text-slate-700 shadow backdrop-blur-sm">
+          {{
+            navigation: 'Навигация по карте · спутник после остановки',
+            'loading-satellite': 'Загрузка спутникового слоя…',
+            'loading-labels': 'Загрузка подписей…',
+            slow: 'Спутниковый слой загружается медленно',
+          }[satellitePipelineStatus]}
+        </div>
+      )}
+
       <div className="absolute top-12 right-3 z-10 flex flex-wrap gap-1 max-w-[260px] justify-end">
         {MAP_MODES.map(mode => (
           <button
