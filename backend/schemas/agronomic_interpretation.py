@@ -1,6 +1,6 @@
 """Backward-compatible typed schemas for contextual agronomic interpretation."""
 from datetime import date, datetime
-from typing import Optional
+from typing import Literal, Optional
 from pydantic import BaseModel
 
 
@@ -51,7 +51,8 @@ class Change(BaseModel):
 
 
 class Baseline(BaseModel):
-    status: str
+    status: Literal["insufficient_history", "available"]
+    position_status: Literal["insufficient_history", "within_field_range", "above_field_range", "below_field_range"]
     sample_count: int
     point_count: int
     median: Optional[float] = None
@@ -97,7 +98,8 @@ class DataQuality(BaseModel):
 
 class Confidence(BaseModel):
     score: int
-    level: str
+    level: Literal["insufficient", "low", "medium", "high"]
+    contextual_level: Literal["none", "low", "medium", "high"]
     reasons: list[str]
 
 

@@ -94,12 +94,12 @@ def calculate_change(latest, previous) -> dict:
 
 def calculate_baseline(prior_rows: list, latest_value: float | None) -> dict:
     values = [float(row.value) for row in prior_rows]
-    result = {"status": "insufficient_history", "sample_count": len(values), "point_count": len(values), "median": None, "p25": None, "p75": None, "min": None, "max": None, "minimum": None, "maximum": None, "latest_percentile": None, "deviation_from_median": None, "mad": None}
+    result = {"status": "insufficient_history", "position_status": "insufficient_history", "sample_count": len(values), "point_count": len(values), "median": None, "p25": None, "p75": None, "min": None, "max": None, "minimum": None, "maximum": None, "latest_percentile": None, "deviation_from_median": None, "mad": None}
     if len(values) < BASELINE_MIN_PRIOR:
         return result
     middle, low, high = median(values), percentile(values, .25), percentile(values, .75)
-    status = "below_field_range" if latest_value < low else "above_field_range" if latest_value > high else "within_field_range"
-    result.update(status=status, median=rounded(middle), p25=rounded(low), p75=rounded(high), min=rounded(min(values)), max=rounded(max(values)), minimum=rounded(min(values)), maximum=rounded(max(values)), latest_percentile=latest_percentile(values, latest_value), deviation_from_median=rounded(latest_value - middle), mad=rounded(median(abs(value - middle) for value in values)))
+    position_status = "below_field_range" if latest_value < low else "above_field_range" if latest_value > high else "within_field_range"
+    result.update(status="available", position_status=position_status, median=rounded(middle), p25=rounded(low), p75=rounded(high), min=rounded(min(values)), max=rounded(max(values)), minimum=rounded(min(values)), maximum=rounded(max(values)), latest_percentile=latest_percentile(values, latest_value), deviation_from_median=rounded(latest_value - middle), mad=rounded(median(abs(value - middle) for value in values)))
     return result
 
 
@@ -144,7 +144,7 @@ def calculate_heterogeneity(latest, code: str) -> tuple[dict, list[str]]:
 
 def calculate_confidence(rows: list, latest, today: date, dispersion_available: bool, context: dict) -> tuple[dict, list[str], int]:
     if latest is None:
-        return {"score": 0, "level": "none", "reasons": ["no_data"]}, ["no_data"], 0
+        return {"score": 0, "level": "insufficient", "contextual_level": "none", "reasons": ["no_data"]}, ["no_data"], 0
     freshness = max(0, (today - latest.captured_date).days)
     cloud, pixels = finite_number(getattr(latest, "cloud_cover_pct", None)), finite_number(getattr(latest, "valid_pixels_pct", None))
     flags = []
@@ -164,7 +164,7 @@ def calculate_confidence(rows: list, latest, today: date, dispersion_available: 
     score += 5 if context.get("growth_stage_available") else 0
     score = max(0, min(100, int(score)))
     level = "low" if len(rows) == 1 or score < 50 else "medium" if score < 75 else "high"
-    return {"score": score, "level": level, "reasons": flags or ["fresh_dense_clean_history"]}, flags, freshness
+    return {"score": score, "level": level, "contextual_level": level, "reasons": flags or ["fresh_dense_clean_history"]}, flags, freshness
 
 
 def build_index_interpretation(code: str, rows: Iterable, today: date, context: dict | None = None) -> dict:
@@ -178,7 +178,7 @@ def build_index_interpretation(code: str, rows: Iterable, today: date, context: 
     change = calculate_change(latest, previous)
     baseline = calculate_baseline(observations[:-1], float(latest.value) if latest else None)
     trend = calculate_trend(observations)
-    if baseline["status"] != "insufficient_history" and latest:
+    if baseline["status"] == "available" and latest:
         scale = max((baseline["p75"] - baseline["p25"]), CHANGE_STABLE_EPSILON)
         deviation = abs(float(latest.value) - baseline["median"]) / scale
         change["statistical_signal"] = "strong" if deviation >= 2 else "notable" if deviation >= 1 else "normal"
@@ -196,7 +196,7 @@ def _hypothesis(code, title, reason, signals, missing, confidence="low"):
 
 
 def add_cross_index_hypotheses(items: list[dict]) -> None:
-    notable = [item for item in items if item["confidence"]["level"] != "none" and item["change"]["statistical_signal"] in {"notable", "strong"}]
+    notable = [item for item in items if item["confidence"].get("contextual_level", "none") != "none" and item["change"]["statistical_signal"] in {"notable", "strong"}]
     directions = {direction: [item for item in notable if item["change"]["direction"] == direction] for direction in ("rising", "falling")}
     for direction, matching in directions.items():
         if len(matching) < 2:
@@ -213,25 +213,24 @@ def add_cross_index_hypotheses(items: list[dict]) -> None:
 
 
 def overall_confidence(items: list[dict]) -> str:
-    legacy = {"none": "insufficient", "low": "low", "medium": "medium", "high": "high"}
     available = [item["confidence"]["level"] for item in items if item.get("latest", item.get("latest_observation"))]
     if not available:
         return "insufficient"
-    order = {"none": 0, "low": 1, "medium": 2, "high": 3}
-    return legacy[min(available, key=order.get)]
+    order = {"insufficient": 0, "low": 1, "medium": 2, "high": 3}
+    return min(available, key=lambda level: order.get(level, 0))
 
 
 def build_summary(items: list[dict]) -> dict:
     with_data = [item for item in items if item["latest"]]
-    sufficient = [item for item in items if item["baseline"]["status"] != "insufficient_history"]
+    sufficient = [item for item in items if item["baseline"]["status"] == "available"]
     latest_dates = [item["latest"]["captured_date"] for item in with_data]
     scores = [item["confidence"]["score"] for item in with_data]
     confidence_score = min(scores) if scores else 0
     level = "none" if not scores else "low" if confidence_score < 50 else "medium" if confidence_score < 75 else "high"
-    attention = any(item["baseline"]["status"] in {"above_field_range", "below_field_range"} and item["confidence"]["level"] in {"medium", "high"} for item in items)
+    attention = any(item["baseline"]["position_status"] in {"above_field_range", "below_field_range"} and item["confidence"].get("contextual_level") in {"medium", "high"} for item in items)
     status = "insufficient_data" if not with_data else "attention" if attention else "monitor"
     checks = list(dict.fromkeys(check for item in items for check in item["recommended_checks"]))[:MAX_SUMMARY_CHECKS]
-    signals = [f"{item['index_code']}:{item['baseline']['status']}" for item in items if item["baseline"]["status"] in {"above_field_range", "below_field_range"}]
+    signals = [f"{item['index_code']}:{item['baseline']['position_status']}" for item in items if item["baseline"]["position_status"] in {"above_field_range", "below_field_range"}]
     latest = max(latest_dates) if latest_dates else None
     freshness = min((item["data_quality"]["freshness_days"] for item in with_data), default=None)
     return {"status": status, "confidence": level, "confidence_score": confidence_score, "latest_observation_date": latest, "freshness_days": freshness, "indices_with_data": len(with_data), "indices_with_sufficient_history": len(sufficient), "primary_signals": signals, "recommended_next_checks": checks, "disclaimer": DISCLAIMER}

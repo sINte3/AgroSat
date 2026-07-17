@@ -15,8 +15,10 @@ if str(BACKEND) not in sys.path:
 from services.agronomic_interpretation import (  # noqa: E402
     CHANGE_STABLE_EPSILON, INDEX_CODES, add_cross_index_hypotheses,
     build_index_interpretation, build_summary, calculate_baseline,
-    calculate_change, calculate_trend, latest_percentile, percentile,
+    calculate_change, calculate_trend, latest_percentile, overall_confidence,
+    percentile,
 )
+from schemas.agronomic_interpretation import AgronomicInterpretationResponse  # noqa: E402
 
 
 def row(day, value, identifier=1, **values):
@@ -48,7 +50,11 @@ class StatisticsTests(unittest.TestCase):
         self.assertAlmostEqual(calculate_trend(rows)["slope_per_day"], .05, places=4)
     def test_baseline_insufficient_zero_to_four(self):
         for count in range(5): self.assertEqual(calculate_baseline(history(count), .5)["status"], "insufficient_history")
-    def test_baseline_available_five(self): self.assertNotEqual(calculate_baseline(history(5), .5)["status"], "insufficient_history")
+    def test_baseline_available_five(self): self.assertEqual(calculate_baseline(history(5), .5)["status"], "available")
+    def test_position_status_insufficient(self): self.assertEqual(calculate_baseline(history(4), .5)["position_status"], "insufficient_history")
+    def test_position_status_within(self): self.assertEqual(calculate_baseline(history(5), .24)["position_status"], "within_field_range")
+    def test_position_status_above(self): self.assertEqual(calculate_baseline(history(5), .9)["position_status"], "above_field_range")
+    def test_position_status_below(self): self.assertEqual(calculate_baseline(history(5), .1)["position_status"], "below_field_range")
     def test_nonfinite_excluded(self): self.assertEqual(build_index_interpretation("ndvi", history(2)+[row(date(2026,1,9), math.nan, 9)], date(2026,1,10))["data_quality"]["observation_count"], 2)
     def test_duplicate_date_flag(self):
         rows=history(2)+[row(history(2)[-1].captured_date,.9,99)]
@@ -58,8 +64,16 @@ class StatisticsTests(unittest.TestCase):
 
 
 class ConfidenceAndContextTests(unittest.TestCase):
-    def test_no_data_score_zero_none(self):
-        result=build_index_interpretation("ndvi",[],date(2026,1,1)); self.assertEqual((result["confidence"]["score"],result["confidence"]["level"]),(0,"none"))
+    def test_no_data_score_zero_insufficient(self):
+        result=build_index_interpretation("ndvi",[],date(2026,1,1)); self.assertEqual((result["confidence"]["score"],result["confidence"]["level"]),(0,"insufficient"))
+    def test_no_data_contextual_level_none(self): self.assertEqual(build_index_interpretation("ndvi",[],date(2026,1,1))["confidence"]["contextual_level"],"none")
+    def test_nonempty_confidence_mapping(self):
+        for count in (1,4,8):
+            confidence=build_index_interpretation("ndvi",history(count,std_value=.03),date(2026,1,23))["confidence"]
+            self.assertEqual(confidence["contextual_level"],confidence["level"])
+    def test_overall_confidence_handles_insufficient(self):
+        item=build_index_interpretation("ndvi",[],date(2026,1,1)); item["latest"]={"value":.2}
+        self.assertEqual(overall_confidence([item]),"insufficient")
     def test_single_observation_low(self): self.assertEqual(build_index_interpretation("ndvi",[row(date(2026,1,1),.2)],date(2026,1,2))["confidence"]["level"],"low")
     def test_fresh_dense_clean_high(self): self.assertEqual(build_index_interpretation("ndvi",history(8,std_value=.03),date(2026,1,23),{"crop_available":True,"growth_stage_available":True})["confidence"]["level"],"high")
     def test_stale_lowers_score(self):
@@ -104,6 +118,8 @@ class ApiContractTests(unittest.TestCase):
     def test_existing_response_keys_preserved(self): self.assertTrue({"field","range","generated_at","overall_confidence","indices","limitations"}.issubset(self._call()[0]))
     def test_contextual_fields_present(self): self.assertTrue({"context","summary"}.issubset(self._call()[0]))
     def test_no_data_200_model(self): self.assertEqual(self._call()[0]["summary"]["status"],"insufficient_data")
+    def test_no_data_response_schema_validation(self): AgronomicInterpretationResponse.parse_obj(self._call()[0])
+    def test_sufficient_history_response_schema_validation(self): AgronomicInterpretationResponse.parse_obj(self._call(history(7))[0])
     def test_partial_data_200_model(self): self.assertEqual(self._call(history(2))[0]["summary"]["indices_with_data"],1)
     def test_query_executions_three(self): self.assertEqual(self._call()[1].execute.call_count,3)
     def test_no_sql_per_index(self): self.assertLessEqual(self._call()[1].execute.call_count,4)
@@ -126,6 +142,17 @@ class ApiContractTests(unittest.TestCase):
         for path in ("/api/agronomic-interpretation/fields/{field_id}","/api/ndvi/{field_id}/latest","/api/ndvi/{field_id}/history","/api/satellite-indices/{field_id}/latest","/api/satellite-indices/{field_id}/history"): self.assertIn(path,paths)
     def test_summary_not_stronger_than_components(self):
         payload,_=self._call(history(1)); self.assertNotEqual(payload["summary"]["confidence"],"high")
+    def test_summary_uses_position_status(self):
+        item=build_index_interpretation("ndvi",history(7,step=.08,std_value=.03),date(2026,1,20))
+        summary=build_summary([item]); self.assertIn("above_field_range"," ".join(summary["primary_signals"]))
+        self.assertEqual(summary["indices_with_sufficient_history"],1)
+    def test_frontend_baseline_condition_matches_repaired_value(self):
+        source=(BACKEND.parent/"frontend/src/components/Field/AgronomicIndexCard.jsx").read_text(encoding="utf-8")
+        self.assertIn("baseline?.status !== 'available'",source)
+    def test_frontend_confidence_labels_contain_insufficient(self):
+        for name in ("AgronomicIndexCard.jsx","AgronomicInterpretationPanel.jsx"):
+            source=(BACKEND.parent/"frontend/src/components/Field"/name).read_text(encoding="utf-8")
+            self.assertRegex(source,r"insufficient:\s*['\"]")
     def test_exact_new_index_keys(self):
         item=self._call()[0]["indices"][0]
         for key in ("index_code","display_name","plain_language_meaning","latest","previous","change","baseline","trend","heterogeneity","data_quality","confidence","hypotheses","recommended_checks","limitations"): self.assertIn(key,item)
