@@ -121,10 +121,40 @@ const DEFAULT_CENTER = [64.4286, 39.7747];
 const DEFAULT_ZOOM = 7;
 const MAP_MIN_ZOOM = 3;
 const MAP_MAX_ZOOM = 18;
+const MAP_PIXEL_RATIO_CAP = 1.25;
+const FAST_WHEEL_ZOOM_RATE = 1 / 240;
+const FAST_TRACKPAD_ZOOM_RATE = 1 / 70;
 const LAYERS = ['fields-fill', 'fields-label'];
 
 const NO_DATA_GRAY = '#4b5563';
 const NO_DATA_GRAY_HEX = '#6B7280';
+
+function getMapPixelRatio() {
+  const devicePixelRatio = typeof window === 'undefined' ? 1 : window.devicePixelRatio;
+  return Math.min(Math.max(Number.isFinite(devicePixelRatio) ? devicePixelRatio : 1, 1), MAP_PIXEL_RATIO_CAP);
+}
+
+function transformMapRequest(url, resourceType) {
+  if (['Tile', 'Glyphs', 'SpriteImage', 'SpriteJSON'].includes(resourceType)) {
+    return { url, cache: 'force-cache' };
+  }
+  return { url };
+}
+
+function configureSupportedMapInteractions(map) {
+  if (typeof map?.scrollZoom?.setWheelZoomRate === 'function') {
+    map.scrollZoom.setWheelZoomRate(FAST_WHEEL_ZOOM_RATE);
+  }
+  if (typeof map?.scrollZoom?.setZoomRate === 'function') {
+    map.scrollZoom.setZoomRate(FAST_TRACKPAD_ZOOM_RATE);
+  }
+  if (typeof map?.touchZoomRotate?.disableRotation === 'function') {
+    map.touchZoomRotate.disableRotation();
+  }
+  if (typeof map?.dragRotate?.disable === 'function') map.dragRotate.disable();
+  if (typeof map?.touchPitch?.disable === 'function') map.touchPitch.disable();
+  if (typeof map?.keyboard?.disableRotation === 'function') map.keyboard.disableRotation();
+}
 
 // ─── Map mode config ────────────────────────────────────────────────────────────
 
@@ -367,9 +397,6 @@ export default function FieldMap({
   const hoveredFeatureIdRef = useRef(null);
   const cameraMovingRef = useRef(false);
   const labelVisibilityBeforeMoveRef = useRef(null);
-  const fieldFillVisibilityBeforeMoveRef = useRef(null);
-  const fieldBorderWidthBeforeMoveRef = useRef(null);
-  const fieldBorderOpacityBeforeMoveRef = useRef(null);
   const fitBoundsTimeoutRef = useRef(null);
 
   const callbacksRef = useRef({
@@ -406,52 +433,20 @@ export default function FieldMap({
     }
   };
 
-  const suspendFieldRenderingForMove = (map) => {
-    if (map?.getLayer('fields-fill')) {
-      try {
-        fieldFillVisibilityBeforeMoveRef.current = map.getLayoutProperty('fields-fill', 'visibility') || 'visible';
-        map.setLayoutProperty('fields-fill', 'visibility', 'none');
-      } catch (_) { fieldFillVisibilityBeforeMoveRef.current = null; }
-    }
+  const suspendLabelsForMove = (map) => {
     if (map?.getLayer('fields-label')) {
       try {
         labelVisibilityBeforeMoveRef.current = map.getLayoutProperty('fields-label', 'visibility') || 'visible';
         map.setLayoutProperty('fields-label', 'visibility', 'none');
       } catch (_) { labelVisibilityBeforeMoveRef.current = null; }
     }
-    if (map?.getLayer('fields-border')) {
-      try {
-        fieldBorderWidthBeforeMoveRef.current = map.getPaintProperty('fields-border', 'line-width');
-        fieldBorderOpacityBeforeMoveRef.current = map.getPaintProperty('fields-border', 'line-opacity');
-        map.setPaintProperty('fields-border', 'line-width', 1);
-        map.setPaintProperty('fields-border', 'line-opacity', 0.75);
-      } catch (_) {
-        fieldBorderWidthBeforeMoveRef.current = null;
-        fieldBorderOpacityBeforeMoveRef.current = null;
-      }
-    }
   };
 
-  const restoreFieldRenderingAfterMove = (map) => {
-    const fillVisibility = fieldFillVisibilityBeforeMoveRef.current;
+  const restoreLabelsAfterMove = (map) => {
     const labelVisibility = labelVisibilityBeforeMoveRef.current;
-    const borderWidth = fieldBorderWidthBeforeMoveRef.current;
-    const borderOpacity = fieldBorderOpacityBeforeMoveRef.current;
-    fieldFillVisibilityBeforeMoveRef.current = null;
     labelVisibilityBeforeMoveRef.current = null;
-    fieldBorderWidthBeforeMoveRef.current = null;
-    fieldBorderOpacityBeforeMoveRef.current = null;
-    if (fillVisibility !== null && map?.getLayer('fields-fill')) {
-      try { map.setLayoutProperty('fields-fill', 'visibility', fillVisibility); } catch (_) {}
-    }
     if (labelVisibility !== null && map?.getLayer('fields-label')) {
       try { map.setLayoutProperty('fields-label', 'visibility', labelVisibility); } catch (_) {}
-    }
-    if (borderWidth !== null && map?.getLayer('fields-border')) {
-      try { map.setPaintProperty('fields-border', 'line-width', borderWidth); } catch (_) {}
-    }
-    if (borderOpacity !== null && map?.getLayer('fields-border')) {
-      try { map.setPaintProperty('fields-border', 'line-opacity', borderOpacity); } catch (_) {}
     }
   };
 
@@ -597,7 +592,18 @@ export default function FieldMap({
       zoom: DEFAULT_ZOOM,
       minZoom: MAP_MIN_ZOOM,
       maxZoom: MAP_MAX_ZOOM,
+      cancelPendingTileRequestsWhileZooming: true,
+      refreshExpiredTiles: false,
+      renderWorldCopies: false,
+      fadeDuration: 0,
+      pixelRatio: getMapPixelRatio(),
+      validateStyle: import.meta.env.PROD ? false : true,
+      dragRotate: false,
+      pitchWithRotate: false,
+      touchPitch: false,
+      transformRequest: transformMapRequest,
     });
+    configureSupportedMapInteractions(map);
     mapRef.current = map;
     map.addControl(new maplibregl.NavigationControl(), 'top-right');
 
@@ -809,11 +815,11 @@ export default function FieldMap({
           hoverFrameRef.current = null;
           clearHoverState(m);
           m.getCanvas().style.cursor = '';
-          suspendFieldRenderingForMove(m);
+          suspendLabelsForMove(m);
         };
         handlersRef.current.onMoveEnd = () => {
           cameraMovingRef.current = false;
-          restoreFieldRenderingAfterMove(m);
+          restoreLabelsAfterMove(m);
         };
         m.on('movestart', handlersRef.current.onMoveStart);
         m.on('moveend', handlersRef.current.onMoveEnd);
@@ -856,9 +862,6 @@ export default function FieldMap({
         clearHoverState(mapRef.current, false);
         cameraMovingRef.current = false;
         labelVisibilityBeforeMoveRef.current = null;
-        fieldFillVisibilityBeforeMoveRef.current = null;
-        fieldBorderWidthBeforeMoveRef.current = null;
-        fieldBorderOpacityBeforeMoveRef.current = null;
         LAYERS.forEach((layer) => {
           if (mapRef.current.getLayer(layer)) {
             if (layer === 'fields-fill' && handlersRef.current.onMouseMove) {
