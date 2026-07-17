@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { createFieldInspection, listInspectionFields } from '../../api/fieldInspections';
+import InspectionFieldCombobox from './InspectionFieldCombobox';
 import {
   createIdempotencyKey,
   filterAssigneesForEnterprise,
@@ -166,9 +167,7 @@ export default function InspectionCreateModal({ source, user, assignees, onClose
 <p>Приоритет: {source.priority || '—'} · Индекс внимания: {Number.isFinite(source.attention_score) ? source.attention_score : '—'}</p>
 <p>Дата наблюдения: {source.observation_date || '—'}</p>
 <p>Причины: {safeArray(source.reason_codes).join(', ') || '—'}</p>
-</div> : <label className="block text-sm">Поле<select ref={initialFocusRef} required disabled={loadingFields} className="input mt-1 w-full p-2" value={fieldId} onChange={(event) => setFieldId(event.target.value)}>
-<option value="">{loadingFields ? 'Загружаем поля…' : 'Выберите поле'}</option>{fields.map((field) => positiveId(field?.id) && field?.name ? <option key={field.id} value={field.id}>{field.name}</option> : null)}</select>
-</label>}
+</div> : <InspectionFieldCombobox fields={fields} value={fieldId} onChange={setFieldId} loading={loadingFields} disabled={pending} inputRef={initialFocusRef} />}
           <label className="block text-sm">Заголовок<input ref={attentionSource ? initialFocusRef : undefined} required minLength={3} maxLength={255} className="input mt-1 w-full p-2" value={title} onChange={(event) => setTitle(event.target.value)} />
 </label>
           <label className="block text-sm">Инструкции<textarea minLength={3} maxLength={2000} className="input mt-1 w-full p-2" value={instructions} onChange={(event) => setInstructions(event.target.value)} />
