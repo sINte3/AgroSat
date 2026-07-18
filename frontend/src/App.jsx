@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
-import { BrowserRouter, Routes, Route, useLocation, useNavigate } from 'react-router-dom';
-import { AuthProvider } from './context/AuthContext';
+import { BrowserRouter, Navigate, Routes, Route, useLocation, useNavigate } from 'react-router-dom';
+import { AuthProvider, useAuth } from './context/AuthContext';
 import PrivateRoute from './components/Routing/PrivateRoute';
 import Sidebar from './components/Layout/Sidebar';
 import Header from './components/Layout/Header';
@@ -17,6 +17,7 @@ import FieldInspectionsPage from './pages/FieldInspectionsPage';
 import LoginPage from './pages/LoginPage';
 import UnauthorizedPage from './pages/UnauthorizedPage';
 import { getCachedEnterprises } from './api/client';
+import { getRoleDefaultPath, isViewAllowedForRole } from './config/roleAccess';
 
 const PATH_VIEW_MAP = {
   '/dashboard': 'dashboard',
@@ -77,6 +78,7 @@ const resolvePathname = (pathname) => {
 };
 
 function AppLayout() {
+  const { user } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
   const initialRoute = resolvePathname(location.pathname);
@@ -86,6 +88,8 @@ function AppLayout() {
   const [selectedInspectionId, setSelectedInspectionId] = useState(initialRoute.selectedInspectionId);
   const [enterprises, setEnterprises] = useState([]);
   const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
+  const routeAtRender = resolvePathname(location.pathname);
+  const role = user?.role;
 
   useEffect(() => {
     getCachedEnterprises()
@@ -118,6 +122,13 @@ function AppLayout() {
 
   const handleNavigate = useCallback((target, id) => {
     setMobileNavigationOpen(false);
+    const targetView = target === 'field' ? 'field-detail'
+      : target === 'enterprise' ? 'enterprise-detail'
+      : target;
+    if (!isViewAllowedForRole(role, targetView)) {
+      navigate(getRoleDefaultPath(role), { replace: true });
+      return;
+    }
     switch (target) {
       case 'dashboard':
         setView('dashboard');
@@ -197,7 +208,7 @@ function AppLayout() {
       default:
         setView('dashboard');
     }
-  }, [navigate]);
+  }, [navigate, role]);
 
   const getHeaderInfo = () => {
     switch (view) {
@@ -268,6 +279,10 @@ function AppLayout() {
         );
     }
   };
+
+  if (!isViewAllowedForRole(role, routeAtRender.view)) {
+    return <Navigate to={getRoleDefaultPath(role)} replace />;
+  }
 
   return (
     <div className="flex h-screen overflow-hidden bg-slate-50">

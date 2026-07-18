@@ -1,15 +1,21 @@
 import { useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
+import {
+  getNavigationKeysForRole,
+  getNavigationLabelForRole,
+} from '../../config/roleAccess';
 
 const NAV_ITEMS = [
-  { key: 'dashboard',   label: 'Сегодня',        icon: DashboardIcon },
-  { key: 'fields',      label: 'Поля',           icon: MapIcon },
-  { key: 'field-attention', label: 'Внимание', icon: AttentionIcon },
-  { key: 'field-inspections', label: 'Осмотры', icon: InspectionIcon },
-  { key: 'alerts',      label: 'Предупреждения', icon: BellIcon },
-  { key: 'enterprises', label: 'Предприятия',    icon: BuildingIcon },
-  { key: 'reports',     label: 'Отчёты',         icon: ReportIcon },
+  { key: 'dashboard', icon: DashboardIcon },
+  { key: 'fields', icon: MapIcon },
+  { key: 'field-attention', icon: AttentionIcon },
+  { key: 'field-inspections', icon: InspectionIcon },
+  { key: 'alerts', icon: BellIcon },
+  { key: 'enterprises', icon: BuildingIcon },
+  { key: 'reports', icon: ReportIcon },
 ];
+
+const NAV_ITEMS_BY_KEY = new Map(NAV_ITEMS.map(item => [item.key, item]));
 
 const ROLE_LABELS = { admin: 'Администратор', manager: 'Менеджер', agronomist: 'Агроном', viewer: 'Только просмотр' };
 
@@ -17,6 +23,9 @@ export default function Sidebar({ activeView, onNavigate, mobileOpen, onMobileCl
   const { user, logout } = useAuth();
   const profileName = user?.name || user?.full_name || user?.username || 'Профиль';
   const roleLabel = ROLE_LABELS[user?.role] || 'Профиль';
+  const navigationItems = getNavigationKeysForRole(user?.role)
+    .map(key => NAV_ITEMS_BY_KEY.get(key))
+    .filter(Boolean);
 
   useEffect(() => {
     if (!mobileOpen) return undefined;
@@ -49,7 +58,7 @@ export default function Sidebar({ activeView, onNavigate, mobileOpen, onMobileCl
 
       {/* Navigation */}
       <nav className="flex flex-1 flex-col items-stretch gap-1 overflow-y-auto px-3 py-5" aria-label="Основная навигация">
-        {NAV_ITEMS.map((item) => {
+        {navigationItems.map((item) => {
           const active = isActive(item.key);
           return (
             <div key={item.key} className="relative">
@@ -60,7 +69,7 @@ export default function Sidebar({ activeView, onNavigate, mobileOpen, onMobileCl
                   ${active ? 'bg-emerald-50 text-agro-accent' : 'text-slate-600 hover:text-agro-text hover:bg-agro-hover'}`}
               >
                 <item.icon className="w-5 h-5" />
-                <span className="truncate">{item.label}</span>
+                <span className="truncate">{getNavigationLabelForRole(user?.role, item.key)}</span>
               </button>
             </div>
           );
