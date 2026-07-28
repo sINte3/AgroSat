@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     public_registration_enabled: bool = False
 
     # Database
-    database_url: str = "postgresql://agrosat:agrosat_secret_2024@localhost:5432/agrosat"
+    database_url: str = ""
     supabase_database_url: str = ""
 
     # Redis

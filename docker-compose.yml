@@ -6,9 +6,9 @@ services:
     container_name: agrosat_db
     restart: unless-stopped
     environment:
-      POSTGRES_USER: agrosat
-      POSTGRES_PASSWORD: agrosat_secret_2024
-      POSTGRES_DB: agrosat
+      POSTGRES_USER: "${AGROSAT_POSTGRES_USER:-agrosat}"
+      POSTGRES_PASSWORD: "${AGROSAT_POSTGRES_PASSWORD:?AGROSAT_POSTGRES_PASSWORD is required}"
+      POSTGRES_DB: "${AGROSAT_POSTGRES_DB:-agrosat}"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
@@ -36,7 +36,7 @@ services:
       redis:
         condition: service_started
     environment:
-      DATABASE_URL: postgresql://agrosat:agrosat_secret_2024@db:5432/agrosat
+      DATABASE_URL: "postgresql://${AGROSAT_POSTGRES_USER:-agrosat}:${AGROSAT_POSTGRES_PASSWORD:?AGROSAT_POSTGRES_PASSWORD is required}@db:5432/${AGROSAT_POSTGRES_DB:-agrosat}"
       REDIS_URL: redis://redis:6379/0
       SENTINEL_HUB_CLIENT_ID: ${SENTINEL_HUB_CLIENT_ID}
       SENTINEL_HUB_CLIENT_SECRET: ${SENTINEL_HUB_CLIENT_SECRET}

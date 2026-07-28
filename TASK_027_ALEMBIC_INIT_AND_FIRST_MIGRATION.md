@@ -103,7 +103,7 @@ sqlalchemy.url = driver://user:pass@localhost/dbname
 Replace it with this harmless placeholder because the real URL must come from `.env` via `config.py`:
 
 ```ini
-sqlalchemy.url = postgresql://unused:unused@localhost/unused
+sqlalchemy.url = <REDACTED_DATABASE_URL>
 ```
 
 Do not commit Supabase credentials into `alembic.ini`.
