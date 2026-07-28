@@ -88,16 +88,22 @@ async def get_enterprise(
 ):
     """Enterprise detail + field list with last NDVI, crop, and alerts. Tenant-scoped."""
     role = normalize_role(current_user)
-
+    params = {"id": enterprise_id}
+    tenant_clause = ""
     if is_tenant_role(role):
-        if current_user.enterprise_id is None or current_user.enterprise_id != enterprise_id:
-            raise HTTPException(status_code=403, detail="Cannot access another enterprise")
+        if current_user.enterprise_id is None:
+            raise HTTPException(status_code=403, detail="User has no enterprise_id")
+        tenant_clause = " AND id = :eid"
+        params["eid"] = current_user.enterprise_id
     elif not is_global_role(role):
         raise HTTPException(status_code=403, detail="Unknown role")
 
     row = db.execute(
-        text("SELECT id, name, code, region, total_area_ha FROM enterprises WHERE id = :id"),
-        {"id": enterprise_id}
+        text(
+            "SELECT id, name, code, region, total_area_ha "
+            f"FROM enterprises WHERE id = :id{tenant_clause}"
+        ),
+        params,
     ).fetchone()
 
     if not row:
