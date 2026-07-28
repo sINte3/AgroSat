@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "scenarios": [
+    {"name": "fields_list", "method": "GET", "path": "/api/fields/", "expected_statuses": [200], "enabled": false, "write": false, "blocked_reason": "Requires isolated DB and synthetic authenticated user"},
+    {"name": "dashboard", "method": "GET", "path": "/api/dashboard/summary", "expected_statuses": [200], "enabled": false, "write": false, "blocked_reason": "Requires isolated DB and synthetic authenticated user"},
+    {"name": "attention", "method": "GET", "path": "/api/field-attention/queue", "expected_statuses": [200], "enabled": false, "write": false, "blocked_reason": "Requires isolated DB and synthetic authenticated user"},
+    {"name": "inspection_list", "method": "GET", "path": "/api/field-inspections", "expected_statuses": [200], "enabled": false, "write": false, "blocked_reason": "Requires isolated DB and synthetic authenticated user"},
+    {"name": "field_analytics", "method": "GET", "path": "/api/satellite-indices/1/history", "expected_statuses": [200], "enabled": false, "write": false, "blocked_reason": "Requires isolated DB and synthetic authenticated user"},
+    {"name": "reports", "method": "GET", "path": "/api/reports/management/summary", "expected_statuses": [200], "enabled": false, "write": false, "blocked_reason": "Requires isolated DB and synthetic authenticated manager"},
+    {"name": "raster_metadata", "method": "GET", "path": "/api/ndvi-raster/fields/1/metadata", "expected_statuses": [200], "enabled": false, "write": false, "blocked_reason": "Requires isolated DB and synthetic field"},
+    {"name": "inspection_create_idempotent", "method": "POST", "path": "/api/field-inspections", "expected_statuses": [201, 200], "enabled": false, "write": true, "json": {"field_id": 1, "reason": "other"}, "blocked_reason": "Requires isolated DB and deterministic seed"},
+    {"name": "closure_workflow", "method": "PATCH", "path": "/api/operational-actions/1", "expected_statuses": [200], "enabled": false, "write": true, "json": {"status": "closed"}, "blocked_reason": "Phase 5 endpoint and isolated DB are prerequisites"},
+    {"name": "vector_tile", "method": "GET", "path": "/api/tiles/fields/8/128/128.mvt", "expected_statuses": [200, 204], "enabled": false, "write": false, "blocked_reason": "Phase 7 endpoint and isolated PostGIS are prerequisites"},
+    {"name": "pixel_anomaly", "method": "GET", "path": "/api/anomalies/fields/1", "expected_statuses": [200], "enabled": false, "write": false, "blocked_reason": "Phase 8 endpoint and isolated PostGIS are prerequisites"}
+  ]
+}

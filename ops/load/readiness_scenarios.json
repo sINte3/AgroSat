@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "scenarios": [
+    {
+      "name": "liveness",
+      "method": "GET",
+      "path": "/health/live",
+      "expected_statuses": [200],
+      "enabled": true,
+      "write": false
+    },
+    {
+      "name": "readiness_without_isolated_database",
+      "method": "GET",
+      "path": "/health/ready",
+      "expected_statuses": [503],
+      "enabled": true,
+      "write": false
+    }
+  ]
+}
