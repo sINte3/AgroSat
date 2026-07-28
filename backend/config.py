@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     # App
     app_name: str = "AgroSat"
     app_version: str = "0.1.0"
+    release_revision: str = "unknown"
     environment: str = "development"
     secret_key: str = ""
     debug: bool = True
@@ -55,6 +56,10 @@ class Settings(BaseSettings):
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"
+
+    # Operational state
+    collector_status_directory: str = ""
+    collector_stale_after_seconds: int = 129600
 
     # Sentinel Hub (регистрация: https://www.sentinel-hub.com)
     sentinel_hub_client_id: str = ""

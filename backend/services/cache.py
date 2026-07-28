@@ -195,3 +195,15 @@ def cache_delete_pattern(pattern: str) -> bool:
     except Exception:
         _mark_failed()
         return False
+
+
+def cache_probe() -> bool:
+    """Return cache availability without making Redis a readiness dependency."""
+    client = _client()
+    if client is None:
+        return False
+    try:
+        return bool(client.ping())
+    except Exception:
+        _mark_failed()
+        return False

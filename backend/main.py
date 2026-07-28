@@ -82,6 +82,7 @@ from api.agronomic_interpretation import router as agronomic_interpretation_rout
 from api.ndvi_raster import router as ndvi_raster_router
 from api.field_attention import router as field_attention_router
 from api.field_inspections import router as field_inspections_router
+from api.health import router as health_router
 
 app.include_router(auth_router)
 app.include_router(enterprises_router)
@@ -100,6 +101,7 @@ app.include_router(agronomic_interpretation_router)
 app.include_router(ndvi_raster_router)
 app.include_router(field_attention_router)
 app.include_router(field_inspections_router)
+app.include_router(health_router)
 
 
 # ─── Базовые эндпоинты ───────────────────────────────────────────────────────
@@ -114,20 +116,3 @@ async def root():
         "docs": "/api/docs",
     }
 
-
-@app.get("/health")
-async def health():
-    from database import engine
-    from sqlalchemy import text
-    try:
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        db_status = "healthy"
-    except Exception as e:
-        db_status = f"error: {str(e)}"
-
-    return {
-        "status": "ok" if db_status == "healthy" else "degraded",
-        "database": db_status,
-        "environment": settings.environment,
-    }

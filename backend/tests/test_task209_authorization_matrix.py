@@ -61,6 +61,8 @@ def contract(
 MATRIX = (
     contract("GET", "/", PUBLIC, authenticated=False),
     contract("GET", "/health", PUBLIC, authenticated=False),
+    contract("GET", "/health/live", PUBLIC, authenticated=False),
+    contract("GET", "/health/ready", PUBLIC, authenticated=False),
     contract("POST", "/api/auth/login", PUBLIC, authenticated=False),
     contract("POST", "/api/auth/register", PUBLIC, authenticated=False, write=True),
     contract("GET", "/api/auth/me"),
@@ -122,7 +124,7 @@ def openapi_operations():
 
 def test_matrix_covers_every_openapi_operation_exactly():
     expected = {(item.method, item.path) for item in MATRIX}
-    assert len(expected) == len(MATRIX) == 49
+    assert len(expected) == len(MATRIX) == 51
     assert expected == set(openapi_operations())
 
 
