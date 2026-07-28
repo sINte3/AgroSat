@@ -38,7 +38,9 @@ def test_manager_enterprise_list_is_scoped_inside_query():
     assert result == []
     statement, params = db.calls[0]
     assert "WHERE e.id = :eid" in statement
-    assert params == {"eid": 17}
+    assert "LIMIT :row_limit" in statement
+    assert params["eid"] == 17
+    assert params["row_limit"] > 1
 
 
 def test_manager_cross_tenant_enterprise_detail_is_non_enumerable_404():

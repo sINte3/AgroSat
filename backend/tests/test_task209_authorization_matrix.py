@@ -163,25 +163,12 @@ def test_object_contracts_hide_cross_tenant_existence():
             assert item.unknown_object == 404, (item.method, item.path)
 
 
-# Read-only audit debt. Each entry currently returns an unbounded collection or
-# geometry payload. Repairs must remove entries rather than increasing the set.
-UNBOUNDED_ACCEPTANCE_DEBT = frozenset(
-    {
-        ("GET", "/api/enterprises/"),
-        ("GET", "/api/enterprises/{enterprise_id}"),
-        ("GET", "/api/fields/"),
-        ("GET", "/api/fields/geojson/all"),
-    }
-)
+# Read-only audit debt. Regressions must be added here rather than hidden.
+UNBOUNDED_ACCEPTANCE_DEBT = frozenset()
 
 
 def test_unbounded_debt_is_explicit_and_does_not_expand():
-    assert UNBOUNDED_ACCEPTANCE_DEBT == {
-        ("GET", "/api/enterprises/"),
-        ("GET", "/api/enterprises/{enterprise_id}"),
-        ("GET", "/api/fields/"),
-        ("GET", "/api/fields/geojson/all"),
-    }
+    assert not UNBOUNDED_ACCEPTANCE_DEBT
 
 
 def test_shared_role_policy_has_one_global_role_and_three_tenant_roles():

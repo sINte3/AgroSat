@@ -13,6 +13,12 @@ from api.dependencies import (
     is_tenant_role,
 )
 from api.auth import get_current_active_user
+from api.query_bounds import (
+    FIELD_LIST_ROW_CAP,
+    GEOJSON_FIELD_ROW_CAP,
+    ensure_within_row_cap,
+    fetch_limit,
+)
 from schemas.field import FieldCreate, FieldUpdate
 
 router = APIRouter(prefix="/api/fields", tags=["fields"])
@@ -47,13 +53,16 @@ def get_all_fields_geojson(
     if _scope is not None and enterprise_id is None:
         effective_eid = _scope
 
-    cache_key = f"fields:geojson:{_scope_label(effective_eid)}"
+    cache_key = f"fields:geojson:v2:{_scope_label(effective_eid)}"
     cached = cache_get(cache_key)
     if cached:
         return cached
 
     where = "WHERE f.is_active = true"
-    params = {"year": date.today().year}
+    params = {
+        "year": date.today().year,
+        "row_limit": fetch_limit(GEOJSON_FIELD_ROW_CAP),
+    }
     if effective_eid:
         where += " AND f.enterprise_id = :eid"
         params["eid"] = effective_eid
@@ -107,9 +116,15 @@ def get_all_fields_geojson(
         ) al ON true
         {where}
         ORDER BY f.enterprise_id, f.id
+        LIMIT :row_limit
     """)
 
     rows = db.execute(sql, params).fetchall()
+    ensure_within_row_cap(
+        rows,
+        row_cap=GEOJSON_FIELD_ROW_CAP,
+        resource="field_geojson",
+    )
 
     features = []
     for r in rows:
@@ -157,13 +172,16 @@ def get_fields(
     if _scope is not None and enterprise_id is None:
         effective_eid = _scope
 
-    cache_key = f"fields:list:{_scope_label(effective_eid)}"
+    cache_key = f"fields:list:v2:{_scope_label(effective_eid)}"
     cached = cache_get(cache_key)
     if cached:
         return cached
 
     where = "WHERE f.is_active = true"
-    params = {"year": date.today().year}
+    params = {
+        "year": date.today().year,
+        "row_limit": fetch_limit(FIELD_LIST_ROW_CAP),
+    }
     if effective_eid:
         where += " AND f.enterprise_id = :eid"
         params["eid"] = effective_eid
@@ -197,9 +215,15 @@ def get_fields(
         ) al ON true
         {where}
         ORDER BY f.enterprise_id, f.id
+        LIMIT :row_limit
     """)
 
     rows = db.execute(sql, params).fetchall()
+    ensure_within_row_cap(
+        rows,
+        row_cap=FIELD_LIST_ROW_CAP,
+        resource="fields",
+    )
 
     result = [
         {

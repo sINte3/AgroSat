@@ -7,6 +7,12 @@ import logging
 
 from api.auth import get_current_active_user
 from api.dependencies import normalize_role, is_global_role, is_tenant_role
+from api.query_bounds import (
+    ENTERPRISE_LIST_ROW_CAP,
+    FIELD_LIST_ROW_CAP,
+    ensure_within_row_cap,
+    fetch_limit,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/enterprises", tags=["enterprises"])
@@ -32,6 +38,7 @@ async def list_enterprises(
         params = {"eid": current_user.enterprise_id}
     else:
         raise HTTPException(status_code=403, detail="Unknown role")
+    params["row_limit"] = fetch_limit(ENTERPRISE_LIST_ROW_CAP)
 
     rows = db.execute(text(f"""
         SELECT
@@ -61,7 +68,13 @@ async def list_enterprises(
         {where}
         GROUP BY e.id, e.name, e.code, e.region, e.total_area_ha
         ORDER BY e.name
+        LIMIT :row_limit
     """), params).fetchall()
+    ensure_within_row_cap(
+        rows,
+        row_cap=ENTERPRISE_LIST_ROW_CAP,
+        resource="enterprises",
+    )
 
     return [
         {
@@ -143,7 +156,17 @@ async def get_enterprise(
         ) al ON true
         WHERE f.enterprise_id = :eid
         ORDER BY COALESCE(n.mean_ndvi, 999) ASC, f.name
-    """), {"eid": enterprise_id, "year": date.today().year}).fetchall()
+        LIMIT :row_limit
+    """), {
+        "eid": enterprise_id,
+        "year": date.today().year,
+        "row_limit": fetch_limit(FIELD_LIST_ROW_CAP),
+    }).fetchall()
+    ensure_within_row_cap(
+        fields,
+        row_cap=FIELD_LIST_ROW_CAP,
+        resource="enterprise_fields",
+    )
 
     return {
         "id": row.id,
