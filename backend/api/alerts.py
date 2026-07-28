@@ -228,17 +228,18 @@ def acknowledge_alert(
     current_user: User = Depends(get_current_active_user)
 ):
     """Отметить алерт как просмотренный с проверкой прав доступа (RBAC)."""
+    role = normalize_role(current_user)
+
     # Viewer write block
-    if current_user.role == "viewer":
+    if role == "viewer":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Пользователи с ролью 'viewer' не имеют прав на выполнение этого действия"
         )
 
     # Single UPDATE ... FROM with tenant check
-    role = normalize_role(current_user)
     if is_global_role(role):
-        # Admin/manager: update any active alert
+        # Administrators may update any active alert.
         sql = text("""
             UPDATE alerts a
             SET is_active = false,
@@ -251,8 +252,8 @@ def acknowledge_alert(
             RETURNING a.id, a.field_id
         """)
         params = {"aid": alert_id, "now": datetime.utcnow(), "uid": current_user.id}
-    elif role == "agronomist":
-        # Agronomist: only alerts for fields in their enterprise
+    elif is_tenant_role(role):
+        # Tenant roles may update alerts only inside their enterprise.
         eid = current_user.enterprise_id
         if eid is None:
             raise HTTPException(status_code=403, detail="User has no enterprise_id")
