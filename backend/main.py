@@ -14,14 +14,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from config import settings, validate_runtime_security
+from services.logging_config import configure_logging
+from services.metrics import MetricsMiddleware
 
 # Fail-fast: reject insecure configuration before anything else.
 validate_runtime_security()
 
 # Настройка логирования
-logging.basicConfig(
+configure_logging(
     level=logging.INFO if settings.environment != "production" else logging.WARNING,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    release_revision=settings.release_revision,
 )
 logger = logging.getLogger(__name__)
 
@@ -62,6 +64,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(MetricsMiddleware)
 
 # ─── Роутеры ─────────────────────────────────────────────────────────────────
 
@@ -83,6 +86,7 @@ from api.ndvi_raster import router as ndvi_raster_router
 from api.field_attention import router as field_attention_router
 from api.field_inspections import router as field_inspections_router
 from api.health import router as health_router
+from api.operations import router as operations_router
 
 app.include_router(auth_router)
 app.include_router(enterprises_router)
@@ -102,6 +106,7 @@ app.include_router(ndvi_raster_router)
 app.include_router(field_attention_router)
 app.include_router(field_inspections_router)
 app.include_router(health_router)
+app.include_router(operations_router)
 
 
 # ─── Базовые эндпоинты ───────────────────────────────────────────────────────

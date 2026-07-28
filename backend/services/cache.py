@@ -12,6 +12,7 @@ from typing import Any, Optional
 import redis
 
 from config import settings
+from services.metrics import record_cache_operation
 
 
 logger = logging.getLogger(__name__)
@@ -87,45 +88,63 @@ def _client():
 
 def cache_get(key: str) -> Optional[Any]:
     if not _valid_key(key):
+        record_cache_operation("get", "bypass")
         return None
     client = _client()
     if client is None:
+        record_cache_operation("get", "unavailable")
         return None
     try:
         value = client.get(key)
-        return json.loads(value) if value else None
+        if not value:
+            record_cache_operation("get", "miss")
+            return None
+        decoded = json.loads(value)
+        record_cache_operation("get", "hit")
+        return decoded
     except Exception:
         _mark_failed()
+        record_cache_operation("get", "failure")
         return None
 
 
 def cache_set(key: str, value: Any, ttl_seconds: int = 120) -> bool:
     if not _valid_key(key) or not _valid_ttl(ttl_seconds):
+        record_cache_operation("set", "bypass")
         return False
     client = _client()
     if client is None:
+        record_cache_operation("set", "unavailable")
         return False
     try:
         client.setex(key, ttl_seconds, json.dumps(value, default=str))
+        record_cache_operation("set", "success")
         return True
     except Exception:
         _mark_failed()
+        record_cache_operation("set", "failure")
         return False
 
 
 def cache_get_binary(key: str) -> Optional[bytes]:
     if not _valid_key(key):
+        record_cache_operation("get_binary", "bypass")
         return None
     client = _client()
     if client is None:
+        record_cache_operation("get_binary", "unavailable")
         return None
     try:
         value = client.get(key)
         if not value:
+            record_cache_operation("get_binary", "miss")
             return None
-        return base64.b64decode(value.encode("ascii"), validate=True)
+        decoded = base64.b64decode(value.encode("ascii"), validate=True)
+        record_cache_operation("get_binary", "hit")
+        return decoded
     except Exception:
         _mark_failed()
+        record_cache_operation("get_binary", "failure")
         return None
 
 
@@ -135,9 +154,11 @@ def cache_set_binary(key: str, value: bytes, ttl_seconds: int) -> bool:
         or not isinstance(value, bytes)
         or not _valid_ttl(ttl_seconds)
     ):
+        record_cache_operation("set_binary", "bypass")
         return False
     client = _client()
     if client is None:
+        record_cache_operation("set_binary", "unavailable")
         return False
     try:
         client.setex(
@@ -145,32 +166,40 @@ def cache_set_binary(key: str, value: bytes, ttl_seconds: int) -> bool:
             ttl_seconds,
             base64.b64encode(value).decode("ascii"),
         )
+        record_cache_operation("set_binary", "success")
         return True
     except Exception:
         _mark_failed()
+        record_cache_operation("set_binary", "failure")
         return False
 
 
 def cache_delete(key: str) -> bool:
     if not _valid_key(key):
+        record_cache_operation("delete", "bypass")
         return False
     client = _client()
     if client is None:
+        record_cache_operation("delete", "unavailable")
         return False
     try:
         client.delete(key)
+        record_cache_operation("delete", "success")
         return True
     except Exception:
         _mark_failed()
+        record_cache_operation("delete", "failure")
         return False
 
 
 def cache_delete_pattern(pattern: str) -> bool:
     """Delete a bounded number of matching keys without Redis ``KEYS`` or flush."""
     if not _valid_key(pattern, pattern=True):
+        record_cache_operation("delete_pattern", "bypass")
         return False
     client = _client()
     if client is None:
+        record_cache_operation("delete_pattern", "unavailable")
         return False
     cursor = 0
     deleted = 0
@@ -189,11 +218,14 @@ def cache_delete_pattern(pattern: str) -> bool:
                 client.delete(*batch)
                 deleted += len(batch)
             if cursor == 0:
+                record_cache_operation("delete_pattern", "success")
                 return True
         logger.warning("Redis pattern invalidation reached its bounded scan limit")
+        record_cache_operation("delete_pattern", "failure")
         return False
     except Exception:
         _mark_failed()
+        record_cache_operation("delete_pattern", "failure")
         return False
 
 
@@ -201,9 +233,13 @@ def cache_probe() -> bool:
     """Return cache availability without making Redis a readiness dependency."""
     client = _client()
     if client is None:
+        record_cache_operation("probe", "unavailable")
         return False
     try:
-        return bool(client.ping())
+        available = bool(client.ping())
+        record_cache_operation("probe", "success" if available else "failure")
+        return available
     except Exception:
         _mark_failed()
+        record_cache_operation("probe", "failure")
         return False

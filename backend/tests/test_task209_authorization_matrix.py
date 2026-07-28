@@ -110,6 +110,7 @@ MATRIX = (
     contract("POST", "/api/field-inspections/{inspection_id}/start", MUTATING_ROLES, "inspection_object", write=True, cross_tenant=404, unknown_object=404),
     contract("POST", "/api/field-inspections/{inspection_id}/complete", MUTATING_ROLES, "inspection_object", write=True, cross_tenant=404, unknown_object=404),
     contract("POST", "/api/field-inspections/{inspection_id}/cancel", MUTATING_ROLES, "inspection_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("GET", "/api/operations/metrics", MANAGEMENT_ROLES),
 )
 
 
@@ -124,7 +125,7 @@ def openapi_operations():
 
 def test_matrix_covers_every_openapi_operation_exactly():
     expected = {(item.method, item.path) for item in MATRIX}
-    assert len(expected) == len(MATRIX) == 51
+    assert len(expected) == len(MATRIX) == 52
     assert expected == set(openapi_operations())
 
 

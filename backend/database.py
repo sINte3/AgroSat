@@ -23,6 +23,9 @@ engine = create_engine(
     pool_size=10,
     max_overflow=20,
 )
+from services.metrics import instrument_engine
+
+instrument_engine(engine)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 

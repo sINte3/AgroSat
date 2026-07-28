@@ -133,6 +133,11 @@ def _read_collector_file(path: Path) -> dict[str, Any] | None:
         type(exit_code) is not int or exit_code not in (0, 1, 2, 3, 4, 130)
     ):
         return None
+    duration = payload.get("duration_seconds")
+    if duration is not None and (
+        not isinstance(duration, (int, float)) or not 0 <= duration <= 21600
+    ):
+        return None
     providers_payload = payload.get("providers", [])
     if not isinstance(providers_payload, list) or len(providers_payload) > 2:
         return None
@@ -176,6 +181,7 @@ def _read_collector_file(path: Path) -> dict[str, Any] | None:
         "finished_at": finished_at.isoformat() if finished_at else None,
         "exit_code": exit_code,
         "failure_category": failure_category,
+        "duration_seconds": duration,
         "providers": providers,
     }
 
