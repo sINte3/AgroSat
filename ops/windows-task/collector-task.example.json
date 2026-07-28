@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "task_name": "\\AgroSat-SatelliteCollector",
+  "task_description": "Bounded standalone AgroSat satellite collection",
+  "execution_identity": "<DOMAIN>\\AgroSatCollector$",
+  "expected_windows_timezone_id": "West Asia Standard Time",
+  "working_directory": "C:\\Program Files\\AgroSat",
+  "python_executable": "C:\\Program Files\\AgroSat\\.venv\\Scripts\\python.exe",
+  "runtime_env_file": "C:\\ProgramData\\AgroSat\\config\\collector.env",
+  "runner_script": "C:\\Program Files\\AgroSat\\ops\\windows-task\\Invoke-Collector.ps1",
+  "schedule": {
+    "daily_at_local": "02:15:00",
+    "start_when_available": true,
+    "restart_count": 3,
+    "restart_interval_minutes": 15,
+    "execution_time_limit_hours": 6,
+    "multiple_instances": "IgnoreNew"
+  },
+  "collector": {
+    "indices": "ndvi,savi,evi,ndmi,ndre",
+    "batch_size": 25,
+    "lookback_days": 5,
+    "max_attempts": 3,
+    "retry_base_seconds": 5,
+    "field_timeout_seconds": 300,
+    "cycle_timeout_seconds": 18000,
+    "output_directory": "C:\\ProgramData\\AgroSat\\collector\\runs",
+    "state_directory": "C:\\ProgramData\\AgroSat\\collector\\state",
+    "lock_directory": "C:\\ProgramData\\AgroSat\\collector\\locks"
+  }
+}
