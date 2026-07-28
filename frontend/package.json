@@ -10,7 +10,8 @@
     "test:closure": "node scripts/test-operational-closure.mjs",
     "test:closure-browser": "node scripts/test-operational-closure-browser.mjs",
     "test:executive": "node scripts/test-executive-accountability.mjs",
-    "test:executive-browser": "node scripts/test-executive-accountability-browser.mjs"
+    "test:executive-browser": "node scripts/test-executive-accountability-browser.mjs",
+    "benchmark:map-baseline": "node scripts/benchmark-map-baseline.mjs"
   },
   "dependencies": {
     "@mapbox/mapbox-gl-draw": "1.5.0",
