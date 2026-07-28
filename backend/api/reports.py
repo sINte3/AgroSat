@@ -34,6 +34,12 @@ from api.dependencies import (
     require_enterprise_scope,
     normalize_role,
 )
+from api.query_bounds import (
+    ALERT_EXPORT_ROW_CAP,
+    FIELD_LIST_ROW_CAP,
+    ensure_within_row_cap,
+    fetch_limit,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/reports", tags=["reports"])
@@ -908,7 +914,16 @@ def download_enterprise_pdf(
         ) latest ON true
         WHERE f.enterprise_id = :eid AND f.is_active = true
         ORDER BY f.name
-    """), {"eid": enterprise_id}).fetchall()
+        LIMIT :row_limit
+    """), {
+        "eid": enterprise_id,
+        "row_limit": fetch_limit(FIELD_LIST_ROW_CAP),
+    }).fetchall()
+    ensure_within_row_cap(
+        field_rows,
+        row_cap=FIELD_LIST_ROW_CAP,
+        resource="enterprise_report_fields",
+    )
 
     fields = [
         {
@@ -926,7 +941,16 @@ def download_enterprise_pdf(
         JOIN fields f ON f.id = a.field_id
         WHERE f.enterprise_id = :eid AND a.is_active = true AND a.severity = 'critical'
         ORDER BY a.triggered_at DESC
-    """), {"eid": enterprise_id}).fetchall()
+        LIMIT :row_limit
+    """), {
+        "eid": enterprise_id,
+        "row_limit": fetch_limit(ALERT_EXPORT_ROW_CAP),
+    }).fetchall()
+    ensure_within_row_cap(
+        alert_rows,
+        row_cap=ALERT_EXPORT_ROW_CAP,
+        resource="enterprise_report_alerts",
+    )
 
     alerts = [
         {

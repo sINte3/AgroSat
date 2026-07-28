@@ -9,6 +9,11 @@ from api.dependencies import (
     get_authorized_field_row,
     get_authorized_field_row_for_write,
 )
+from api.query_bounds import (
+    SATELLITE_HISTORY_ROW_CAP,
+    ensure_within_row_cap,
+    fetch_limit,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/ndvi", tags=["ndvi"])
@@ -24,6 +29,12 @@ async def get_ndvi_history(
 ):
     """NDVI history for a field over N days. Returns empty list if no data.
     By default excludes cloudy captures (cloud_cover_pct > 30)."""
+    if days < 1 or days > SATELLITE_HISTORY_ROW_CAP:
+        raise HTTPException(
+            status_code=422,
+            detail=f"days must be between 1 and {SATELLITE_HISTORY_ROW_CAP}",
+        )
+
     # get_authorized_field_row already verified access; _auth_field contains the row
     since_date = (datetime.now() - timedelta(days=days)).date()
     cloud_filter = "" if include_cloudy else "  AND (cloud_cover_pct IS NULL OR cloud_cover_pct <= 30)"
@@ -45,7 +56,17 @@ async def get_ndvi_history(
           AND captured_date >= :since
           {cloud_filter}
         ORDER BY captured_date ASC
-    """), {"fid": field_id, "since": since_date}).fetchall()
+        LIMIT :row_limit
+    """), {
+        "fid": field_id,
+        "since": since_date,
+        "row_limit": fetch_limit(SATELLITE_HISTORY_ROW_CAP),
+    }).fetchall()
+    ensure_within_row_cap(
+        records,
+        row_cap=SATELLITE_HISTORY_ROW_CAP,
+        resource="ndvi_history",
+    )
 
     def safe_float(v):
         return round(float(v), 4) if v is not None else None

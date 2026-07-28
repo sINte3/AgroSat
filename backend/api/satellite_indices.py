@@ -16,6 +16,12 @@ from sqlalchemy.orm import Session
 
 from api.dependencies import get_authorized_field_row, normalize_role, is_tenant_role
 from api.auth import get_current_active_user
+from api.query_bounds import (
+    FIELD_LIST_ROW_CAP,
+    SATELLITE_HISTORY_ROW_CAP,
+    ensure_within_row_cap,
+    fetch_limit,
+)
 from database import get_db
 
 from schemas.satellite import (
@@ -28,7 +34,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/satellite-indices", tags=["satellite_indices"])
 
 SUPPORTED_INDEX_CODES = frozenset({"savi", "evi", "ndmi", "ndre"})
-MAX_DAYS = 3650
+MAX_DAYS = SATELLITE_HISTORY_ROW_CAP
+MAX_REQUESTED_FIELD_IDS = FIELD_LIST_ROW_CAP
 
 
 # ─── Coverage endpoint ───────────────────────────────────────────────────────────
@@ -116,6 +123,11 @@ async def get_coverage(
             parsed_field_ids.append(fid)
         if not parsed_field_ids:
             raise HTTPException(status_code=422, detail="field_ids list is empty after parsing")
+        if len(parsed_field_ids) > MAX_REQUESTED_FIELD_IDS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"field_ids supports at most {MAX_REQUESTED_FIELD_IDS} values",
+            )
 
     # ── Validate date filters ──────────────────────────────────────────────
     parsed_date_from: Optional[date] = None
@@ -148,7 +160,7 @@ async def get_coverage(
         resolved_enterprise_id = tenant_enterprise_id
 
     # ── Query 1: Fetch fields ──────────────────────────────────────────────
-    field_params: dict = {}
+    field_params: dict = {"row_limit": fetch_limit(FIELD_LIST_ROW_CAP)}
     field_where_parts: list[str] = ["1=1"]
     if resolved_enterprise_id is not None:
         field_where_parts.append("f.enterprise_id = :eid")
@@ -168,7 +180,13 @@ async def get_coverage(
         LEFT JOIN enterprises e ON e.id = f.enterprise_id
         WHERE {field_where}
         ORDER BY f.id
+        LIMIT :row_limit
     """), field_params).fetchall()
+    ensure_within_row_cap(
+        fields_rows,
+        row_cap=FIELD_LIST_ROW_CAP,
+        resource="satellite_coverage_fields",
+    )
 
     if not fields_rows:
         empty_summary = CoverageSummary(
@@ -703,7 +721,18 @@ async def get_history(
           AND captured_date >= :since
           {cloud_where}
         ORDER BY captured_date ASC, id ASC
-    """), {"fid": field_id, "code": code, "since": since_date}).fetchall()
+        LIMIT :row_limit
+    """), {
+        "fid": field_id,
+        "code": code,
+        "since": since_date,
+        "row_limit": fetch_limit(SATELLITE_HISTORY_ROW_CAP),
+    }).fetchall()
+    ensure_within_row_cap(
+        rows,
+        row_cap=SATELLITE_HISTORY_ROW_CAP,
+        resource="satellite_index_history",
+    )
 
     records = [_format_record(r) for r in rows]
 

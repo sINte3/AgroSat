@@ -8,9 +8,11 @@ from fastapi import HTTPException
 
 from api.fields import get_all_fields_geojson, get_fields
 from api.query_bounds import (
+    ALERT_EXPORT_ROW_CAP,
     ENTERPRISE_LIST_ROW_CAP,
     FIELD_LIST_ROW_CAP,
     GEOJSON_FIELD_ROW_CAP,
+    SATELLITE_HISTORY_ROW_CAP,
     ensure_within_row_cap,
     fetch_limit,
 )
@@ -34,6 +36,8 @@ class RecordingSession:
 def test_caps_are_finite_and_fetch_one_overflow_sentinel():
     assert 0 < ENTERPRISE_LIST_ROW_CAP < FIELD_LIST_ROW_CAP
     assert 0 < GEOJSON_FIELD_ROW_CAP <= FIELD_LIST_ROW_CAP
+    assert 0 < ALERT_EXPORT_ROW_CAP <= FIELD_LIST_ROW_CAP
+    assert 0 < SATELLITE_HISTORY_ROW_CAP <= FIELD_LIST_ROW_CAP
     assert fetch_limit(FIELD_LIST_ROW_CAP) == FIELD_LIST_ROW_CAP + 1
 
 

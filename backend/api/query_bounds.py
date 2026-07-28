@@ -11,6 +11,8 @@ from fastapi import HTTPException, status
 ENTERPRISE_LIST_ROW_CAP = 1000
 FIELD_LIST_ROW_CAP = 5000
 GEOJSON_FIELD_ROW_CAP = 1000
+ALERT_EXPORT_ROW_CAP = 5000
+SATELLITE_HISTORY_ROW_CAP = 3650
 
 
 def fetch_limit(row_cap: int) -> int:
