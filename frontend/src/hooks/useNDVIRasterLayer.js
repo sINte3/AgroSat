@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { getNDVIRasterImage, getNDVIRasterMetadata } from '../api/ndviRaster';
+import { getRasterImage, getRasterMetadata } from '../api/raster';
 
-export const NDVI_RASTER_SOURCE_ID = 'agrosat-ndvi-raster-source';
-export const NDVI_RASTER_LAYER_ID = 'agrosat-ndvi-raster-layer';
+export const NDVI_RASTER_SOURCE_ID = 'agrosat-field-raster-source';
+export const NDVI_RASTER_LAYER_ID = 'agrosat-field-raster-layer';
 
 function isAbortError(error) {
   return error?.name === 'AbortError' || error?.name === 'CanceledError' || error?.code === 'ERR_CANCELED';
@@ -15,7 +15,14 @@ function validMetadata(metadata) {
     && typeof metadata?.observation_date === 'string';
 }
 
-export default function useNDVIRasterLayer({ map, fieldId, enabled, dateTo, opacity }) {
+export default function useNDVIRasterLayer({
+  map,
+  fieldId,
+  enabled,
+  dateTo,
+  opacity,
+  indexCode = 'ndvi',
+}) {
   const [state, setState] = useState({ status: 'idle', metadata: null, cacheState: null, errorStatus: null });
   const mountedRef = useRef(true);
   const generationRef = useRef(0);
@@ -108,12 +115,17 @@ export default function useNDVIRasterLayer({ map, fieldId, enabled, dateTo, opac
     async function loadRaster() {
       let createdUrl = null;
       try {
-        const metadata = await getNDVIRasterMetadata(fieldId, { dateTo, signal: controller.signal });
+        const metadata = await getRasterMetadata(fieldId, {
+          indexCode,
+          dateTo,
+          signal: controller.signal,
+        });
         if (generation !== generationRef.current || !mountedRef.current || controller.signal.aborted || !validMetadata(metadata)) {
           if (!validMetadata(metadata)) throw new Error('Invalid raster metadata');
           return;
         }
-        const { blob, cacheState } = await getNDVIRasterImage(fieldId, {
+        const { blob, cacheState } = await getRasterImage(fieldId, {
+          indexCode,
           observationDate: metadata.observation_date,
           size: metadata.default_size,
           signal: controller.signal,
@@ -144,7 +156,7 @@ export default function useNDVIRasterLayer({ map, fieldId, enabled, dateTo, opac
       controller.abort();
       if (generation === generationRef.current) clearRaster(map);
     };
-  }, [addRaster, clearRaster, dateTo, enabled, fieldId, map, retryKey]);
+  }, [addRaster, clearRaster, dateTo, enabled, fieldId, indexCode, map, retryKey]);
 
   useEffect(() => {
     if (!map || !map.isStyleLoaded?.() || !map.getLayer(NDVI_RASTER_LAYER_ID)) return;

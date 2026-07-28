@@ -16,7 +16,14 @@ export default function NDVIRasterControl({ map, fieldId, onMetadataChange }) {
   const [enabled, setEnabled] = useState(false);
   const [dateTo, setDateTo] = useState(tashkentToday);
   const [opacity, setOpacity] = useState(0.72);
-  const raster = useNDVIRasterLayer({ map, fieldId, enabled, dateTo, opacity });
+  const raster = useNDVIRasterLayer({
+    map,
+    fieldId,
+    enabled,
+    dateTo,
+    opacity,
+    indexCode: 'ndvi',
+  });
   const metadata = raster.metadata;
 
   useEffect(() => {
@@ -30,7 +37,7 @@ export default function NDVIRasterControl({ map, fieldId, onMetadataChange }) {
       : raster.status === 'error' ? 'Не удалось загрузить пиксельный NDVI.' : null;
 
   return (
-    <section className="absolute top-[104px] right-3 z-10 w-[min(18rem,calc(100vw-1.5rem))] rounded-lg border border-slate-200 bg-white/95 p-3 text-xs shadow-lg backdrop-blur-sm">
+    <section className="absolute top-[104px] right-3 z-10 w-[min(18rem,calc(100vw-1.5rem))] rounded-lg border border-slate-200 bg-white/95 p-3 text-xs shadow-lg backdrop-blur-sm max-sm:top-[148px]">
       <label className="flex cursor-pointer items-center justify-between gap-3 font-semibold text-slate-800">
         <span>Пиксельный NDVI</span>
         <input
@@ -58,7 +65,7 @@ export default function NDVIRasterControl({ map, fieldId, onMetadataChange }) {
           <div aria-live="polite" className="text-slate-600">
             {raster.status === 'loading' && 'Загрузка пиксельного NDVI…'}
             {errorMessage && <div className="space-y-2 text-amber-800"><p>{errorMessage}</p>{raster.errorStatus !== 404 && <button type="button" onClick={raster.retry} className="rounded border border-amber-400 px-2 py-1 font-medium focus:outline-none focus:ring-2 focus:ring-amber-500">Повторить</button>}</div>}
-            {raster.status === 'ready' && metadata && <div className="space-y-1"><p>Фактическая дата снимка: {metadata.observation_date}</p><p>{metadata.satellite || 'Sentinel-2'} · {CACHE_LABELS[raster.cacheState] || 'Без кэша'}</p><p className="pt-1 text-slate-500">Растр показывает спектральный NDVI-сигнал, а не агрономический диагноз.</p></div>}
+            {raster.status === 'ready' && metadata && <div className="space-y-1"><p>Фактическая дата снимка: {metadata.observation_date}</p><p>{metadata.provenance?.satellite || 'Спутниковое наблюдение'} · {CACHE_LABELS[raster.cacheState] || 'Без кэша'}</p><p className="pt-1 text-slate-500">Растр показывает спектральный NDVI-сигнал, а не агрономический диагноз.</p></div>}
           </div>
         </div>
       )}
