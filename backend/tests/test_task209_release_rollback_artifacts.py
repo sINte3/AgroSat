@@ -70,6 +70,14 @@ def test_rollback_contract_covers_every_required_component():
         "scheduled_task",
     }
     assert all(item["automatic"] is False for item in contract["components"])
+    classifications = {
+        item["revision"]: item for item in contract["migration_classifications"]
+    }
+    closure = classifications["0006_operational_closure"]
+    assert closure["strategy_after_data"] == "roll_forward_only"
+    assert closure["safe_before_data"] is True
+    assert closure["human_approval_required"] is True
+    assert closure["production_applied"] is False
 
 
 def test_rollback_drill_passes_for_clean_manifest_without_migrations():

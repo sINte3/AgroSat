@@ -27,5 +27,22 @@
       "automatic": false
     }
   ],
-  "migration_classifications": []
+  "migration_classifications": [
+    {
+      "path": "backend/alembic/versions/0006_operational_closure.py",
+      "revision": "0006_operational_closure",
+      "downgrade_safety": "destructive_after_closure_data",
+      "safe_before_data": true,
+      "strategy_after_data": "roll_forward_only",
+      "human_approval_required": true,
+      "production_applied": false,
+      "data_at_risk": [
+        "inspection results",
+        "evidence metadata",
+        "corrective actions",
+        "verification history",
+        "operational audit events"
+      ]
+    }
+  ]
 }
