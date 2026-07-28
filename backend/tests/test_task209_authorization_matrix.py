@@ -1,8 +1,20 @@
 """TASK_209 read-only route, role, tenant, and boundedness contract matrix."""
 
+import asyncio
 from dataclasses import dataclass
+from types import SimpleNamespace
 
+import pytest
+from fastapi import HTTPException
 from main import app
+from api.auth import get_current_active_user
+from api.dependencies import (
+    ALLOWED_ROLES,
+    GLOBAL_ROLES,
+    TENANT_ROLES,
+    get_authorized_field_row,
+    require_enterprise_scope,
+)
 
 
 ROLES = frozenset({"admin", "manager", "agronomist", "viewer"})
@@ -170,3 +182,50 @@ def test_unbounded_debt_is_explicit_and_does_not_expand():
         ("GET", "/api/fields/"),
         ("GET", "/api/fields/geojson/all"),
     }
+
+
+def test_shared_role_policy_has_one_global_role_and_three_tenant_roles():
+    assert ALLOWED_ROLES == ROLES
+    assert GLOBAL_ROLES == {"admin"}
+    assert TENANT_ROLES == {"manager", "agronomist", "viewer"}
+
+
+def test_manager_requires_and_returns_assigned_enterprise_scope():
+    manager = SimpleNamespace(role="manager", enterprise_id=17)
+    assert require_enterprise_scope(manager) == 17
+
+    with pytest.raises(HTTPException) as exc:
+        require_enterprise_scope(SimpleNamespace(role="manager", enterprise_id=None))
+    assert exc.value.status_code == 403
+
+
+def test_manager_field_object_query_contains_tenant_predicate():
+    class MissingResult:
+        @staticmethod
+        def fetchone():
+            return None
+
+    class RecordingSession:
+        def __init__(self):
+            self.statement = None
+            self.params = None
+
+        def execute(self, statement, params):
+            self.statement = str(statement)
+            self.params = params
+            return MissingResult()
+
+    session = RecordingSession()
+    manager = SimpleNamespace(role="manager", enterprise_id=17)
+    with pytest.raises(HTTPException) as exc:
+        get_authorized_field_row(field_id=99, db=session, current_user=manager)
+    assert exc.value.status_code == 404
+    assert "f.enterprise_id = :eid" in session.statement
+    assert session.params == {"fid": 99, "eid": 17}
+
+
+def test_unknown_active_role_is_rejected_by_shared_auth_dependency():
+    unknown = SimpleNamespace(is_active=True, role="unexpected")
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(get_current_active_user(unknown))
+    assert exc.value.status_code == 403

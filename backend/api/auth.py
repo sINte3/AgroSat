@@ -16,7 +16,7 @@ from config import settings, validate_runtime_security
 from models.enterprise import Enterprise  # noqa: F401
 from models.crop import CropType  # noqa: F401
 from models.field import Field, CropSeason  # noqa: F401
-from models.monitoring import NDVIRecord, Alert, ScoutingNote, User  # noqa: F401
+from models.monitoring import NDVIRecord, Alert, ScoutingNote, User, UserRole  # noqa: F401
 from schemas.auth import UserRegister, Token, UserResponse
 
 logger = logging.getLogger(__name__)
@@ -106,6 +106,13 @@ async def get_current_active_user(current_user: User = Depends(get_current_user)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Пользователь неактивен"
+        )
+    raw_role = getattr(current_user.role, "value", current_user.role)
+    role = str(raw_role or "").strip().lower()
+    if role not in {item.value for item in UserRole}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Unknown role",
         )
     return current_user
 

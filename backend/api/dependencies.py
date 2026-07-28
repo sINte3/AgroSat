@@ -8,15 +8,16 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from database import get_db
-from models.monitoring import User
+from models.monitoring import User, UserRole
 from api.auth import get_current_active_user
 
-ALLOWED_ROLES = {"admin", "manager", "agronomist", "viewer"}
+ALLOWED_ROLES = frozenset(role.value for role in UserRole)
 
 
 def normalize_role(user: User) -> str:
     """Return the lowercased role string for a user."""
-    return user.role.lower() if user.role else ""
+    raw_role = getattr(user.role, "value", user.role)
+    return str(raw_role or "").strip().lower()
 
 
 def require_known_role(user: User = Depends(get_current_active_user)) -> str:
@@ -30,8 +31,8 @@ def require_known_role(user: User = Depends(get_current_active_user)) -> str:
     return role
 
 
-GLOBAL_ROLES = {"admin", "manager"}
-TENANT_ROLES = {"agronomist", "viewer"}
+GLOBAL_ROLES = frozenset({"admin"})
+TENANT_ROLES = frozenset({"manager", "agronomist", "viewer"})
 
 
 def is_global_role(role: str) -> bool:
