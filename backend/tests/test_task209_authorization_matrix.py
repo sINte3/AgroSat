@@ -129,6 +129,11 @@ MATRIX = (
     contract("GET", "/api/executive/overview", MANAGEMENT_ROLES, tenant_scope="enterprise_filter", cross_tenant=403),
     contract("GET", "/api/executive/accountability", MANAGEMENT_ROLES, tenant_scope="enterprise_filter", cross_tenant=403),
     contract("GET", "/api/executive/export.xlsx", MANAGEMENT_ROLES, tenant_scope="enterprise_filter", cross_tenant=403),
+    contract("GET", "/api/pixel-anomalies/fields/{field_id}/summary", tenant_scope="field_object", cross_tenant=404, unknown_object=404),
+    contract("GET", "/api/pixel-anomalies", tenant_scope="enterprise_filter", cross_tenant=403),
+    contract("GET", "/api/pixel-anomalies/{anomaly_id}", tenant_scope="anomaly_object", cross_tenant=404, unknown_object=404),
+    contract("GET", "/api/pixel-anomalies/{anomaly_id}/geometry", tenant_scope="anomaly_object", cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/pixel-anomalies/{anomaly_id}/inspection", MUTATING_ROLES, "anomaly_object", write=True, cross_tenant=404, unknown_object=404),
 )
 
 
@@ -143,7 +148,7 @@ def openapi_operations():
 
 def test_matrix_covers_every_openapi_operation_exactly():
     expected = {(item.method, item.path) for item in MATRIX}
-    assert len(expected) == len(MATRIX) == 70
+    assert len(expected) == len(MATRIX) == 75
     assert expected == set(openapi_operations())
 
 
@@ -179,6 +184,7 @@ def test_object_contracts_hide_cross_tenant_existence():
         "inspection_object",
         "action_object",
         "verification_object",
+        "anomaly_object",
     }
     for item in MATRIX:
         if item.tenant_scope in object_scopes:

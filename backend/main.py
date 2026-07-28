@@ -95,6 +95,7 @@ from api.operational_closure import (
 from api.executive_accountability import router as executive_accountability_router
 from api.field_tiles import router as field_tiles_router
 from api.raster import router as raster_router
+from api.pixel_anomalies import router as pixel_anomalies_router
 
 app.include_router(auth_router)
 app.include_router(enterprises_router)
@@ -121,6 +122,7 @@ app.include_router(operational_verification_router)
 app.include_router(executive_accountability_router)
 app.include_router(field_tiles_router)
 app.include_router(raster_router)
+app.include_router(pixel_anomalies_router)
 
 
 # ─── Базовые эндпоинты ───────────────────────────────────────────────────────
