@@ -246,6 +246,7 @@ def accountability_row():
     [
         ("unassigned_inspections", "i.assigned_to_id IS NULL"),
         ("overdue_inspections", "i.due_date < :as_of_date"),
+        ("open_actions", "a.status IN ('open','in_progress','blocked')"),
         ("overdue_actions", "a.due_date < :as_of_date"),
         ("awaiting_verification", "v.status='awaiting_observation'"),
     ],

@@ -123,6 +123,7 @@ class AccountabilityResponse(BaseModel):
     kind: Literal[
         "unassigned_inspections",
         "overdue_inspections",
+        "open_actions",
         "overdue_actions",
         "awaiting_verification",
     ]

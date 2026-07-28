@@ -20,6 +20,7 @@ ACCOUNTABILITY_KINDS = frozenset(
     {
         "unassigned_inspections",
         "overdue_inspections",
+        "open_actions",
         "overdue_actions",
         "awaiting_verification",
     }
@@ -617,11 +618,10 @@ def _accountability_query(
             + pagination
         )
     owner = " AND a.owner_id=:owner_id" if owner_filtered else ""
-    if kind == "overdue_actions":
-        condition = (
-            "a.status IN ('open','in_progress','blocked') "
-            "AND a.due_date < :as_of_date"
-        )
+    if kind in {"open_actions", "overdue_actions"}:
+        condition = "a.status IN ('open','in_progress','blocked')"
+        if kind == "overdue_actions":
+            condition += " AND a.due_date < :as_of_date"
         verification_join = (
             "LEFT JOIN LATERAL (SELECT v.id,v.status "
             "FROM action_verification_requests v WHERE v.action_id=a.id "

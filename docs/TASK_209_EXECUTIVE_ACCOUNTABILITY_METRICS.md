@@ -138,7 +138,7 @@ Bounded query parameters:
 
 - the same date/scope filters;
 - `kind`: `unassigned_inspections`, `overdue_inspections`,
-  `overdue_actions`, or `awaiting_verification`;
+  `open_actions`, `overdue_actions`, or `awaiting_verification`;
 - optional `owner_id`;
 - `limit` from 1 through 200;
 - `offset` from 0 through 10,000.
