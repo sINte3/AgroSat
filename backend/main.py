@@ -115,4 +115,3 @@ async def root():
         "timestamp": datetime.utcnow().isoformat(),
         "docs": "/api/docs",
     }
-
