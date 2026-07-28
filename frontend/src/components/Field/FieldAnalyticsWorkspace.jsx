@@ -16,6 +16,7 @@ import INDEX_METADATA, {
 } from '../../config/indexMetadata';
 import FieldAnalyticsCharts from './FieldAnalyticsCharts';
 import AgronomicInterpretationPanel from './AgronomicInterpretationPanel';
+import PixelAnomalyPanel from './PixelAnomalyPanel';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -810,6 +811,12 @@ export default function FieldAnalyticsWorkspace({ fieldId, onBack }) {
         />
 
         <AgronomicInterpretationPanel fieldId={fieldId} />
+
+        <PixelAnomalyPanel
+          fieldId={fieldId}
+          indexCode={deepDiveIndex}
+          dayRange={dayRange}
+        />
 
         {/* D. Single-index deep dive */}
         {deepDiveIndex && (

@@ -28,6 +28,14 @@
   .maplibregl-map * {
     transition: none !important;
   }
+  .maplibregl-ctrl-group button {
+    width: 44px !important;
+    height: 44px !important;
+  }
+  .maplibregl-ctrl-group button:focus-visible {
+    outline: 2px solid #16a34a;
+    outline-offset: 2px;
+  }
 }
 
 @layer components {
