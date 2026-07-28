@@ -33,6 +33,7 @@ _cache_keys = {
 def _invalidate_field_caches():
     cache_delete_pattern("fields:list:*")
     cache_delete_pattern("fields:geojson:*")
+    cache_delete_pattern("field-tiles:*")
 
 
 def _scope_label(enterprise_id):
