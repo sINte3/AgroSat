@@ -159,7 +159,7 @@ def observation(
     )
 
 
-def test_all_ten_operations_require_authentication():
+def test_all_eleven_operations_require_authentication():
     app = FastAPI()
     app.include_router(inspection_router)
     app.include_router(action_router)
@@ -171,6 +171,7 @@ def test_all_ten_operations_require_authentication():
         ("post", "/api/field-inspections/1/evidence", {}, key),
         ("post", "/api/field-inspections/1/actions", {}, key),
         ("get", "/api/field-inspections/1/timeline", None, None),
+        ("get", "/api/field-inspections/1/closure", None, None),
         ("get", "/api/operational-actions", None, None),
         ("patch", "/api/operational-actions/1", {}, key),
         ("post", "/api/operational-actions/1/close", {}, key),
@@ -368,6 +369,30 @@ def test_action_list_uses_two_constant_queries_and_shared_tenant_filter():
     assert len(db.calls) == 2
     assert all("a.enterprise_id=:eid" in sql for sql, _ in db.calls)
     assert all(params["eid"] == 5 for _, params in db.calls)
+
+
+def test_closure_detail_uses_four_constant_tenant_scoped_queries():
+    db = Session(
+        [
+            [inspection_row(status="completed", version=4)],
+            [result_row()],
+            [],
+            [action_row()],
+        ]
+    )
+    result = service.closure_detail(
+        db,
+        user("manager", enterprise=5),
+        11,
+        evidence_limit=100,
+    )
+    assert result["inspection"]["id"] == 11
+    assert result["result"]["id"] == 21
+    assert result["evidence"] == []
+    assert len(result["actions"]) == 1
+    assert len(db.calls) == 4
+    assert all(params["eid"] == 5 for _, params in db.calls)
+    assert all("enterprise_id=:eid" in sql for sql, _ in db.calls)
 
 
 def test_cross_tenant_action_list_filter_is_denied_before_query():

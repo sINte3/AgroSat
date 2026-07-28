@@ -96,6 +96,21 @@ def inspection_timeline(
     )
 
 
+@inspection_router.get("/{inspection_id}/closure")
+def inspection_closure_detail(
+    inspection_id: int = Path(..., gt=0),
+    evidence_limit: int = Query(100, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    return service.closure_detail(
+        db,
+        current_user,
+        inspection_id,
+        evidence_limit=evidence_limit,
+    )
+
+
 @action_router.get("")
 def list_corrective_actions(
     enterprise_id: int | None = Query(None, gt=0),

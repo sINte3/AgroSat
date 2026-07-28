@@ -1306,6 +1306,90 @@ def list_actions(db, user, filters):
         raise
 
 
+def closure_detail(db, user, inspection_id, *, evidence_limit):
+    actor = _actor(user)
+    try:
+        tenant_sql, tenant_params = _tenant(actor, "i")
+        inspection = _one(
+            db.execute(
+                text(
+                    "SELECT i.id,i.field_id,i.enterprise_id,i.assigned_to_id,"
+                    "i.status,i.version FROM field_inspections i "
+                    "WHERE i.id=:inspection_id" + tenant_sql
+                ),
+                {"inspection_id": inspection_id, **tenant_params},
+            )
+        )
+        if not inspection:
+            raise HTTPException(404, "Inspection not found")
+        result_tenant, result_params = _tenant(actor, "r")
+        result = _one(
+            db.execute(
+                text(
+                    "SELECT r.id,r.inspection_id,r.field_id,r.enterprise_id,"
+                    "r.recorded_by_id,r.cause_code,r.cause_details,"
+                    "r.evidence_note,ST_Y(r.evidence_location) AS latitude,"
+                    "ST_X(r.evidence_location) AS longitude,r.version,"
+                    "r.created_at,r.updated_at FROM inspection_results r "
+                    "WHERE r.inspection_id=:inspection_id"
+                    + result_tenant
+                ),
+                {"inspection_id": inspection_id, **result_params},
+            )
+        )
+        evidence_tenant, evidence_params = _tenant(actor, "v")
+        evidence_rows = _all(
+            db.execute(
+                text(
+                    "SELECT v.id,v.inspection_id,v.result_id,v.field_id,"
+                    "v.enterprise_id,v.created_by_id,v.evidence_type,"
+                    "v.provider,v.provider_reference,v.original_filename,"
+                    "v.media_type,v.byte_size,v.sha256,v.captured_at,"
+                    "ST_Y(v.location) AS latitude,"
+                    "ST_X(v.location) AS longitude,v.provider_metadata,"
+                    "v.created_at FROM inspection_evidence v "
+                    "WHERE v.inspection_id=:inspection_id"
+                    + evidence_tenant
+                    + " ORDER BY v.created_at DESC,v.id DESC LIMIT :limit"
+                ),
+                {
+                    "inspection_id": inspection_id,
+                    "limit": evidence_limit,
+                    **evidence_params,
+                },
+            )
+        )
+        action_tenant, action_params = _tenant(actor, "a")
+        action_rows = _all(
+            db.execute(
+                text(
+                    ACTION_SELECT
+                    + " WHERE a.inspection_id=:inspection_id"
+                    + action_tenant
+                    + " ORDER BY a.created_at DESC,a.id DESC LIMIT 200"
+                ),
+                {
+                    "inspection_id": inspection_id,
+                    "today": datetime.now(TASHKENT).date(),
+                    **action_params,
+                },
+            )
+        )
+        return {
+            "inspection": dict(inspection),
+            "result": dict(result) if result else None,
+            "evidence": [dict(row) for row in evidence_rows],
+            "actions": [_action_item(row) for row in action_rows],
+            "evidence_limit": evidence_limit,
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
+
+
 def timeline(db, user, inspection_id, *, limit, offset):
     actor = _actor(user)
     try:
