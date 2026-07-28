@@ -111,6 +111,16 @@ MATRIX = (
     contract("POST", "/api/field-inspections/{inspection_id}/complete", MUTATING_ROLES, "inspection_object", write=True, cross_tenant=404, unknown_object=404),
     contract("POST", "/api/field-inspections/{inspection_id}/cancel", MUTATING_ROLES, "inspection_object", write=True, cross_tenant=404, unknown_object=404),
     contract("GET", "/api/operations/metrics", MANAGEMENT_ROLES),
+    contract("POST", "/api/field-inspections/{inspection_id}/result", MUTATING_ROLES, "inspection_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/field-inspections/{inspection_id}/evidence", MUTATING_ROLES, "inspection_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/field-inspections/{inspection_id}/actions", MUTATING_ROLES, "inspection_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("GET", "/api/field-inspections/{inspection_id}/timeline", tenant_scope="inspection_object", cross_tenant=404, unknown_object=404),
+    contract("GET", "/api/operational-actions", tenant_scope="enterprise_filter", cross_tenant=403),
+    contract("PATCH", "/api/operational-actions/{action_id}", MUTATING_ROLES, "action_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/operational-actions/{action_id}/close", MUTATING_ROLES, "action_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/operational-actions/{action_id}/reopen", MANAGEMENT_ROLES, "action_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/operational-actions/{action_id}/verification-requests", MANAGEMENT_ROLES, "action_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/verification-requests/{verification_id}/resolve", MANAGEMENT_ROLES, "verification_object", write=True, cross_tenant=404, unknown_object=404),
 )
 
 
@@ -125,7 +135,7 @@ def openapi_operations():
 
 def test_matrix_covers_every_openapi_operation_exactly():
     expected = {(item.method, item.path) for item in MATRIX}
-    assert len(expected) == len(MATRIX) == 52
+    assert len(expected) == len(MATRIX) == 62
     assert expected == set(openapi_operations())
 
 
@@ -159,6 +169,8 @@ def test_object_contracts_hide_cross_tenant_existence():
         "field_alert_object",
         "alert_object",
         "inspection_object",
+        "action_object",
+        "verification_object",
     }
     for item in MATRIX:
         if item.tenant_scope in object_scopes:

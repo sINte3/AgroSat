@@ -87,6 +87,11 @@ from api.field_attention import router as field_attention_router
 from api.field_inspections import router as field_inspections_router
 from api.health import router as health_router
 from api.operations import router as operations_router
+from api.operational_closure import (
+    action_router as operational_action_router,
+    inspection_router as operational_inspection_router,
+    verification_router as operational_verification_router,
+)
 
 app.include_router(auth_router)
 app.include_router(enterprises_router)
@@ -107,6 +112,9 @@ app.include_router(field_attention_router)
 app.include_router(field_inspections_router)
 app.include_router(health_router)
 app.include_router(operations_router)
+app.include_router(operational_inspection_router)
+app.include_router(operational_action_router)
+app.include_router(operational_verification_router)
 
 
 # ─── Базовые эндпоинты ───────────────────────────────────────────────────────
