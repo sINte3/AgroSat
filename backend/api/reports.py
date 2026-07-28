@@ -29,6 +29,8 @@ from services.pdf_report import (
 from models.monitoring import User
 from api.auth import get_current_active_user
 from api.dependencies import (
+    ALLOWED_ROLES,
+    is_tenant_role,
     require_enterprise_scope,
     normalize_role,
 )
@@ -861,30 +863,29 @@ def download_enterprise_pdf(
             detail="enterprise_id must be positive",
         )
 
-    role = str(current_user.role or "").lower()
+    role = normalize_role(current_user)
 
-    if role not in {"admin", "manager", "agronomist", "viewer"}:
+    if role not in ALLOWED_ROLES:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Недостаточно прав для скачивания PDF-отчёта",
         )
 
-    if role in {"agronomist", "viewer"}:
+    enterprise_params = {"eid": enterprise_id}
+    tenant_clause = ""
+    if is_tenant_role(role):
         if current_user.enterprise_id is None:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="У пользователя не указано предприятие",
+                detail="Tenant user has no enterprise_id",
             )
+        tenant_clause = " AND id = :scope_eid"
+        enterprise_params["scope_eid"] = current_user.enterprise_id
 
-        if current_user.enterprise_id != enterprise_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Вы можете скачивать отчёты только для своего предприятия",
-            )
-
-    ent_row = db.execute(text("""
-        SELECT id, name, code, region FROM enterprises WHERE id = :eid
-    """), {"eid": enterprise_id}).fetchone()
+    ent_row = db.execute(text(
+        "SELECT id, name, code, region "
+        f"FROM enterprises WHERE id = :eid{tenant_clause}"
+    ), enterprise_params).fetchone()
     if not ent_row:
         raise HTTPException(status_code=404, detail="Enterprise not found")
 
