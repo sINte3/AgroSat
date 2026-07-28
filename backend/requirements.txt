@@ -31,9 +31,6 @@ python-jose[cryptography]==3.5.0
 passlib[bcrypt]==1.7.4
 bcrypt==4.3.0
 
-# Task scheduling (lightweight, no Celery for Phase 0)
-apscheduler==3.10.4
-
 # Cache
 redis==5.0.4
 

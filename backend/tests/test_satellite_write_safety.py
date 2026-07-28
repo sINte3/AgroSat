@@ -387,7 +387,6 @@ class StaticContractTests(unittest.TestCase):
     def test_final_write_boundaries_retain_central_guards(self):
         contracts = (
             ("api/ndvi.py", "refresh_ndvi", "require_payload_provenance(ndvi_data)"),
-            ("scheduler.py", "fetch_all_fields_ndvi", "require_payload_provenance(ndvi_data)"),
             ("scripts/fetch_all_ndvi.py", "fetch_ndvi_for_all", "require_payload_provenance(ndvi_data)"),
             ("scripts/backfill_ndvi_history.py", "backfill_field", "require_payload_provenance(ndvi_data)"),
             ("scripts/run_remaining_backfill.py", "main", "require_payload_provenance(ndvi_data)"),
@@ -455,24 +454,6 @@ class ApiSchedulerScriptTests(unittest.TestCase):
         self.assertEqual(db.execute.call_count, 1)
         db.commit.assert_not_called()
         db.rollback.assert_not_called()
-
-    def test_scheduler_missing_credentials_before_session(self):
-        import scheduler
-        from services.satellite_safety import SatelliteConfigurationError
-        with patch("services.satellite.get_satellite_service", side_effect=SatelliteConfigurationError()), patch(
-            "database.SessionLocal"
-        ) as session:
-            scheduler.fetch_all_fields_ndvi()
-        session.assert_not_called()
-
-    def test_scheduler_partial_credentials_before_session(self):
-        import scheduler
-        from config import settings
-        with patch.object(settings, "sentinel_hub_client_id", "client-id"), patch.object(
-            settings, "sentinel_hub_client_secret", ""
-        ), patch("database.SessionLocal") as session:
-            scheduler.fetch_all_fields_ndvi()
-        session.assert_not_called()
 
     def test_fetch_all_missing_credentials_before_init_db(self):
         from scripts import fetch_all_ndvi

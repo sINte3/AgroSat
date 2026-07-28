@@ -55,6 +55,12 @@ class WebStartupSafetyTests(unittest.TestCase):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 self.assertFalse(any(word in node.value.upper() for word in ddl_keywords))
 
+    def test_apscheduler_runtime_is_removed(self):
+        requirements = (BACKEND / "requirements.txt").read_text(encoding="utf-8").lower()
+        self.assertNotIn("apscheduler", requirements)
+        self.assertFalse((BACKEND / "scheduler.py").exists())
+        self.assertFalse((BACKEND / "scripts" / "run_ndvi_scheduler.py").exists())
+
     def test_lifespan_is_an_async_context_manager(self):
         lifespan = next(
             (
@@ -92,8 +98,7 @@ class WebStartupSafetyTests(unittest.TestCase):
             forbidden_connect = AssertionError("network or database connection attempted")
             with patch.object(database, "init_db", forbidden_init), \\
                  patch.object(database, "engine", Mock(connect=Mock(side_effect=forbidden_connect))), \\
-                 patch("redis.from_url", return_value=Mock(ping=Mock())), \\
-                 patch("apscheduler.schedulers.background.BackgroundScheduler.start", side_effect=forbidden_connect):
+                 patch("redis.from_url", return_value=Mock(ping=Mock())):
                 import main
                 async def exercise():
                     async with main.lifespan(main.app):
