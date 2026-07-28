@@ -1,16 +1,13 @@
 """Authenticated endpoints for accepted, cached Sentinel-2 NDVI rasters."""
 
 import json
-from datetime import date, datetime
-from zoneinfo import ZoneInfo
+from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from api.auth import get_current_active_user
-from api.dependencies import is_tenant_role, normalize_role
 from database import get_db
 from models.monitoring import User
 from schemas.ndvi_raster import NDVIRasterMetadataResponse
@@ -19,56 +16,21 @@ from services.ndvi_raster import (
     DEFAULT_SIZE,
     LEGEND,
     LIMITATIONS,
+    validate_size,
+)
+from services.raster_observations import (
+    local_today as _local_today,
+    scoped_ndvi_observation_row as _scoped_observation_row,
+    validate_bbox,
+)
+from services.raster_provider import (
     RasterServiceUnavailable,
     RasterUpstreamInvalid,
     RasterUpstreamTimeout,
     get_raster_png,
-    validate_bbox,
-    validate_size,
 )
 
 router = APIRouter(prefix="/api/ndvi-raster", tags=["ndvi-raster"])
-
-
-def _local_today() -> date:
-    return datetime.now(ZoneInfo("Asia/Tashkent")).date()
-
-
-def _scoped_observation_row(db: Session, field_id: int, current_user: User, date_to: date, *, exact: bool):
-    role = normalize_role(current_user)
-    if role not in {"admin", "manager", "agronomist", "viewer"}:
-        raise HTTPException(status_code=403, detail="Unknown role")
-    date_param = "observation_date" if exact else "date_to"
-    params = {"field_id": field_id, date_param: date_to}
-    tenant_clause = ""
-    if is_tenant_role(role):
-        if current_user.enterprise_id is None:
-            raise HTTPException(status_code=403, detail="User has no enterprise_id")
-        tenant_clause = " AND f.enterprise_id = :enterprise_id"
-        params["enterprise_id"] = current_user.enterprise_id
-    date_clause = f"n.captured_date {'=' if exact else '<='} :{date_param}"
-    geometry_select = "ST_AsGeoJSON(f.geometry)::json AS geometry," if exact else ""
-    row = db.execute(text(f"""
-        SELECT f.id AS field_id,
-               n.captured_date AS observation_date,
-               n.satellite AS satellite,
-               {geometry_select}
-               ST_XMin(Box2D(f.geometry)) AS west,
-               ST_YMin(Box2D(f.geometry)) AS south,
-               ST_XMax(Box2D(f.geometry)) AS east,
-               ST_YMax(Box2D(f.geometry)) AS north
-        FROM fields f
-        JOIN ndvi_records n ON n.field_id = f.id
-        WHERE f.id = :field_id{tenant_clause}
-          AND {date_clause}
-          AND n.mean_ndvi IS NOT NULL
-          AND n.satellite = 'Sentinel-2'
-        ORDER BY n.captured_date DESC
-        LIMIT 1
-    """), params).fetchone()
-    if not row:
-        raise HTTPException(status_code=404, detail="Field not found")
-    return row
 
 
 @router.get("/fields/{field_id}/metadata", response_model=NDVIRasterMetadataResponse)

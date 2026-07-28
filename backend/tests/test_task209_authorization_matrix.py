@@ -104,6 +104,8 @@ MATRIX = (
     contract("GET", "/api/agronomic-interpretation/fields/{field_id}", tenant_scope="field_object", cross_tenant=404, unknown_object=404),
     contract("GET", "/api/ndvi-raster/fields/{field_id}/metadata", tenant_scope="field_object", cross_tenant=404, unknown_object=404),
     contract("GET", "/api/ndvi-raster/fields/{field_id}/image", tenant_scope="field_object", cross_tenant=404, unknown_object=404),
+    contract("GET", "/api/raster/fields/{field_id}/metadata", tenant_scope="field_object", cross_tenant=404, unknown_object=404),
+    contract("GET", "/api/raster/fields/{field_id}/image", tenant_scope="field_object", cross_tenant=404, unknown_object=404),
     contract("GET", "/api/field-attention/queue", tenant_scope="enterprise_filter", cross_tenant=403),
     contract("GET", "/api/field-inspections", tenant_scope="enterprise_filter", cross_tenant=403),
     contract("POST", "/api/field-inspections", MUTATING_ROLES, "field_object", write=True, cross_tenant=404, unknown_object=404),
@@ -141,7 +143,7 @@ def openapi_operations():
 
 def test_matrix_covers_every_openapi_operation_exactly():
     expected = {(item.method, item.path) for item in MATRIX}
-    assert len(expected) == len(MATRIX) == 68
+    assert len(expected) == len(MATRIX) == 70
     assert expected == set(openapi_operations())
 
 

@@ -1,7 +1,6 @@
 """Secure, cached Sentinel-2 NDVI raster support for accepted observations."""
 
 import json
-import math
 from datetime import date
 from typing import Any
 
@@ -10,6 +9,7 @@ import httpx
 from services.cache import cache_get_binary, cache_set_binary
 from services.satellite import get_satellite_service
 from services.satellite_safety import SatelliteConfigurationError
+from services.raster_observations import validate_bbox
 
 ALLOWED_SIZES = (256, 512, 768, 1024)
 DEFAULT_SIZE = 512
@@ -77,19 +77,6 @@ def validate_size(size: int) -> int:
     if size not in ALLOWED_SIZES:
         raise ValueError("Unsupported raster size")
     return size
-
-
-def validate_bbox(values: Any) -> list[float]:
-    try:
-        bbox = [float(value) for value in values]
-    except (TypeError, ValueError):
-        raise ValueError("Field geometry is unavailable") from None
-    if len(bbox) != 4 or not all(math.isfinite(value) for value in bbox):
-        raise ValueError("Field geometry is unavailable")
-    west, south, east, north = bbox
-    if west >= east or south >= north:
-        raise ValueError("Field geometry is unavailable")
-    return bbox
 
 
 def build_process_payload(geometry: dict[str, Any], observation_date: date, size: int) -> dict[str, Any]:
