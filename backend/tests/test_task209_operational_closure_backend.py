@@ -131,6 +131,7 @@ def action_row(**changes):
         "verification_status": None,
         "verification_result": None,
         "verification_confidence": None,
+        "verification_version": None,
     }
     values.update(changes)
     return values
@@ -393,6 +394,7 @@ def test_closure_detail_uses_four_constant_tenant_scoped_queries():
     assert len(db.calls) == 4
     assert all(params["eid"] == 5 for _, params in db.calls)
     assert all("enterprise_id=:eid" in sql for sql, _ in db.calls)
+    assert "verification.version AS verification_version" in db.calls[3][0]
 
 
 def test_cross_tenant_action_list_filter_is_denied_before_query():

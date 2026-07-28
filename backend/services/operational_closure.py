@@ -234,11 +234,12 @@ SELECT a.id, a.inspection_id, a.result_id, a.field_id, a.enterprise_id,
  verification.id AS latest_verification_id,
  verification.status AS verification_status,
  verification.result AS verification_result,
- verification.confidence AS verification_confidence
+ verification.confidence AS verification_confidence,
+ verification.version AS verification_version
 FROM corrective_actions a
 JOIN users owner ON owner.id=a.owner_id
 LEFT JOIN LATERAL (
-  SELECT v.id, v.status, v.result, v.confidence
+  SELECT v.id, v.status, v.result, v.confidence, v.version
   FROM action_verification_requests v
   WHERE v.action_id=a.id
   ORDER BY v.requested_at DESC, v.id DESC
@@ -277,6 +278,7 @@ def _action_item(row):
                 "status": row["verification_status"],
                 "result": row["verification_result"],
                 "confidence": row["verification_confidence"],
+                "version": row["verification_version"],
             }
         ),
     }
