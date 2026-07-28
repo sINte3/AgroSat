@@ -1,6 +1,55 @@
 export const STATUS_LABELS = { pending: 'Ожидает', in_progress: 'В работе', completed: 'Завершён', cancelled: 'Отменён' };
 export const SOURCE_LABELS = { attention_queue: 'Очередь внимания', manual: 'Вручную' };
 export const PRIORITY_LABELS = { low: 'Низкий', medium: 'Средний', high: 'Высокий', critical: 'Критический' };
+export const CAUSE_LABELS = {
+  irrigation: 'Орошение',
+  pest: 'Вредители',
+  disease: 'Заболевание',
+  nutrient: 'Питание растений',
+  weather: 'Погодные условия',
+  soil: 'Состояние почвы',
+  mechanical: 'Механическое повреждение',
+  crop_stage: 'Стадия развития культуры',
+  no_issue: 'Проблема не подтверждена',
+  other: 'Другая причина',
+  unconfirmed: 'Причина не подтверждена',
+};
+export const ACTION_STATUS_LABELS = {
+  open: 'Открыто',
+  in_progress: 'В работе',
+  blocked: 'Заблокировано',
+  closed: 'Закрыто',
+};
+export const VERIFICATION_STATUS_LABELS = {
+  awaiting_observation: 'Ожидает нового наблюдения',
+  resolved: 'Проверено',
+};
+export const VERIFICATION_RESULT_LABELS = {
+  improved: 'Улучшилось',
+  unchanged: 'Без изменений',
+  worsened: 'Ухудшилось',
+  insufficient_data: 'Недостаточно данных',
+};
+export const VERIFICATION_CONFIDENCE_LABELS = {
+  high: 'Высокая',
+  medium: 'Средняя',
+  low: 'Низкая',
+  unavailable: 'Недоступна',
+};
+export const TIMELINE_EVENT_LABELS = {
+  inspection_created: 'Осмотр создан',
+  inspection_started: 'Осмотр начат',
+  inspection_completed: 'Осмотр завершён',
+  inspection_cancelled: 'Осмотр отменён',
+  inspection_result_recorded: 'Результат осмотра записан',
+  evidence_attached: 'Добавлены метаданные доказательства',
+  action_created: 'Корректирующее действие создано',
+  action_updated: 'Корректирующее действие обновлено',
+  action_closed: 'Корректирующее действие закрыто',
+  action_reopened: 'Корректирующее действие переоткрыто',
+  verification_requested: 'Запрошена спутниковая проверка',
+  verification_resolved: 'Спутниковая проверка завершена',
+};
 export function positiveId(value) {
   const id = Number(value);
   return Number.isSafeInteger(id) && id > 0 ? id : null;

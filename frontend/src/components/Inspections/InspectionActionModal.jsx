@@ -1,10 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import {
-  cancelFieldInspection, completeFieldInspection, startFieldInspection, updateFieldInspection,
+  cancelFieldInspection, recordInspectionResult, startFieldInspection, updateFieldInspection,
 } from '../../api/fieldInspections';
 import {
-  displayName, filterAssigneesForEnterprise, inspectionError, normalizeRole, todayTashkentDate,
+  CAUSE_LABELS,
+  createIdempotencyKey,
+  displayName,
+  filterAssigneesForEnterprise,
+  inspectionError,
+  normalizeRole,
+  todayTashkentDate,
 } from './inspectionPresentation';
 
 const LABELS = {
@@ -17,10 +23,15 @@ export default function InspectionActionModal({ mode, item, user, assignees, onC
   const [dueDate, setDueDate] = useState(item?.due_date || '');
   const [assignedToId, setAssignedToId] = useState(item?.assigned_to?.id ? String(item.assigned_to.id) : '');
   const [text, setText] = useState('');
+  const [causeCode, setCauseCode] = useState('unconfirmed');
+  const [evidenceNote, setEvidenceNote] = useState('');
+  const [latitude, setLatitude] = useState('');
+  const [longitude, setLongitude] = useState('');
   const [pending, setPending] = useState(false);
   const [error, setError] = useState('');
   const controllerRef = useRef(null);
   const initialFocusRef = useRef(null);
+  const idempotencyKeyRef = useRef(createIdempotencyKey());
   const role = normalizeRole(user?.role);
   const globalRole = role === 'admin' || role === 'manager';
   const eligibleAssignees = useMemo(() => {
@@ -57,11 +68,20 @@ export default function InspectionActionModal({ mode, item, user, assignees, onC
   }, [onClose, pending]);
 
   const valid = useMemo(() => {
-    if (mode === 'complete') return text.trim().length >= 10 && text.trim().length <= 4000;
+    if (mode === 'complete') {
+      const detailsValid = !text.trim() || (text.trim().length >= 3 && text.trim().length <= 2000);
+      const noteValid = !evidenceNote.trim() || (evidenceNote.trim().length >= 3 && evidenceNote.trim().length <= 4000);
+      const locationEmpty = latitude === '' && longitude === '';
+      const lat = Number(latitude);
+      const lon = Number(longitude);
+      const locationValid = locationEmpty
+        || (latitude !== '' && longitude !== '' && Number.isFinite(lat) && lat >= -90 && lat <= 90 && Number.isFinite(lon) && lon >= -180 && lon <= 180);
+      return detailsValid && noteValid && locationValid && (causeCode !== 'other' || text.trim().length >= 3);
+    }
     if (mode === 'cancel') return text.trim().length >= 5 && text.trim().length <= 2000;
     if (mode === 'edit') return title.trim().length >= 3 && title.trim().length <= 255 && (!dueDate || dueDate >= todayTashkentDate());
     return true;
-  }, [dueDate, mode, text, title]);
+  }, [causeCode, dueDate, evidenceNote, latitude, longitude, mode, text, title]);
 
   async function submit(event) {
     event.preventDefault();
@@ -85,9 +105,26 @@ export default function InspectionActionModal({ mode, item, user, assignees, onC
         }
         result = await updateFieldInspection(item.id, payload, controller.signal);
       } else if (mode === 'start') result = await startFieldInspection(item.id, item.version, controller.signal);
-      else if (mode === 'complete') result = await completeFieldInspection(item.id, item.version, text.trim(), controller.signal);
+      else if (mode === 'complete') {
+        const payload = {
+          expected_version: item.version,
+          cause_code: causeCode,
+          cause_details: text.trim() || null,
+          evidence_note: evidenceNote.trim() || null,
+        };
+        if (latitude !== '' && longitude !== '') {
+          payload.latitude = Number(latitude);
+          payload.longitude = Number(longitude);
+        }
+        result = await recordInspectionResult(
+          item.id,
+          payload,
+          idempotencyKeyRef.current,
+          controller.signal,
+        );
+      }
       else result = await cancelFieldInspection(item.id, item.version, text.trim(), controller.signal);
-      onSuccess(result);
+      onSuccess(result, mode === 'complete' ? item.id : undefined);
     } catch (requestError) {
       if (requestError?.name !== 'AbortError' && requestError?.code !== 'ERR_CANCELED') setError(inspectionError(requestError));
     } finally {
@@ -112,8 +149,32 @@ export default function InspectionActionModal({ mode, item, user, assignees, onC
 <label className="block text-sm">Срок<input type="date" min={todayTashkentDate()} className="input mt-1 w-full p-2" value={dueDate} onChange={(event) => setDueDate(event.target.value)} />
 </label>{globalRole && <label className="block text-sm">Исполнитель<select className="input mt-1 w-full p-2" value={assignedToId} onChange={(event) => setAssignedToId(event.target.value)}>
 <option value="">Без исполнителя</option>{eligibleAssignees.map((option) => <option key={option.id} value={option.id}>{option.name}</option>)}</select>{!eligibleAssignees.length && <span className="mt-1 block text-xs text-agro-muted">Для предприятия подходящие исполнители пока не обнаружены. Осмотр можно оставить без исполнителя.</span>}</label>}</div>}
-        {mode === 'complete' && <label className="mt-4 block text-sm">Итог осмотра<textarea ref={initialFocusRef} className="input mt-1 w-full p-2" value={text} onChange={(event) => setText(event.target.value)} minLength={10} maxLength={4000} required />
-</label>}
+        {mode === 'complete' && <div className="mt-4 space-y-3">
+          <label className="block text-sm">Подтверждённая причина
+            <select ref={initialFocusRef} className="input mt-1 w-full p-2" value={causeCode} onChange={(event) => setCauseCode(event.target.value)}>
+              {Object.entries(CAUSE_LABELS).map(([value, name]) => <option key={value} value={value}>{name}</option>)}
+            </select>
+          </label>
+          <label className="block text-sm">Пояснение причины
+            <textarea className="input mt-1 w-full p-2" value={text} onChange={(event) => setText(event.target.value)} minLength={3} maxLength={2000} required={causeCode === 'other'} />
+            {causeCode === 'other' && <span className="mt-1 block text-xs text-agro-muted">Для другой причины требуется пояснение.</span>}
+          </label>
+          <label className="block text-sm">Заметка о доказательствах
+            <textarea className="input mt-1 w-full p-2" value={evidenceNote} onChange={(event) => setEvidenceNote(event.target.value)} minLength={3} maxLength={4000} />
+          </label>
+          <fieldset>
+            <legend className="text-sm">Геопозиция доказательства (необязательно)</legend>
+            <div className="mt-1 grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <label className="text-xs text-agro-muted">Широта
+                <input type="number" step="any" min="-90" max="90" className="input mt-1 w-full p-2 text-sm text-agro-text" value={latitude} onChange={(event) => setLatitude(event.target.value)} />
+              </label>
+              <label className="text-xs text-agro-muted">Долгота
+                <input type="number" step="any" min="-180" max="180" className="input mt-1 w-full p-2 text-sm text-agro-text" value={longitude} onChange={(event) => setLongitude(event.target.value)} />
+              </label>
+            </div>
+            {(latitude === '') !== (longitude === '') && <p className="mt-1 text-xs text-red-700">Укажите обе координаты.</p>}
+          </fieldset>
+        </div>}
         {mode === 'cancel' && <label className="mt-4 block text-sm">Причина отмены<textarea ref={initialFocusRef} className="input mt-1 w-full p-2" value={text} onChange={(event) => setText(event.target.value)} minLength={5} maxLength={2000} required />
 </label>}
         {error && <div role="alert" className="mt-3 text-sm text-red-700">{error}{error.includes('изменён') && <button type="button" onClick={onReload} className="ml-2 underline">Обновить данные</button>}</div>}

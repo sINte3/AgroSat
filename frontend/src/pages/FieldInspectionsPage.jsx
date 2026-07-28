@@ -119,11 +119,12 @@ export default function FieldInspectionsPage({ onNavigate, enterprises = [], sel
   const reloadList = useCallback(() => setListReloadToken((value) => value + 1), []);
   const reloadDetail = useCallback(() => setDetailReloadToken((value) => value + 1), []);
 
-  const handleMutationSuccess = useCallback((inspection) => {
+  const handleMutationSuccess = useCallback((inspection, inspectionId) => {
     setAction(null);
     reloadDetail();
     reloadList();
-    if (inspection?.id) onNavigate('field-inspection-detail', inspection.id);
+    const targetId = positiveId(inspectionId) || positiveId(inspection?.inspection_id) || positiveId(inspection?.id);
+    if (targetId) onNavigate('field-inspection-detail', targetId);
   }, [onNavigate, reloadDetail, reloadList]);
 
   const handleConflictReload = useCallback(() => {
@@ -168,7 +169,7 @@ export default function FieldInspectionsPage({ onNavigate, enterprises = [], sel
       </div>
       {createOpen && <InspectionCreateModal user={user} assignees={assignees} onClose={() => setCreateOpen(false)} onSuccess={handleCreateSuccess} />}
       {action && <InspectionActionModal {...action} user={user} assignees={assignees} onClose={() => setAction(null)} onSuccess={handleMutationSuccess} onReload={handleConflictReload} />}
-      {selectedInspectionId && <InspectionDetailDrawer id={selectedInspectionId} user={user} onNavigate={onNavigate} onClose={() => onNavigate('field-inspections')} onAction={(mode, item) => setAction({ mode, item })} reloadToken={detailReloadToken} onRetry={reloadDetail} suspendEscape={Boolean(action)} />}
+      {selectedInspectionId && <InspectionDetailDrawer id={selectedInspectionId} user={user} assignees={assignees} onNavigate={onNavigate} onClose={() => onNavigate('field-inspections')} onAction={(mode, item) => setAction({ mode, item })} reloadToken={detailReloadToken} onRetry={reloadDetail} suspendEscape={Boolean(action)} />}
     </main>
   );
 }

@@ -49,3 +49,78 @@ export async function cancelFieldInspection(id, expectedVersion, cancellationRea
 export async function listInspectionFields(signal) {
   return (await client.get('fields/', { signal })).data;
 }
+
+export async function getOperationalClosure(id, signal) {
+  return (await client.get(`field-inspections/${id}/closure`, { signal })).data;
+}
+
+export async function getInspectionTimeline(id, signal) {
+  return (await client.get(`field-inspections/${id}/timeline`, {
+    params: { limit: 100, offset: 0 },
+    signal,
+  })).data;
+}
+
+export async function recordInspectionResult(id, payload, idempotencyKey, signal) {
+  return (await client.post(
+    `field-inspections/${id}/result`,
+    payload,
+    deliberateWriteConfig(signal, { headers: { 'Idempotency-Key': idempotencyKey } }),
+  )).data;
+}
+
+export async function attachInspectionEvidence(id, payload, idempotencyKey, signal) {
+  return (await client.post(
+    `field-inspections/${id}/evidence`,
+    payload,
+    deliberateWriteConfig(signal, { headers: { 'Idempotency-Key': idempotencyKey } }),
+  )).data;
+}
+
+export async function createCorrectiveAction(id, payload, idempotencyKey, signal) {
+  return (await client.post(
+    `field-inspections/${id}/actions`,
+    payload,
+    deliberateWriteConfig(signal, { headers: { 'Idempotency-Key': idempotencyKey } }),
+  )).data;
+}
+
+export async function updateCorrectiveAction(id, payload, idempotencyKey, signal) {
+  return (await client.patch(
+    `operational-actions/${id}`,
+    payload,
+    deliberateWriteConfig(signal, { headers: { 'Idempotency-Key': idempotencyKey } }),
+  )).data;
+}
+
+export async function closeCorrectiveAction(id, payload, idempotencyKey, signal) {
+  return (await client.post(
+    `operational-actions/${id}/close`,
+    payload,
+    deliberateWriteConfig(signal, { headers: { 'Idempotency-Key': idempotencyKey } }),
+  )).data;
+}
+
+export async function reopenCorrectiveAction(id, payload, idempotencyKey, signal) {
+  return (await client.post(
+    `operational-actions/${id}/reopen`,
+    payload,
+    deliberateWriteConfig(signal, { headers: { 'Idempotency-Key': idempotencyKey } }),
+  )).data;
+}
+
+export async function requestActionVerification(id, payload, idempotencyKey, signal) {
+  return (await client.post(
+    `operational-actions/${id}/verification-requests`,
+    payload,
+    deliberateWriteConfig(signal, { headers: { 'Idempotency-Key': idempotencyKey } }),
+  )).data;
+}
+
+export async function resolveActionVerification(id, payload, idempotencyKey, signal) {
+  return (await client.post(
+    `verification-requests/${id}/resolve`,
+    payload,
+    deliberateWriteConfig(signal, { headers: { 'Idempotency-Key': idempotencyKey } }),
+  )).data;
+}

@@ -2,9 +2,19 @@ import { useEffect, useRef, useState } from 'react';
 
 import { getFieldInspection } from '../../api/fieldInspections';
 import InspectionCard from './InspectionCard';
+import OperationalClosurePanel from './OperationalClosurePanel';
 import { formatDate, safeArray, safeString } from './inspectionPresentation';
 
-function DetailContent({ item, user, onNavigate, onAction }) {
+function DetailContent({
+  item,
+  user,
+  assignees,
+  onNavigate,
+  onAction,
+  reloadToken,
+  onInspectionReload,
+  onWorkflowModalState,
+}) {
   return (
     <div className="space-y-4">
       <InspectionCard inspection={item} user={user} onNavigate={onNavigate} onAction={onAction} compact />
@@ -20,6 +30,14 @@ function DetailContent({ item, user, onNavigate, onAction }) {
         <p><b>Итог осмотра:</b> {safeString(item.completion_summary)}</p>
         <p><b>Причина отмены:</b> {safeString(item.cancellation_reason)}</p>
       </section>
+      <OperationalClosurePanel
+        inspectionId={item.id}
+        user={user}
+        assignees={assignees}
+        reloadToken={reloadToken}
+        onInspectionReload={onInspectionReload}
+        onModalState={onWorkflowModalState}
+      />
     </div>
   );
 }
@@ -27,6 +45,7 @@ function DetailContent({ item, user, onNavigate, onAction }) {
 export default function InspectionDetailDrawer({
   id,
   user,
+  assignees = [],
   onNavigate,
   onClose,
   onAction,
@@ -41,6 +60,7 @@ export default function InspectionDetailDrawer({
   const generationRef = useRef(0);
   const mountedRef = useRef(false);
   const controllerRef = useRef(null);
+  const [workflowModalOpen, setWorkflowModalOpen] = useState(false);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -78,7 +98,7 @@ export default function InspectionDetailDrawer({
 
   useEffect(() => {
     const handleEscape = (event) => {
-      if (event.key === 'Escape' && !suspendEscape) onClose();
+      if (event.key === 'Escape' && !suspendEscape && !workflowModalOpen) onClose();
     };
     document.addEventListener('keydown', handleEscape);
     const previousOverflow = document.body.style.overflow;
@@ -87,10 +107,10 @@ export default function InspectionDetailDrawer({
       document.removeEventListener('keydown', handleEscape);
       document.body.style.overflow = previousOverflow;
     };
-  }, [onClose, suspendEscape]);
+  }, [onClose, suspendEscape, workflowModalOpen]);
 
   return (
-    <div className="fixed inset-0 z-40 bg-black/30" onMouseDown={(event) => event.target === event.currentTarget && !suspendEscape && onClose()}>
+    <div className="fixed inset-0 z-40 bg-black/30" onMouseDown={(event) => event.target === event.currentTarget && !suspendEscape && !workflowModalOpen && onClose()}>
       <aside className="ml-auto flex h-full w-full max-w-2xl flex-col bg-white shadow-xl" role="dialog" aria-modal="true" aria-label={`Осмотр #${id}`}>
         <div className="flex items-center justify-between border-b border-agro-border p-4">
           <h2 className="font-bold">Осмотр #{id}</h2>
@@ -101,7 +121,7 @@ export default function InspectionDetailDrawer({
           {state === '403' && <p role="alert">Недостаточно прав для просмотра осмотра.</p>}
           {state === '404' && <p role="alert">Осмотр не найден или недоступен.</p>}
           {state === 'error' && <div role="alert"><p>{error}</p><button type="button" onClick={onRetry} className="btn-primary mt-3 px-3 py-2">Повторить</button></div>}
-          {state === 'ready' && item && <DetailContent item={item} user={user} onNavigate={onNavigate} onAction={onAction} />}
+          {state === 'ready' && item && <DetailContent item={item} user={user} assignees={assignees} onNavigate={onNavigate} onAction={onAction} reloadToken={reloadToken} onInspectionReload={onRetry} onWorkflowModalState={setWorkflowModalOpen} />}
         </div>
       </aside>
     </div>
