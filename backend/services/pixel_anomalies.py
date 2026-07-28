@@ -262,7 +262,8 @@ def _detail_row(db, actor: ActorScope, anomaly_id: int, *, geometry: bool = Fals
     params["anomaly_id"] = anomaly_id
     extra = ",ST_AsGeoJSON(a.geometry)::json AS geometry" if geometry else """
       ,a.algorithm_version,r.run_key,r.threshold_hash,r.thresholds,
-       a.quality_summary,a.provenance,r.reason_codes
+       a.quality_summary,a.provenance,r.provenance AS run_provenance,
+       r.reason_codes
     """
     row = _one(
         db.execute(
@@ -290,6 +291,8 @@ def detail(db, user, anomaly_id: int):
     actor = _actor(user)
     try:
         row = _detail_row(db, actor, anomaly_id)
+        provenance = dict(row["provenance"] or {})
+        provenance["run"] = row["run_provenance"] or {}
         return {
             **_item(row),
             "algorithm_version": row["algorithm_version"],
@@ -297,7 +300,7 @@ def detail(db, user, anomaly_id: int):
             "threshold_hash": row["threshold_hash"],
             "thresholds": row["thresholds"],
             "quality_summary": row["quality_summary"],
-            "provenance": row["provenance"],
+            "provenance": provenance,
             "reason_codes": row["reason_codes"],
         }
     except HTTPException:

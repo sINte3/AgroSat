@@ -168,13 +168,19 @@ def test_detail_and_geometry_each_use_one_tenant_scoped_statement():
         thresholds={"comparison_drop": 0.1},
         quality_summary={"valid_pixels_pct": 100},
         provenance={"contract": "non_diagnostic"},
+        run_provenance={"provider": "deterministic_fixture"},
         reason_codes=[],
     )
     detail_db = RecordingDB([[detail_row]])
     result = service.detail(detail_db, user(), 91)
     assert result["algorithm_version"] == "paired_within_field_drop_v1"
+    assert result["provenance"] == {
+        "contract": "non_diagnostic",
+        "run": {"provider": "deterministic_fixture"},
+    }
     assert len(detail_db.calls) == 1
     assert "a.enterprise_id=:actor_enterprise_id" in detail_db.calls[0][0]
+    assert "r.provenance AS run_provenance" in detail_db.calls[0][0]
 
     geometry_db = RecordingDB(
         [[anomaly_row(geometry={"type": "MultiPolygon", "coordinates": []})]]
