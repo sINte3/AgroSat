@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "components": [
+    {
+      "name": "application",
+      "strategy": "redeploy the previously approved immutable backend artifact",
+      "automatic": false
+    },
+    {
+      "name": "migration",
+      "strategy": "follow the reviewed per-revision downgrade classification; never downgrade automatically",
+      "automatic": false
+    },
+    {
+      "name": "collector",
+      "strategy": "disable new collection starts, allow or cancel the bounded run, then restore the prior CLI artifact",
+      "automatic": false
+    },
+    {
+      "name": "frontend_assets",
+      "strategy": "switch to the previously approved immutable dist artifact and invalidate only its asset namespace",
+      "automatic": false
+    },
+    {
+      "name": "scheduled_task",
+      "strategy": "inspect, disable, and uninstall only the exact AgroSat collector task after human approval",
+      "automatic": false
+    }
+  ],
+  "migration_classifications": []
+}
