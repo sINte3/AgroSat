@@ -37,6 +37,7 @@ MAX_DATE_DAYS = 30
 MAX_ATTEMPTS = 5
 MAX_TIMEOUT_SECONDS = 900
 MAX_CYCLE_TIMEOUT_SECONDS = 21600
+LATEST_STATUS_FILENAME = "collector_latest_status.json"
 MAX_CAPTURE_BYTES = 16384
 MUTEX_NAME = "Global\\AgroSatCanonicalSatelliteCollector_v1"
 
@@ -175,6 +176,82 @@ def atomic_json(path: Path, value: dict[str, Any]) -> None:
         except OSError:
             pass
         raise
+
+
+def classify_failure(summary: dict[str, Any]) -> str | None:
+    exit_code = summary.get("exit_code")
+    if exit_code == 0:
+        return None
+    if exit_code == 130:
+        return "cancelled"
+    if exit_code == 3:
+        return "lock_contention"
+    children = summary.get("children", [])
+    if any(bool(child.get("timed_out")) for child in children):
+        return "network"
+    searchable = " ".join(
+        [
+            *(str(item) for item in summary.get("diagnostics", [])),
+            *(
+                str(child.get(key, ""))
+                for child in children
+                for key in ("stdout", "stderr")
+            ),
+        ]
+    ).lower()
+    if any(marker in searchable for marker in ("invalid_client", "unauthorized", "401")):
+        return "auth"
+    if any(marker in searchable for marker in ("quota", "rate limit", "429")):
+        return "quota"
+    if any(marker in searchable for marker in ("cloud", "quality_blocked")):
+        return "cloud"
+    if any(
+        marker in searchable
+        for marker in ("timeout", "connection", "network", "dns")
+    ):
+        return "network"
+    if exit_code == 2:
+        return "contract"
+    if exit_code == 1:
+        return "partial"
+    return "operational"
+
+
+def operational_snapshot(
+    summary: dict[str, Any],
+    *,
+    running: bool = False,
+) -> dict[str, Any]:
+    exit_code = None if running else summary.get("exit_code")
+    status = (
+        "running"
+        if running
+        else "succeeded"
+        if exit_code == 0
+        else "cancelled"
+        if exit_code == 130
+        else "failed"
+    )
+    snapshot = {
+        "schema_version": 1,
+        "run_id": summary["run_id"],
+        "mode": summary.get("mode"),
+        "status": status,
+        "started_at": summary["started_at"],
+        "finished_at": None if running else summary.get("finished_at"),
+        "duration_seconds": None if running else summary.get("duration_seconds"),
+        "exit_code": exit_code,
+        "failure_category": None if running else classify_failure(summary),
+        "providers": [
+            {
+                "provider": child.get("provider"),
+                "exit_code": child.get("exit_code"),
+                "timed_out": bool(child.get("timed_out")),
+            }
+            for child in summary.get("children", [])
+        ],
+    }
+    return sanitize(snapshot)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -384,6 +461,7 @@ def run(
     summary: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
+        "mode": selected_mode(args),
         "started_at": utc_now(),
         "exit_code": 4,
         "diagnostics": [],
@@ -392,6 +470,7 @@ def run(
     final_code = 4
     lock = None
     summary_path: Path | None = None
+    latest_status_path: Path | None = None
     try:
         plan = validate(args)
         for directory in (
@@ -403,6 +482,11 @@ def run(
         run_dir = plan["output_dir"] / f"run_{run_id}"
         run_dir.mkdir(parents=False, exist_ok=False)
         summary_path = run_dir / "collector_summary.json"
+        latest_status_path = plan["output_dir"] / LATEST_STATUS_FILENAME
+        atomic_json(
+            latest_status_path,
+            operational_snapshot(summary, running=True),
+        )
         lock = lock_acquire(
             str(plan["lock_dir"] / "canonical_satellite.lock"),
             mutex_name=MUTEX_NAME,
@@ -471,6 +555,18 @@ def run(
                 summary["exit_code"] = final_code
                 summary["diagnostics"].append(
                     sanitize_text(f"summary persistence failed: {exc}")
+                )
+        if latest_status_path is not None:
+            try:
+                atomic_json(
+                    latest_status_path,
+                    operational_snapshot(summary),
+                )
+            except Exception as exc:
+                final_code = 4
+                summary["exit_code"] = final_code
+                summary["diagnostics"].append(
+                    sanitize_text(f"latest status persistence failed: {exc}")
                 )
     return final_code, sanitize(summary)
 

@@ -116,12 +116,73 @@ def test_success_writes_one_sanitized_parent_summary():
 
         summary_path = root / "output" / "run_run123" / "collector_summary.json"
         persisted = json.loads(summary_path.read_text(encoding="utf-8"))
+        latest_path = root / "output" / collector.LATEST_STATUS_FILENAME
+        latest = json.loads(latest_path.read_text(encoding="utf-8"))
 
     assert code == 0
     assert len(calls) == 2
     assert [item["provider"] for item in summary["children"]] == ["ndvi", "multi"]
     assert persisted["exit_code"] == 0
     assert persisted["run_id"] == "run123"
+    assert latest["status"] == "succeeded"
+    assert latest["failure_category"] is None
+    assert latest["providers"] == [
+        {"exit_code": 0, "provider": "ndvi", "timed_out": False},
+        {"exit_code": 0, "provider": "multi", "timed_out": False},
+    ]
+    assert "stdout" not in json.dumps(latest)
+    assert "stderr" not in json.dumps(latest)
+    assert "diagnostics" not in latest
+
+
+def test_latest_status_is_running_while_child_executes():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        observed = []
+
+        def child(command, timeout):
+            latest_path = root / "output" / collector.LATEST_STATUS_FILENAME
+            observed.append(json.loads(latest_path.read_text(encoding="utf-8")))
+            return {"exit_code": 0, "timed_out": False}
+
+        code, _ = collector.run(
+            invocation(root),
+            child_runner=child,
+            lock_acquire=lambda *args, **kwargs: "lock",
+            lock_release=lambda lock: None,
+            run_id_factory=lambda: "heartbeat",
+        )
+
+    assert code == 0
+    assert observed
+    assert all(item["status"] == "running" for item in observed)
+    assert all(item["finished_at"] is None for item in observed)
+
+
+def test_failure_categories_are_bounded_labels():
+    base = {
+        "run_id": "classification",
+        "mode": "diagnostic",
+        "started_at": "2026-07-28T00:00:00+00:00",
+        "finished_at": "2026-07-28T00:00:01+00:00",
+        "duration_seconds": 1,
+        "diagnostics": [],
+    }
+    cases = (
+        ({"exit_code": 4, "children": [{"stderr": "HTTP 401"}]}, "auth"),
+        ({"exit_code": 4, "children": [{"stderr": "HTTP 429"}]}, "quota"),
+        ({"exit_code": 1, "children": [{"stderr": "cloud"}]}, "cloud"),
+        (
+            {"exit_code": 1, "children": [{"timed_out": True}]},
+            "network",
+        ),
+        ({"exit_code": 2, "children": []}, "contract"),
+        ({"exit_code": 3, "children": []}, "lock_contention"),
+        ({"exit_code": 130, "children": []}, "cancelled"),
+    )
+    for updates, expected in cases:
+        snapshot = collector.operational_snapshot({**base, **updates})
+        assert snapshot["failure_category"] == expected
 
 
 def test_diagnostic_mode_never_maps_to_child_write():
