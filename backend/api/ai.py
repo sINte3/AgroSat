@@ -14,6 +14,7 @@ from database import get_db
 from config import settings
 from models.monitoring import User
 from api.auth import get_current_active_user
+from api.dependencies import is_tenant_role, normalize_role
 import anthropic
 
 logger = logging.getLogger(__name__)
@@ -48,7 +49,7 @@ def get_ai_recommendation(
             detail="alert_id and field_id must be positive",
         )
 
-    role = str(current_user.role or "").lower()
+    role = normalize_role(current_user)
 
     if role == "viewer":
         raise HTTPException(
@@ -62,8 +63,23 @@ def get_ai_recommendation(
             detail="Недостаточно прав для генерации ИИ-рекомендации",
         )
 
+    query_params = {
+        "aid": alert_id,
+        "fid": field_id,
+        "year": date.today().year,
+    }
+    tenant_clause = ""
+    if is_tenant_role(role):
+        if current_user.enterprise_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Tenant user has no enterprise_id",
+            )
+        tenant_clause = " AND f.enterprise_id = :eid"
+        query_params["eid"] = current_user.enterprise_id
+
     # --- Load field + alert + crop + enterprise in one joined query ---
-    context_row = db.execute(text("""
+    context_row = db.execute(text(f"""
         SELECT
             f.id AS field_id,
             f.enterprise_id,
@@ -90,12 +106,9 @@ def get_ai_recommendation(
         LEFT JOIN crop_types ct ON ct.id = cs.crop_type_id
         WHERE a.id = :aid
           AND f.id = :fid
+          {tenant_clause}
         LIMIT 1
-    """), {
-        "aid": alert_id,
-        "fid": field_id,
-        "year": date.today().year,
-    }).fetchone()
+    """), query_params).fetchone()
 
     if not context_row:
         raise HTTPException(
