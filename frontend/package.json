@@ -15,7 +15,8 @@
     "test:vector-raster": "node scripts/test-vector-raster-architecture.mjs",
     "test:vector-raster-browser": "node scripts/test-vector-raster-browser.mjs",
     "benchmark:map-vector": "node scripts/benchmark-map-vector.mjs",
-    "test:pixel-anomaly": "node scripts/test-pixel-anomaly-workflow.mjs"
+    "test:pixel-anomaly": "node scripts/test-pixel-anomaly-workflow.mjs",
+    "test:offline-scouting": "node scripts/test-offline-scouting-infrastructure.mjs"
   },
   "dependencies": {
     "@mapbox/mapbox-gl-draw": "1.5.0",

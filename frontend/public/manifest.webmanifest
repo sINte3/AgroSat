@@ -1,0 +1,19 @@
+{
+  "name": "AgroSat Field Scouting",
+  "short_name": "AgroSat",
+  "description": "Field inspection and agronomic operational workflow",
+  "lang": "ru",
+  "start_url": "/inspections",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f8faf9",
+  "theme_color": "#166534",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import apiClient, { loginWithPassword } from '../api/client';
+import { purgeOfflineScoutingData } from '../offline/offlineScoutingStore.js';
 
 const AuthContext = createContext(null);
 
@@ -9,6 +10,7 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
 
   const logout = () => {
+    void purgeOfflineScoutingData().catch(() => {});
     localStorage.removeItem('agrosat_token');
     localStorage.removeItem('agrosat_user');
     setUser(null);

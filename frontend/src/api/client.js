@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { purgeOfflineScoutingData } from '../offline/offlineScoutingStore.js';
 
 const client = axios.create({
   baseURL: '/api/',
@@ -61,6 +62,7 @@ client.interceptors.response.use(
   response => response,
   async error => {
     if (error?.response?.status === 401) {
+      await purgeOfflineScoutingData().catch(() => {});
       localStorage.removeItem('agrosat_token');
       localStorage.removeItem('agrosat_user');
       window.dispatchEvent(new Event('agrosat:logout'));

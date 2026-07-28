@@ -1,4 +1,4 @@
-import client from './client';
+import client from './client.js';
 
 const NO_AUTOMATIC_RETRY_COUNT = 2;
 const clean = (values) => Object.fromEntries(
