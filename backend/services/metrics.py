@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
+import logging
 import re
 import threading
 import time
@@ -16,6 +17,7 @@ LABEL_PATTERN = re.compile(r"^[A-Za-z0-9_./{}:-]{1,160}$")
 DB_OPERATIONS = {"select", "insert", "update", "delete", "other"}
 CACHE_OPERATIONS = {"get", "get_binary", "set", "set_binary", "delete", "delete_pattern", "probe"}
 CACHE_RESULTS = {"hit", "miss", "success", "failure", "unavailable", "bypass"}
+logger = logging.getLogger(__name__)
 
 
 def _label(value: Any) -> str:
@@ -231,11 +233,23 @@ class MetricsMiddleware:
         finally:
             route = scope.get("route")
             route_template = getattr(route, "path", "unmatched")
+            duration = time.perf_counter() - started
             record_api_request(
                 scope.get("method", "unknown"),
                 route_template,
                 status,
-                time.perf_counter() - started,
+                duration,
+            )
+            logger.info(
+                "api_request_complete",
+                extra={
+                    "agrosat_context": {
+                        "method": scope.get("method", "unknown"),
+                        "route": route_template,
+                        "status_class": f"{status // 100}xx",
+                        "duration_ms": round(duration * 1000, 3),
+                    }
+                },
             )
 
 

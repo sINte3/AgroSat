@@ -155,3 +155,33 @@ def test_json_formatter_redacts_credentials_and_exception_detail():
     rendered_exception = formatter.format(record)
     assert '"exception_type": "RuntimeError"' in rendered_exception
     assert "private exception detail" not in rendered_exception
+
+
+def test_json_formatter_allows_only_bounded_request_context():
+    formatter = SanitizingJsonFormatter("abc123")
+    record = logging.LogRecord(
+        "services.metrics",
+        logging.INFO,
+        __file__,
+        1,
+        "api_request_complete",
+        (),
+        None,
+    )
+    record.agrosat_context = {
+        "method": "GET",
+        "route": "/api/fields/{field_id}",
+        "status_class": "2xx",
+        "duration_ms": 12.3456,
+        "user_email": "must-not-appear",
+        "requested_path": "/api/fields/987654",
+    }
+    payload = json.loads(formatter.format(record))
+    assert payload["context"] == {
+        "duration_ms": 12.346,
+        "method": "GET",
+        "route": "/api/fields/{field_id}",
+        "status_class": "2xx",
+    }
+    assert "must-not-appear" not in json.dumps(payload)
+    assert "987654" not in json.dumps(payload)

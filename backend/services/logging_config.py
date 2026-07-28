@@ -56,6 +56,17 @@ class SanitizingJsonFormatter(logging.Formatter):
         }
         if record.exc_info:
             payload["exception_type"] = type(record.exc_info[1]).__name__
+        context = getattr(record, "agrosat_context", None)
+        if isinstance(context, dict):
+            safe_context = {}
+            for key in ("method", "route", "status_class"):
+                if key in context:
+                    safe_context[key] = sanitize_log_text(context[key])[:160]
+            duration = context.get("duration_ms")
+            if isinstance(duration, (int, float)) and 0 <= duration <= 3_600_000:
+                safe_context["duration_ms"] = round(float(duration), 3)
+            if safe_context:
+                payload["context"] = safe_context
         return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
