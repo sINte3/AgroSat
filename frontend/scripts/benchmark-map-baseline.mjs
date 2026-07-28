@@ -1,11 +1,16 @@
 import assert from 'node:assert/strict';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { execFile as execFileCallback } from 'node:child_process';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 
 const FIELD_COUNT = 1000;
 const VERTICES_PER_FIELD = 64;
 const SAMPLES = 31;
+const BASELINE_COMMIT = '1b11607b6c5880643cbee07bf78fdce5e00e383d';
+const execFile = promisify(execFileCallback);
 const outputArgument = process.argv.find((value) => value.startsWith('--output='));
 const outputPath = outputArgument ? resolve(outputArgument.slice('--output='.length)) : '';
 
@@ -98,8 +103,15 @@ for (let sample = 0; sample < SAMPLES; sample += 1) {
 parseSamples.sort((left, right) => left - right);
 transformSamples.sort((left, right) => left - right);
 
-const fieldMapSource = await readFile(new URL('../src/components/Map/FieldMap.jsx', import.meta.url), 'utf8');
-const rasterHookSource = await readFile(new URL('../src/hooks/useNDVIRasterLayer.js', import.meta.url), 'utf8');
+const repositoryRoot = fileURLToPath(new URL('../..', import.meta.url));
+const readBaselineFile = async (path) => (
+  await execFile('git', ['show', `${BASELINE_COMMIT}:${path}`], {
+    cwd: repositoryRoot,
+    encoding: 'utf8',
+  })
+).stdout;
+const fieldMapSource = await readBaselineFile('frontend/src/components/Map/FieldMap.jsx');
+const rasterHookSource = await readBaselineFile('frontend/src/hooks/useNDVIRasterLayer.js');
 const lifecycleSource = `${fieldMapSource}\n${rasterHookSource}`;
 const count = (pattern) => (lifecycleSource.match(pattern) || []).length;
 
@@ -112,7 +124,7 @@ assert.match(rasterHookSource, /URL\.revokeObjectURL/);
 const report = {
   decision: 'PASS_BASELINE_FIXTURE',
   measured_at: new Date().toISOString(),
-  baseline_commit: '1b11607b6c5880643cbee07bf78fdce5e00e383d',
+  baseline_commit: BASELINE_COMMIT,
   contract: {
     current_geometry_delivery: 'single_full_geojson_response',
     endpoint: '/api/fields/geojson/all',

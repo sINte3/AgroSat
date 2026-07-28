@@ -93,7 +93,9 @@ export default function FieldListPanel({
   const [cropFilter, setCropFilter] = useState(null);
   const [statusFilter, setStatusFilter] = useState(null); // 'has_data' | 'no_data' | null
   const [coverageFilter, setCoverageFilter] = useState(null); // null | 'with_data' | 'without_data' | 'complete' | 'partial' | 'stale'
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia('(max-width: 639px)').matches,
+  );
   const [showLegend, setShowLegend] = useState(false);
   const [showCoverageAttention, setShowCoverageAttention] = useState(false);
 
@@ -101,6 +103,15 @@ export default function FieldListPanel({
   useEffect(() => {
     if (enterpriseId) setEnterpriseFilter(enterpriseId);
   }, [enterpriseId]);
+
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 639px)');
+    const collapseForMobile = (event) => {
+      if (event.matches) setCollapsed(true);
+    };
+    media.addEventListener('change', collapseForMobile);
+    return () => media.removeEventListener('change', collapseForMobile);
+  }, []);
 
   // Derive unique crop list from loaded fields
   const cropOptions = useMemo(() => {
@@ -198,9 +209,13 @@ export default function FieldListPanel({
     <>
       {/* Collapse toggle — always visible */}
       <button
+        type="button"
         onClick={() => setCollapsed(!collapsed)}
         className="absolute left-[380px] top-1/2 -translate-y-1/2 w-6 h-12 bg-white rounded-r-lg shadow-md border border-l-0 border-gray-200 flex items-center justify-center text-gray-400 hover:text-gray-600 z-40"
-        style={{ left: collapsed ? '0px' : '380px' }}
+        style={{ left: collapsed ? '0px' : 'min(380px, calc(100vw - 24px))' }}
+        aria-label={collapsed ? 'Открыть список полей' : 'Скрыть список полей'}
+        aria-expanded={!collapsed}
+        aria-controls="field-list-panel"
       >
         <svg className={`w-4 h-4 transition-transform ${collapsed ? 'rotate-180' : ''}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
           <path d="M15 18l-6-6 6-6" />
@@ -209,7 +224,8 @@ export default function FieldListPanel({
 
       {/* Panel */}
       <div
-        className={`absolute top-3 bottom-3 z-30 w-[380px] bg-white rounded-2xl shadow-xl border border-gray-200 flex flex-col overflow-hidden transition-transform duration-300 ${
+        id="field-list-panel"
+        className={`absolute top-3 bottom-3 z-30 w-[min(380px,calc(100vw-24px))] bg-white rounded-2xl shadow-xl border border-gray-200 flex flex-col overflow-hidden transition-transform duration-300 ${
           collapsed ? '-translate-x-[calc(100%+12px)]' : 'left-3'
         }`}
       >

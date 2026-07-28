@@ -3,7 +3,12 @@ import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import MapboxDraw from '@mapbox/mapbox-gl-draw';
 import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css';
-import apiClient from '../../api/client';
+import { getSameOriginApiAuthorizationHeaders } from '../../api/client';
+import {
+  getFieldTileMetadata,
+  resolveFieldTileTemplate,
+  validFieldTileMetadata,
+} from '../../api/fieldTiles';
 import MapLegend from './MapLegend';
 import MapHoverPopup from './MapHoverPopup';
 import NDVIRasterControl from './NDVIRasterControl';
@@ -143,6 +148,9 @@ const MAP_PIXEL_RATIO_CAP = 1.25;
 const FAST_WHEEL_ZOOM_RATE = 1 / 240;
 const FAST_TRACKPAD_ZOOM_RATE = 1 / 70;
 const LAYERS = ['fields-fill', 'fields-label'];
+const FIELD_SOURCE_ID = 'fields-source';
+const FIELD_SOURCE_LAYER = 'fields';
+const FIELD_LAYER_IDS = ['fields-label', 'fields-border', 'fields-fill'];
 
 const NO_DATA_GRAY = '#4b5563';
 const NO_DATA_GRAY_HEX = '#6B7280';
@@ -153,10 +161,11 @@ function getMapPixelRatio() {
 }
 
 function transformMapRequest(url, resourceType) {
+  const headers = getSameOriginApiAuthorizationHeaders(url);
   if (['Tile', 'Glyphs', 'SpriteImage', 'SpriteJSON'].includes(resourceType)) {
-    return { url, cache: 'force-cache' };
+    return { url, headers, cache: 'force-cache' };
   }
-  return { url };
+  return { url, headers };
 }
 
 function configureSupportedMapInteractions(map) {
@@ -216,136 +225,108 @@ function getFreshnessColor(status) {
   }
 }
 
-// ─── Helper: enrich feature properties with coverage data ──────────────────────
+// ─── Vector-tile feature state and styling ────────────────────────────────────
 
 const SATELLITE_INDEX_CODES = ['savi', 'evi', 'ndmi', 'ndre'];
 
-function enrichGeoJsonFeatures(geojson, coverageMap) {
-  if (!geojson?.features) return geojson;
+function fieldFeatureTarget(id) {
   return {
-    ...geojson,
-    features: geojson.features.map(f => {
-      const props = f.properties || {};
-      const fieldId = props.id;
-      const cov = coverageMap?.[fieldId];
-      const enriched = { ...props };
-
-      if (cov) {
-        enriched.coverage_status = cov.coverage_status || 'none';
-        enriched.freshness_status = cov.freshness_status || 'no_data';
-        enriched.coverage_has_any_data = cov.has_any_data || false;
-        enriched.coverage_latest_date = cov.latest_captured_date || null;
-
-        // Per-index values
-        SATELLITE_INDEX_CODES.forEach(code => {
-          const idx = cov.indices?.[code];
-          if (idx && idx.has_data) {
-            enriched[`${code}_value`] = idx.latest_mean_value ?? null;
-            enriched[`${code}_date`] = idx.latest_captured_date ?? null;
-          } else {
-            enriched[`${code}_value`] = null;
-            enriched[`${code}_date`] = null;
-          }
-          enriched[`${code}_has_data`] = !!(idx && (idx.has_data || idx.record_count > 0));
-        });
-      } else {
-        // No coverage data available
-        enriched.coverage_status = 'none';
-        enriched.freshness_status = 'no_data';
-        enriched.coverage_has_any_data = false;
-        enriched.coverage_latest_date = null;
-        SATELLITE_INDEX_CODES.forEach(code => {
-          enriched[`${code}_value`] = null;
-          enriched[`${code}_date`] = null;
-          enriched[`${code}_has_data`] = false;
-        });
-      }
-
-      // Compute color for current mode (will be recomputed on mode change)
-      return { ...f, properties: enriched };
-    }),
+    source: FIELD_SOURCE_ID,
+    sourceLayer: FIELD_SOURCE_LAYER,
+    id,
   };
 }
 
-function computeModeColor(properties, mode) {
-  if (!properties) return NO_DATA_GRAY;
+function coverageFeatureState(coverage) {
+  const state = {
+    coverage_status: coverage?.coverage_status || 'none',
+    freshness_status: coverage?.freshness_status || 'no_data',
+    coverage_has_any_data: Boolean(coverage?.has_any_data),
+    coverage_latest_date: coverage?.latest_captured_date || null,
+    coverage_color: getCoverageColor(coverage?.coverage_status),
+    freshness_color: getFreshnessColor(coverage?.freshness_status),
+  };
+  SATELLITE_INDEX_CODES.forEach((code) => {
+    const item = coverage?.indices?.[code];
+    const value = item?.has_data ? item.latest_mean_value ?? null : null;
+    state[`${code}_value`] = value;
+    state[`${code}_date`] = item?.has_data ? item.latest_captured_date ?? null : null;
+    state[`${code}_has_data`] = Boolean(item && (item.has_data || item.record_count > 0));
+    state[`${code}_color`] = getIndexModeColor(value, code);
+  });
+  return state;
+}
 
-  switch (mode) {
-    case 'crop':
-      return getCropColorFromProps(properties);
-    case 'ndvi':
-      return getIndexModeColor(properties.last_ndvi ?? properties.ndvi_value ?? null, 'ndvi');
-    case 'savi':
-      return getIndexModeColor(properties.savi_value ?? null, 'savi');
-    case 'evi':
-      return getIndexModeColor(properties.evi_value ?? null, 'evi');
-    case 'ndmi':
-      return getIndexModeColor(properties.ndmi_value ?? null, 'ndmi');
-    case 'ndre':
-      return getIndexModeColor(properties.ndre_value ?? null, 'ndre');
-    case 'coverage':
-      return getCoverageColor(properties.coverage_status);
-    case 'freshness':
-      return getFreshnessColor(properties.freshness_status);
-    default:
-      return NO_DATA_GRAY;
+function modeColorExpression(mode) {
+  if (mode === 'crop') return CROP_COLOR_EXPR;
+  if (mode === 'ndvi') {
+    return [
+      'case',
+      ['has', 'last_ndvi'],
+      [
+        'step',
+        ['to-number', ['get', 'last_ndvi']],
+        '#dc2626',
+        0.15, '#f97316',
+        0.3, '#eab308',
+        0.45, '#84cc16',
+        0.6, '#16a34a',
+      ],
+      NO_DATA_GRAY,
+    ];
   }
+  if (SATELLITE_INDEX_CODES.includes(mode)) {
+    return ['coalesce', ['feature-state', `${mode}_color`], NO_DATA_GRAY];
+  }
+  if (mode === 'coverage') {
+    return ['coalesce', ['feature-state', 'coverage_color'], NO_DATA_GRAY];
+  }
+  if (mode === 'freshness') {
+    return ['coalesce', ['feature-state', 'freshness_color'], NO_DATA_GRAY];
+  }
+  return NO_DATA_GRAY;
 }
 
-function getCropColorFromProps(props) {
-  const crop = props.current_crop;
-  const irr = props.irrigation_type;
-  if (crop === 'Пшеница озимая') return CROP_COLORS.wheat;
-  if (crop === 'Хлопок' && irr === 'drip') return CROP_COLORS.cotton_drip;
-  if (crop === 'Хлопок' && irr === 'canal') return CROP_COLORS.cotton_canal;
-  if (crop === 'Люцерна') return CROP_COLORS.alfalfa;
-  if (crop === 'Рис') return CROP_COLORS.rice;
-  if (crop === 'Кукуруза') return CROP_COLORS.maize;
-  return CROP_COLORS.default;
-}
-
-function addModeColorToFeatures(geojson, mode) {
-  if (!geojson?.features) return geojson;
-  return {
-    ...geojson,
-    features: geojson.features.map(f => {
-      const props = f.properties || {};
-      return {
-        ...f,
-        id: Number(props.id),
-        properties: {
-          ...props,
-          map_mode_color: computeModeColor(props, mode),
-          map_mode_value: props.last_ndvi ?? props.savi_value ?? props.evi_value ?? props.ndmi_value ?? props.ndre_value ?? null,
-          map_mode_label: getModeLabel(mode),
-        },
-      };
-    }),
-  };
-}
-
-function getModeLabel(mode) {
-  const m = MAP_MODES.find(mm => mm.code === mode);
-  return m ? m.label : mode;
+function syncCoverageFeatureStates(map, coverageMap, previousIds = new Set()) {
+  if (!map?.getSource(FIELD_SOURCE_ID)) return previousIds;
+  const entries = Object.entries(coverageMap || {})
+    .map(([rawId, value]) => [Number(rawId), value])
+    .filter(([id]) => Number.isInteger(id) && id > 0);
+  const nextIds = new Set(entries.map(([id]) => id));
+  previousIds.forEach((id) => {
+    if (nextIds.has(id)) return;
+    try {
+      map.removeFeatureState(fieldFeatureTarget(id));
+    } catch (_) {}
+  });
+  entries.forEach(([id, value]) => {
+    try {
+      map.setFeatureState(fieldFeatureTarget(id), coverageFeatureState(value));
+    } catch (_) {}
+  });
+  return nextIds;
 }
 
 // ─── Get hover info from feature properties ────────────────────────────────────
 
 function formatModeValue(properties, mode) {
+  const formatted = (value) => {
+    const number = Number(value);
+    return Number.isFinite(number) ? number.toFixed(4) : null;
+  };
   switch (mode) {
     case 'crop':
       return properties.current_crop || '—';
     case 'ndvi':
-      if (properties.last_ndvi != null) return properties.last_ndvi.toFixed(4);
-      return null;
+      return formatted(properties.last_ndvi);
     case 'savi':
-      return properties.savi_value != null ? properties.savi_value.toFixed(4) : null;
+      return formatted(properties.savi_value);
     case 'evi':
-      return properties.evi_value != null ? properties.evi_value.toFixed(4) : null;
+      return formatted(properties.evi_value);
     case 'ndmi':
-      return properties.ndmi_value != null ? properties.ndmi_value.toFixed(4) : null;
+      return formatted(properties.ndmi_value);
     case 'ndre':
-      return properties.ndre_value != null ? properties.ndre_value.toFixed(4) : null;
+      return formatted(properties.ndre_value);
     case 'coverage':
       return getCoverageLabel(properties.coverage_status);
     case 'freshness':
@@ -398,6 +379,7 @@ export default function FieldMap({
   const [hoverPosition, setHoverPosition] = useState(null);
   const [mapInstance, setMapInstance] = useState(null);
   const [rasterMetadata, setRasterMetadata] = useState(null);
+  const [spatialStatus, setSpatialStatus] = useState('loading');
   const mapContainerRef = useRef(null);
   const mapRef = useRef(null);
   const drawRef = useRef(null);
@@ -405,11 +387,9 @@ export default function FieldMap({
   const abortControllerRef = useRef(null);
   const isMountedRef = useRef(true);
   const sessionPurgedRef = useRef(false);
-  const dataLoadedRef = useRef(false);
-  const geojsonRef = useRef(null);
-  const enrichedGeoJsonRef = useRef(null);
   const styleSwitchColorModeRef = useRef('crop');
   const coverageMapRef = useRef(null);
+  const coverageFeatureIdsRef = useRef(new Set());
   const selectedMapModeRef = useRef('crop');
   const selectedFieldIdRef = useRef(selectedFieldId);
   const hoverFrameRef = useRef(null);
@@ -442,6 +422,7 @@ export default function FieldMap({
     onMoveStart: null,
     onMoveEnd: null,
     onSourceData: null,
+    onError: null,
   });
 
   const updateSatellitePipelineStatus = (status) => {
@@ -558,12 +539,9 @@ export default function FieldMap({
 
   const clearHoverState = (map, clearTooltip = true) => {
     const hoveredId = hoveredFeatureIdRef.current;
-    if (hoveredId !== null && map?.getSource('fields-source')) {
+    if (hoveredId !== null && map?.getSource(FIELD_SOURCE_ID)) {
       try {
-        map.setFeatureState(
-          { source: 'fields-source', id: hoveredId },
-          { agrosatHover: false }
-        );
+        map.setFeatureState(fieldFeatureTarget(hoveredId), { agrosatHover: false });
       } catch (_) {}
     }
     hoveredFeatureIdRef.current = null;
@@ -708,16 +686,28 @@ export default function FieldMap({
     const m = mapRef.current;
     if (m) {
       try {
-        const src = m.getSource('fields-source');
-        if (src) {
-          src.setData({ type: 'FeatureCollection', features: [] });
-        }
+        LAYERS.forEach((layer) => {
+          if (layer === 'fields-fill' && handlersRef.current.onMouseMove) {
+            m.off('mousemove', layer, handlersRef.current.onMouseMove);
+          }
+          if (layer === 'fields-fill' && handlersRef.current.onMouseLeave) {
+            m.off('mouseleave', layer, handlersRef.current.onMouseLeave);
+          }
+          if (handlersRef.current.onFieldClick) {
+            m.off('click', layer, handlersRef.current.onFieldClick);
+          }
+        });
+        handlersRef.current.onMouseMove = null;
+        handlersRef.current.onMouseLeave = null;
+        handlersRef.current.onFieldClick = null;
+        FIELD_LAYER_IDS.forEach((layerId) => {
+          if (m.getLayer(layerId)) m.removeLayer(layerId);
+        });
+        if (m.getSource(FIELD_SOURCE_ID)) m.removeSource(FIELD_SOURCE_ID);
+        coverageFeatureIdsRef.current = new Set();
       } catch (_) {}
     }
   };
-
-  // ─── Refresh map colors from enriched GeoJSON + current mode ────────────────
-  const applyModeColors = useRef(null);
 
   // ─── Map initialization ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -759,6 +749,14 @@ export default function FieldMap({
       }
     };
     map.on('sourcedata', handlersRef.current.onSourceData);
+    handlersRef.current.onError = (event) => {
+      if (
+        event?.sourceId === FIELD_SOURCE_ID
+        && mapRef.current === map
+        && isMountedRef.current
+      ) setSpatialStatus('error');
+    };
+    map.on('error', handlersRef.current.onError);
 
     handlersRef.current.onLoad = async () => {
       sessionPurgedRef.current = false;
@@ -771,52 +769,36 @@ export default function FieldMap({
       abortControllerRef.current = new AbortController();
 
       try {
-        const params = {};
-        if (enterpriseId) params.enterprise_id = enterpriseId;
-        const res = await apiClient.get('/api/fields/geojson/all', {
-          params,
+        const metadata = await getFieldTileMetadata({
+          enterpriseId,
           signal: abortControllerRef.current.signal,
         });
 
         if (
           sessionPurgedRef.current ||
           !isMountedRef.current ||
-          !mapRef.current
+          mapRef.current !== m
         ) {
           return;
         }
-
-        const rawGeoJson = res.data;
-        geojsonRef.current = rawGeoJson;
-
-        // Enrich with coverage data
-        const enriched = enrichGeoJsonFeatures(rawGeoJson, coverageMapRef.current);
-        enrichedGeoJsonRef.current = enriched;
-
-        // Apply current mode colors
-        const colored = addModeColorToFeatures(enriched, selectedMapModeRef.current);
-
-        const doFitBounds = !dataLoadedRef.current;
-        dataLoadedRef.current = true;
-
-        if (!m.getSource('fields-source')) {
-          m.addSource('fields-source', {
-            type: 'geojson',
-            data: colored,
-            promoteId: 'id',
-          });
-        } else {
-          m.getSource('fields-source').setData(colored);
+        if (!validFieldTileMetadata(metadata)) {
+          throw new Error('Invalid field tile metadata');
         }
-
-        // Add layers only if they don't exist
+        m.addSource(FIELD_SOURCE_ID, {
+          type: 'vector',
+          tiles: [resolveFieldTileTemplate(metadata)],
+          minzoom: metadata.min_zoom,
+          maxzoom: metadata.max_zoom,
+          promoteId: 'id',
+        });
         if (!m.getLayer('fields-fill')) {
           m.addLayer({
             id: 'fields-fill',
             type: 'fill',
-            source: 'fields-source',
+            source: FIELD_SOURCE_ID,
+            'source-layer': FIELD_SOURCE_LAYER,
             paint: {
-              'fill-color': ['get', 'map_mode_color'],
+              'fill-color': modeColorExpression(selectedMapModeRef.current),
               'fill-opacity': 0.4,
             },
           });
@@ -826,7 +808,8 @@ export default function FieldMap({
           m.addLayer({
             id: 'fields-border',
             type: 'line',
-            source: 'fields-source',
+            source: FIELD_SOURCE_ID,
+            'source-layer': FIELD_SOURCE_LAYER,
             paint: {
               'line-color': '#ffffff',
               'line-width': [
@@ -844,7 +827,8 @@ export default function FieldMap({
           m.addLayer({
             id: 'fields-label',
             type: 'symbol',
-            source: 'fields-source',
+            source: FIELD_SOURCE_ID,
+            'source-layer': FIELD_SOURCE_LAYER,
             minzoom: 12,
             layout: {
               'text-field': ['to-string', ['coalesce', ['get', 'name'], ['get', 'code'], ['get', 'id']]],
@@ -861,40 +845,28 @@ export default function FieldMap({
             },
           });
         }
-
-        const features = colored.features;
-        if (features?.length && doFitBounds) {
-          const bounds = new maplibregl.LngLatBounds();
-          let hasCoords = false;
-          for (const f of features) {
-            if (!f?.geometry?.coordinates) continue;
-            if (f.geometry.type === 'Polygon') {
-              for (const ring of f.geometry.coordinates) {
-                for (const [lng, lat] of ring) {
-                  bounds.extend([lng, lat]);
-                  hasCoords = true;
-                }
-              }
-            } else if (f.geometry.type === 'MultiPolygon') {
-              for (const poly of f.geometry.coordinates) {
-                for (const ring of poly) {
-                  for (const [lng, lat] of ring) {
-                    bounds.extend([lng, lat]);
-                    hasCoords = true;
-                  }
-                }
-              }
-            }
-          }
-          if (hasCoords && !bounds.isEmpty()) {
-            if (fitBoundsTimeoutRef.current) clearTimeout(fitBoundsTimeoutRef.current);
-            fitBoundsTimeoutRef.current = setTimeout(() => {
-              fitBoundsTimeoutRef.current = null;
-              if (mapRef.current !== m || !isMountedRef.current || m._removed) return;
-              try { m.fitBounds(bounds, { padding: 60, duration: 0, maxZoom: 15 }); } catch (_) {}
-            }, 100);
-          }
+        coverageFeatureIdsRef.current = syncCoverageFeatureStates(
+          m,
+          coverageMapRef.current,
+          coverageFeatureIdsRef.current,
+        );
+        if (mapContainerRef.current) {
+          mapContainerRef.current.dataset.fieldSourceType = 'vector';
+          mapContainerRef.current.dataset.fieldLayerCount = String(
+            FIELD_LAYER_IDS.filter((layerId) => m.getLayer(layerId)).length,
+          );
         }
+        if (metadata.bounds) {
+          if (fitBoundsTimeoutRef.current) clearTimeout(fitBoundsTimeoutRef.current);
+          fitBoundsTimeoutRef.current = setTimeout(() => {
+            fitBoundsTimeoutRef.current = null;
+            if (mapRef.current !== m || !isMountedRef.current || m._removed) return;
+            try {
+              m.fitBounds(metadata.bounds, { padding: 60, duration: 0, maxZoom: 15 });
+            } catch (_) {}
+          }, 100);
+        }
+        setSpatialStatus(metadata.field_count === 0 ? 'empty' : 'ready');
 
         // Interaction handlers
         LAYERS.forEach((layer) => {
@@ -921,17 +893,14 @@ export default function FieldMap({
           hoverFrameRef.current = requestAnimationFrame(() => {
             hoverFrameRef.current = null;
             if (cameraMovingRef.current || !isMountedRef.current || mapRef.current !== m) return;
-            if (!m.getSource('fields-source') || hoveredFeatureIdRef.current === featureId) return;
+            if (!m.getSource(FIELD_SOURCE_ID) || hoveredFeatureIdRef.current === featureId) return;
             clearHoverState(m, false);
             try {
-              m.setFeatureState(
-                { source: 'fields-source', id: featureId },
-                { agrosatHover: true }
-              );
+              m.setFeatureState(fieldFeatureTarget(featureId), { agrosatHover: true });
             } catch (_) { return; }
             hoveredFeatureIdRef.current = featureId;
             m.getCanvas().style.cursor = 'pointer';
-            setHoveredFeature(props);
+            setHoveredFeature({ ...props, ...(feat.state || {}) });
             setHoverPosition(point);
           });
         };
@@ -946,8 +915,8 @@ export default function FieldMap({
 
         handlersRef.current.onFieldClick = (e) => {
           if (isDrawingRef.current) return;
-          const featureId = e.features?.[0]?.properties?.id;
-          if (featureId) {
+          const featureId = Number(e.features?.[0]?.properties?.id);
+          if (Number.isInteger(featureId) && featureId > 0) {
             callbacksRef.current.onFieldSelect?.(featureId);
           }
         };
@@ -987,7 +956,12 @@ export default function FieldMap({
 
         callbacksRef.current.onMapReady?.(m);
       } catch (err) {
-        if (err.name !== 'CanceledError') {
+        if (
+          err?.name !== 'CanceledError'
+          && err?.name !== 'AbortError'
+          && err?.code !== 'ERR_CANCELED'
+        ) {
+          if (isMountedRef.current) setSpatialStatus('error');
           console.error('Failed to load spatial layers');
         }
       }
@@ -995,7 +969,7 @@ export default function FieldMap({
 
     window.addEventListener('agrosat:logout', handleLogout);
 
-    map.on('load', handlersRef.current.onLoad);
+    map.on('style.load', handlersRef.current.onLoad);
 
     return () => {
       isMountedRef.current = false;
@@ -1003,6 +977,10 @@ export default function FieldMap({
       cancelDeferredBasePipeline({ updateStatus: false });
       satellitePipelineStatusRef.current = 'idle';
       window.removeEventListener('agrosat:logout', handleLogout);
+      if (handlersRef.current.onLoad) {
+        map.off('style.load', handlersRef.current.onLoad);
+        handlersRef.current.onLoad = null;
+      }
       if (hoverFrameRef.current) cancelAnimationFrame(hoverFrameRef.current);
       hoverFrameRef.current = null;
       if (fitBoundsTimeoutRef.current) clearTimeout(fitBoundsTimeoutRef.current);
@@ -1020,6 +998,10 @@ export default function FieldMap({
           mapRef.current.off('sourcedata', handlersRef.current.onSourceData);
           handlersRef.current.onSourceData = null;
         }
+        if (handlersRef.current.onError) {
+          mapRef.current.off('error', handlersRef.current.onError);
+          handlersRef.current.onError = null;
+        }
         if (handlersRef.current.onMoveStart) {
           mapRef.current.off('movestart', handlersRef.current.onMoveStart);
         }
@@ -1030,7 +1012,7 @@ export default function FieldMap({
         cameraMovingRef.current = false;
         labelVisibilityBeforeMoveRef.current = null;
         LAYERS.forEach((layer) => {
-          if (mapRef.current.getLayer(layer)) {
+          try {
             if (layer === 'fields-fill' && handlersRef.current.onMouseMove) {
               mapRef.current.off('mousemove', layer, handlersRef.current.onMouseMove);
             }
@@ -1040,10 +1022,14 @@ export default function FieldMap({
             if (handlersRef.current.onFieldClick) {
               mapRef.current.off('click', layer, handlersRef.current.onFieldClick);
             }
-          }
+          } catch (_) {}
         });
+        handlersRef.current.onMouseMove = null;
+        handlersRef.current.onMouseLeave = null;
+        handlersRef.current.onFieldClick = null;
         mapRef.current.remove();
         mapRef.current = null;
+        coverageFeatureIdsRef.current = new Set();
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1099,40 +1085,22 @@ export default function FieldMap({
 
     const m = mapRef.current;
     if (!m || !m.isStyleLoaded()) return;
-
-    // Recolor features with new mode
-    const enriched = enrichGeoJsonFeatures(geojsonRef.current, coverageMapRef.current);
-    enrichedGeoJsonRef.current = enriched;
-    const colored = addModeColorToFeatures(enriched, mode);
-
-    try {
-      const src = m.getSource('fields-source');
-      if (src) {
-        src.setData(colored);
-      }
-    } catch (_) {}
-
-    // Update fill-color paint property
     try {
       if (m.getLayer('fields-fill')) {
-        m.setPaintProperty('fields-fill', 'fill-color', ['get', 'map_mode_color']);
+        m.setPaintProperty('fields-fill', 'fill-color', modeColorExpression(mode));
       }
     } catch (_) {}
   };
 
-  // ─── Respond to coverageMap changes: re-enrich and recolor ─────────────────
+  // ─── Respond to coverageMap changes without replacing vector geometry ──────
   useEffect(() => {
-    if (!coverageMap || !mapRef.current || !mapRef.current.isStyleLoaded()) return;
-    const mode = selectedMapMode || 'crop';
-    const enriched = enrichGeoJsonFeatures(geojsonRef.current, coverageMap);
-    enrichedGeoJsonRef.current = enriched;
-    const colored = addModeColorToFeatures(enriched, mode);
-    try {
-      const src = mapRef.current.getSource('fields-source');
-      if (src) {
-        src.setData(colored);
-      }
-    } catch (_) {}
+    const map = mapRef.current;
+    if (!map || !map.isStyleLoaded() || !map.getSource(FIELD_SOURCE_ID)) return;
+    coverageFeatureIdsRef.current = syncCoverageFeatureStates(
+      map,
+      coverageMap,
+      coverageFeatureIdsRef.current,
+    );
   }, [coverageMap]);
 
   // ─── Respond to selectedMapMode changes: recolor ───────────────────────────
@@ -1142,20 +1110,9 @@ export default function FieldMap({
     setActiveColorMode(mode);
     styleSwitchColorModeRef.current = mode;
 
-    const enriched = enrichGeoJsonFeatures(geojsonRef.current, coverageMapRef.current);
-    enrichedGeoJsonRef.current = enriched;
-    const colored = addModeColorToFeatures(enriched, mode);
-
-    try {
-      const src = mapRef.current.getSource('fields-source');
-      if (src) {
-        src.setData(colored);
-      }
-    } catch (_) {}
-
     try {
       if (mapRef.current.getLayer('fields-fill')) {
-        mapRef.current.setPaintProperty('fields-fill', 'fill-color', ['get', 'map_mode_color']);
+        mapRef.current.setPaintProperty('fields-fill', 'fill-color', modeColorExpression(mode));
         mapRef.current.setPaintProperty('fields-fill', 'fill-opacity', 0.4);
       }
     } catch (_) {}
@@ -1163,7 +1120,25 @@ export default function FieldMap({
 
   return (
     <div className="relative w-full h-full">
-      <div ref={mapContainerRef} className="w-full h-full" />
+      <div
+        ref={mapContainerRef}
+        className="w-full h-full"
+        role="region"
+        aria-label="Интерактивная карта полей"
+        data-spatial-status={spatialStatus}
+      />
+
+      {spatialStatus !== 'ready' && (
+        <div
+          className="pointer-events-none absolute bottom-3 left-1/2 z-10 max-w-[calc(100%-1.5rem)] -translate-x-1/2 rounded-md border border-slate-200 bg-white/95 px-3 py-2 text-center text-xs font-medium text-slate-700 shadow"
+          role={spatialStatus === 'error' ? 'alert' : 'status'}
+          aria-live="polite"
+        >
+          {spatialStatus === 'loading' && 'Загрузка полей в текущей области…'}
+          {spatialStatus === 'empty' && 'В выбранной области нет доступных полей.'}
+          {spatialStatus === 'error' && 'Не удалось загрузить пространственный слой полей.'}
+        </div>
+      )}
 
       <NDVIRasterControl
         map={mapInstance}
@@ -1172,11 +1147,13 @@ export default function FieldMap({
       />
 
       {/* Style switcher */}
-      <div className="absolute top-3 right-3 z-10 flex gap-1">
+      <div className="absolute top-3 right-3 z-10 flex gap-1 max-sm:left-3 max-sm:right-auto max-sm:top-[60px]">
         {Object.entries(MAP_STYLES).map(([key, s]) => (
           <button
+            type="button"
             key={key}
             onClick={() => switchMapStyle(key)}
+            aria-pressed={activeStyle === key}
             className={`px-2.5 py-1 text-xs rounded-md font-medium transition-colors shadow border ${activeStyle === key ? 'bg-blue-600 text-white border-blue-600' : 'bg-white/90 backdrop-blur-sm text-slate-600 hover:text-slate-900 border-slate-200'}`}
           >
             {s.label}
@@ -1186,7 +1163,7 @@ export default function FieldMap({
 
       {/* Map mode selector — compact row */}
       {activeStyle !== 'osm' && satellitePipelineStatus !== 'idle' && (
-        <div className="pointer-events-none absolute top-12 left-3 z-10 max-w-[min(320px,calc(100%-24px))] rounded-md border border-slate-200 bg-white/90 px-3 py-1.5 text-[13px] font-medium text-slate-700 shadow backdrop-blur-sm">
+        <div className="pointer-events-none absolute top-12 left-3 z-10 max-w-[min(320px,calc(100%-24px))] rounded-md border border-slate-200 bg-white/90 px-3 py-1.5 text-[13px] font-medium text-slate-700 shadow backdrop-blur-sm max-sm:bottom-20 max-sm:top-auto">
           {{
             navigation: 'Навигация по карте · спутник после остановки',
             'loading-satellite': 'Загрузка спутникового слоя…',
@@ -1196,12 +1173,14 @@ export default function FieldMap({
         </div>
       )}
 
-      <div className="absolute top-12 right-3 z-10 flex flex-wrap gap-1 max-w-[260px] justify-end">
+      <div className="absolute top-12 right-3 z-10 flex max-w-[260px] flex-wrap justify-end gap-1 max-sm:left-3 max-sm:right-3 max-sm:top-[100px] max-sm:max-w-none max-sm:flex-nowrap max-sm:justify-start max-sm:overflow-x-auto max-sm:pb-1">
         {MAP_MODES.map(mode => (
           <button
+            type="button"
             key={mode.code}
             onClick={() => switchColorMode(mode.code)}
-            className={`px-2 py-1 text-xs rounded-md font-medium transition-colors shadow border ${
+            aria-pressed={activeColorMode === mode.code}
+            className={`flex-shrink-0 px-2 py-1 text-xs rounded-md font-medium transition-colors shadow border ${
               activeColorMode === mode.code
                 ? 'bg-blue-600 text-white border-blue-600'
                 : 'bg-white/90 backdrop-blur-sm text-slate-600 hover:text-slate-900 border-slate-200'
@@ -1215,7 +1194,9 @@ export default function FieldMap({
       {/* Legend toggle */}
       <div className="absolute bottom-20 right-3 z-10 flex flex-col items-end gap-2">
         <button
+          type="button"
           onClick={() => setShowLegend(!showLegend)}
+          aria-expanded={showLegend}
           className={`px-2.5 py-1.5 text-xs rounded-lg font-medium shadow border transition-colors ${
             showLegend
               ? 'bg-blue-600 text-white border-blue-600'
@@ -1247,6 +1228,7 @@ export default function FieldMap({
 
       {/* Re-center button */}
       <button
+        type="button"
         onClick={() => mapRef.current?.flyTo({ center: DEFAULT_CENTER, zoom: DEFAULT_ZOOM, duration: 1000 })}
         className="absolute bottom-8 right-3 z-10 bg-white/90 backdrop-blur-sm hover:bg-slate-100 rounded-lg p-2 shadow-lg transition-colors border border-slate-200"
         title="Сбросить вид"

@@ -6,6 +6,21 @@ const client = axios.create({
   headers: { 'Content-Type': 'application/json' },
 });
 
+export function getSameOriginApiAuthorizationHeaders(url) {
+  if (typeof window === 'undefined' || !url) return {};
+  try {
+    const target = new URL(url, window.location.origin);
+    if (
+      target.origin !== window.location.origin
+      || !target.pathname.startsWith('/api/')
+    ) return {};
+  } catch (_) {
+    return {};
+  }
+  const token = localStorage.getItem('agrosat_token');
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 // ─── Fix double /api/ prefix ─────────────────────────────────────────────────
 // Некоторые компоненты вызывают client.get('/api/...') — при baseURL='/api/'
 // это даёт /api/api/... → 404. Этот interceptor убирает лишний префикс.
@@ -82,8 +97,8 @@ export async function getEnterprise(id) {
 
 // ─── Fields ─────────────────────────────────────────────────────────────────
 
-export async function getFields(params = {}) {
-  const { data } = await client.get('fields/', { params });
+export async function getFields(params = {}, signal) {
+  const { data } = await client.get('fields/', { params, signal });
   return data;
 }
 
@@ -300,7 +315,7 @@ const VALID_INDEX_CODES = ['savi', 'evi', 'ndmi', 'ndre'];
  * - 401/403 are surfaced via the retry interceptor's 401 handler.
  * - 422 surfaces a configuration error string.
  */
-export async function getSatelliteCoverage(params = {}) {
+export async function getSatelliteCoverage(params = {}, signal) {
   const cleaned = { ...params };
 
   // Strip NDVI from index_codes if present
@@ -317,6 +332,7 @@ export async function getSatelliteCoverage(params = {}) {
   try {
     const { data } = await client.get('satellite-indices/coverage', {
       params: cleaned,
+      signal,
       // Do not retry 422 — it's a configuration error, not transient
       __noRetry: true,
     });

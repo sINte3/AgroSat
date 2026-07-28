@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import FieldMap from '../components/Map/FieldMap';
 import FieldListPanel from '../components/Map/FieldListPanel';
 import FieldDetailPanel from '../components/Map/FieldDetailPanel';
@@ -30,28 +30,36 @@ export default function FieldsPage({ onFieldClick, onNavigate, enterpriseId }) {
     currentUser && ['admin', 'manager', 'agronomist'].includes(currentUser.role);
 
   useEffect(() => {
-    getFields({ include_ndvi: true })
-      .then(setFields)
-      .catch((err) => console.error('Error loading fields:', err));
+    const controller = new AbortController();
+    let active = true;
+    getFields({ include_ndvi: true }, controller.signal)
+      .then((value) => { if (active) setFields(value); })
+      .catch((err) => {
+        if (err?.code !== 'ERR_CANCELED') console.error('Error loading fields:', err);
+      });
 
     getCachedEnterprises()
-      .then(setEnterprises)
-      .catch((err) => console.error('Error loading enterprises:', err));
+      .then((value) => { if (active) setEnterprises(value); })
+      .catch((err) => {
+        if (active) console.error('Error loading enterprises:', err);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
   }, []);
 
   // Fetch coverage once for current scope — never per field
-  const fieldsLoadedRef = useRef(false);
   useEffect(() => {
     if (fields.length === 0) return;
-    // Only fetch on first load or enterprise change
-    if (fieldsLoadedRef.current && !enterpriseId) return;
-    fieldsLoadedRef.current = true;
-
+    const controller = new AbortController();
+    let active = true;
     setCoverageLoading(true);
     const params = { include_empty: true, active_only: true };
     if (enterpriseId) params.enterprise_id = enterpriseId;
-    getSatelliteCoverage(params)
+    getSatelliteCoverage(params, controller.signal)
       .then(data => {
+        if (!active) return;
         const map = {};
         if (Array.isArray(data.fields)) {
           data.fields.forEach(f => {
@@ -60,9 +68,22 @@ export default function FieldsPage({ onFieldClick, onNavigate, enterpriseId }) {
         }
         setCoverageMap(map);
       })
-      .catch(err => console.error('Coverage fetch error:', err))
-      .finally(() => setCoverageLoading(false));
+      .catch(err => {
+        if (err?.code !== 'ERR_CANCELED') console.error('Coverage fetch error:', err);
+      })
+      .finally(() => {
+        if (active) setCoverageLoading(false);
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
   }, [enterpriseId, fields.length]);
+
+  useEffect(() => {
+    setSelectedFieldId(null);
+    setSelectedField(null);
+  }, [enterpriseId]);
 
   // Load field detail when selectedFieldId changes (for the right-side detail panel)
   useEffect(() => {
@@ -178,7 +199,7 @@ export default function FieldsPage({ onFieldClick, onNavigate, enterpriseId }) {
       {/* ── Central map area (flex-1) ──────────────────────────── */}
       <div className="relative flex-1 min-w-0">
         <FieldMap
-          key={mapReloadKey}
+          key={`${mapReloadKey}:${enterpriseId || 'all'}`}
           onFieldSelect={handleMapFieldClick}
           highlightedFieldId={highlightedFieldId}
           selectedFieldId={selectedFieldId}
@@ -195,7 +216,7 @@ export default function FieldsPage({ onFieldClick, onNavigate, enterpriseId }) {
 
         {/* Draw controls overlay */}
         {canCreateField && (
-          <div className="absolute top-3 left-[408px] z-50 flex flex-col gap-2">
+          <div className="absolute top-3 left-3 sm:left-[408px] z-50 flex flex-col gap-2">
             {!isDrawingMode ? (
               <button
                 id="add-field-btn"
