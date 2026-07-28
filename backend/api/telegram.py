@@ -16,14 +16,11 @@ from config import settings
 from services.telegram import send_telegram_message, format_alert_message
 from models.monitoring import User
 from api.auth import get_current_active_user
+from api.dependencies import is_tenant_role, normalize_role
 from services.cache import cache_get, cache_set
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/telegram", tags=["telegram"])
-
-
-def _normalized_role(user: User) -> str:
-    return str(user.role or "").lower()
 
 
 def _enforce_telegram_enabled() -> None:
@@ -56,7 +53,7 @@ def telegram_status(current_user: User = Depends(get_current_active_user)):
 @router.post("/test")
 def send_test_notification(current_user: User = Depends(get_current_active_user)):
     """Отправить тестовое сообщение в Telegram. Только admin/manager."""
-    role = _normalized_role(current_user)
+    role = normalize_role(current_user)
 
     if role not in {"admin", "manager"}:
         raise HTTPException(
@@ -105,7 +102,7 @@ def send_alert_notification(
             detail="alert_id must be positive",
         )
 
-    role = _normalized_role(current_user)
+    role = normalize_role(current_user)
 
     if role == "viewer":
         raise HTTPException(
@@ -119,9 +116,20 @@ def send_alert_notification(
             detail="Недостаточно прав для отправки Telegram-уведомлений",
         )
 
+    query_params = {"aid": alert_id}
+    tenant_clause = ""
+    if is_tenant_role(role):
+        if current_user.enterprise_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Tenant user has no enterprise_id",
+            )
+        tenant_clause = " AND f.enterprise_id = :eid"
+        query_params["eid"] = current_user.enterprise_id
+
     _enforce_telegram_enabled()
 
-    row = db.execute(text("""
+    row = db.execute(text(f"""
         SELECT
             a.id,
             a.alert_type,
@@ -141,7 +149,8 @@ def send_alert_notification(
         JOIN fields f ON f.id = a.field_id
         JOIN enterprises e ON e.id = f.enterprise_id
         WHERE a.id = :aid
-    """), {"aid": alert_id}).fetchone()
+          {tenant_clause}
+    """), query_params).fetchone()
 
     if not row:
         raise HTTPException(
