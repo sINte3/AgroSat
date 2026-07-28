@@ -192,19 +192,20 @@ export async function getEnterpriseDashboard(enterpriseId) {
 
 // ─── Reports ────────────────────────────────────────────────────────────────
 
-export async function getManagementReportSummary() {
-  const { data } = await client.get('reports/management/summary');
+export async function getManagementReportSummary(signal) {
+  const { data } = await client.get('reports/management/summary', { signal });
   return data;
 }
 
-export async function getManagementSatelliteIndicesSummary(params = {}) {
-  const { data } = await client.get('reports/management/satellite-indices/summary', { params });
+export async function getManagementSatelliteIndicesSummary(params = {}, signal) {
+  const { data } = await client.get('reports/management/satellite-indices/summary', { params, signal });
   return data;
 }
 
-export async function downloadManagementReportPdf() {
+export async function downloadManagementReportPdf(signal) {
   const response = await client.get('reports/management/pdf', {
     responseType: 'blob',
+    signal,
   });
   return response;
 }

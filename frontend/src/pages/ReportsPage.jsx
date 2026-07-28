@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { getManagementReportSummary, getManagementSatelliteIndicesSummary, downloadManagementReportPdf } from '../api/client';
+import ExecutiveAccountability from '../components/Reports/ExecutiveAccountability';
+import { useAuth } from '../context/AuthContext';
 
 // ─── Severity count extraction helper ─────────────────────────────────────
 
@@ -132,7 +134,8 @@ function EnterpriseIcon({ className }) {
 
 // ─── ReportPage component ────────────────────────────────────────────────
 
-export default function ReportsPage() {
+export default function ReportsPage({ onNavigate }) {
+  const { user } = useAuth();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -145,14 +148,25 @@ export default function ReportsPage() {
   const [pdfDownloading, setPdfDownloading] = useState(false);
   const [pdfError, setPdfError] = useState(null);
   const pdfDownloadRef = useRef(false);
+  const reportControllerRef = useRef(null);
+  const reportGenerationRef = useRef(0);
+  const satelliteControllerRef = useRef(null);
+  const satelliteGenerationRef = useRef(0);
+  const pdfControllerRef = useRef(null);
 
   const loadData = useCallback(async () => {
+    reportControllerRef.current?.abort();
+    const controller = new AbortController();
+    reportControllerRef.current = controller;
+    const generation = ++reportGenerationRef.current;
     setLoading(true);
     setError(null);
     try {
-      const result = await getManagementReportSummary();
+      const result = await getManagementReportSummary(controller.signal);
+      if (controller.signal.aborted || generation !== reportGenerationRef.current) return;
       setData(result);
     } catch (err) {
+      if (controller.signal.aborted || generation !== reportGenerationRef.current || err?.code === 'ERR_CANCELED') return;
       if (err?.response?.status === 404) {
         setError('Отчёты пока недоступны (эндпоинт не найден).');
       } else if (err?.response?.status === 403) {
@@ -162,17 +176,23 @@ export default function ReportsPage() {
       }
       console.error(err);
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted && generation === reportGenerationRef.current) setLoading(false);
     }
   }, []);
 
   const loadSatelliteData = useCallback(async () => {
+    satelliteControllerRef.current?.abort();
+    const controller = new AbortController();
+    satelliteControllerRef.current = controller;
+    const generation = ++satelliteGenerationRef.current;
     setSatelliteLoading(true);
     setSatelliteError(null);
     try {
-      const result = await getManagementSatelliteIndicesSummary();
+      const result = await getManagementSatelliteIndicesSummary({}, controller.signal);
+      if (controller.signal.aborted || generation !== satelliteGenerationRef.current) return;
       setSatelliteData(result);
     } catch (err) {
+      if (controller.signal.aborted || generation !== satelliteGenerationRef.current || err?.code === 'ERR_CANCELED') return;
       if (err?.response?.status === 404) {
         setSatelliteError('Спутниковые индексы пока недоступны (эндпоинт не найден).');
       } else {
@@ -180,7 +200,7 @@ export default function ReportsPage() {
       }
       console.error(err);
     } finally {
-      setSatelliteLoading(false);
+      if (!controller.signal.aborted && generation === satelliteGenerationRef.current) setSatelliteLoading(false);
     }
   }, []);
 
@@ -191,9 +211,12 @@ export default function ReportsPage() {
     pdfDownloadRef.current = true;
     setPdfDownloading(true);
     setPdfError(null);
+    const controller = new AbortController();
+    pdfControllerRef.current = controller;
+    let objectUrl = '';
 
     try {
-      const response = await downloadManagementReportPdf();
+      const response = await downloadManagementReportPdf(controller.signal);
 
       if (!response || !response.data || response.data.size === 0) {
         throw new Error('empty_response');
@@ -215,15 +238,15 @@ export default function ReportsPage() {
       }
 
       const blob = new Blob([response.data], { type: 'application/pdf' });
-      const url = window.URL.createObjectURL(blob);
+      objectUrl = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
-      a.href = url;
+      a.href = objectUrl;
       a.download = filename;
       document.body.appendChild(a);
       a.click();
       a.remove();
-      window.URL.revokeObjectURL(url);
     } catch (err) {
+      if (controller.signal.aborted || err?.code === 'ERR_CANCELED') return;
       if (err?.response?.status === 401 || err?.response?.status === 403) {
         setPdfError('Нет доступа к скачиванию PDF. Проверьте права.');
       } else if (err?.response?.status === 404) {
@@ -232,18 +255,29 @@ export default function ReportsPage() {
         setPdfError('Ошибка скачивания PDF. Сервер временно недоступен.');
       }
     } finally {
-      setPdfDownloading(false);
+      if (objectUrl) window.URL.revokeObjectURL(objectUrl);
+      if (!controller.signal.aborted) setPdfDownloading(false);
       pdfDownloadRef.current = false;
     }
   }, []);
 
   useEffect(() => {
     loadData();
+    return () => {
+      reportGenerationRef.current += 1;
+      reportControllerRef.current?.abort();
+    };
   }, [loadData]);
 
   useEffect(() => {
     loadSatelliteData();
+    return () => {
+      satelliteGenerationRef.current += 1;
+      satelliteControllerRef.current?.abort();
+    };
   }, [loadSatelliteData]);
+
+  useEffect(() => () => pdfControllerRef.current?.abort(), []);
 
   // ─── Enterprise sort/search ────────────────────────────────────────────
 
@@ -334,7 +368,7 @@ export default function ReportsPage() {
             </svg>
           </div>
           <p className="text-sm text-red-500 font-medium mb-2">{error}</p>
-          <button onClick={loadData} className="text-sm text-agro-accent underline">
+          <button onClick={() => loadData()} className="text-sm text-agro-accent underline">
             Повторить
           </button>
         </div>
@@ -400,7 +434,7 @@ export default function ReportsPage() {
           </div>
           <p className="font-semibold text-lg text-agro-text">Нет данных отчёта</p>
           <p className="text-sm text-agro-muted mt-1">Управленческая сводка пока не сформирована.</p>
-          <button onClick={loadData} className="mt-4 btn-secondary text-sm">Обновить</button>
+          <button onClick={() => loadData()} className="mt-4 btn-secondary text-sm">Обновить</button>
         </div>
       </div>
     );
@@ -436,6 +470,8 @@ export default function ReportsPage() {
           )}
         </div>
       </div>
+
+      <ExecutiveAccountability user={user} enterprises={enterprises} onNavigate={onNavigate} />
 
       {/* ═══════════════════════════════════════════════════════════
           Section 4.2: Summary Cards

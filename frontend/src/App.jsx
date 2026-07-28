@@ -267,7 +267,7 @@ function AppLayout() {
           />
         );
       case 'reports':
-        return <ReportsPage />;
+        return <ReportsPage onNavigate={handleNavigate} />;
       case 'dashboard':
       default:
         return (

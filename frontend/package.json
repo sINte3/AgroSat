@@ -8,7 +8,9 @@
     "build": "vite build",
     "preview": "vite preview",
     "test:closure": "node scripts/test-operational-closure.mjs",
-    "test:closure-browser": "node scripts/test-operational-closure-browser.mjs"
+    "test:closure-browser": "node scripts/test-operational-closure-browser.mjs",
+    "test:executive": "node scripts/test-executive-accountability.mjs",
+    "test:executive-browser": "node scripts/test-executive-accountability-browser.mjs"
   },
   "dependencies": {
     "@mapbox/mapbox-gl-draw": "1.5.0",
