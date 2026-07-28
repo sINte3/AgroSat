@@ -103,6 +103,22 @@ def test_success_writes_one_sanitized_parent_summary():
 
         def child(command, timeout):
             calls.append((command, timeout))
+            provider_output = Path(command[command.index("--output-dir") + 1])
+            cycle = provider_output / f"cycle_{len(calls)}"
+            cycle.mkdir()
+            (cycle / "cycle_summary.json").write_text(
+                json.dumps(
+                    {
+                        "success_count": 1,
+                        "failure_count": 0,
+                        "inserted_count": 0,
+                        "skipped_existing_count": 1,
+                        "quality_blocked_count": 0,
+                        "timeout_count": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
             return {"exit_code": 0, "timed_out": False, "stdout": "ok", "stderr": ""}
 
         args = invocation(root)
@@ -132,8 +148,32 @@ def test_success_writes_one_sanitized_parent_summary():
     assert latest["status"] == "succeeded"
     assert latest["failure_category"] is None
     assert latest["providers"] == [
-        {"exit_code": 0, "provider": "ndvi", "timed_out": False},
-        {"exit_code": 0, "provider": "multi", "timed_out": False},
+        {
+            "counters": {
+                "failure_count": 0,
+                "inserted_count": 0,
+                "quality_blocked_count": 0,
+                "skipped_existing_count": 1,
+                "success_count": 1,
+                "timeout_count": 0,
+            },
+            "exit_code": 0,
+            "provider": "ndvi",
+            "timed_out": False,
+        },
+        {
+            "counters": {
+                "failure_count": 0,
+                "inserted_count": 0,
+                "quality_blocked_count": 0,
+                "skipped_existing_count": 1,
+                "success_count": 1,
+                "timeout_count": 0,
+            },
+            "exit_code": 0,
+            "provider": "multi",
+            "timed_out": False,
+        },
     ]
     assert "stdout" not in json.dumps(latest)
     assert "stderr" not in json.dumps(latest)
@@ -223,6 +263,21 @@ def test_failure_preserves_separate_last_failure_snapshot():
     assert latest["status"] == "failed"
     assert latest["failure_category"] == "contract"
     assert not (root / "output" / collector.LAST_SUCCESS_FILENAME).exists()
+
+
+def test_provider_counters_reject_malformed_or_oversized_summary():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        cycle = root / "cycle_bad"
+        cycle.mkdir()
+        summary = cycle / "cycle_summary.json"
+        summary.write_text('{"success_count": -1}', encoding="utf-8")
+        assert collector.provider_counters(root) is None
+        summary.write_text(
+            "x" * (collector.MAX_CYCLE_SUMMARY_BYTES + 1),
+            encoding="utf-8",
+        )
+        assert collector.provider_counters(root) is None
 
 
 def test_diagnostic_mode_never_maps_to_child_write():

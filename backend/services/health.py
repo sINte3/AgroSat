@@ -36,6 +36,14 @@ ALLOWED_FAILURE_CATEGORIES = {
     "lock_contention",
     "cancelled",
 }
+PROVIDER_COUNTER_FIELDS = {
+    "success_count",
+    "failure_count",
+    "inserted_count",
+    "skipped_existing_count",
+    "quality_blocked_count",
+    "timeout_count",
+}
 
 
 def utc_now() -> datetime:
@@ -125,6 +133,39 @@ def _read_collector_file(path: Path) -> dict[str, Any] | None:
         type(exit_code) is not int or exit_code not in (0, 1, 2, 3, 4, 130)
     ):
         return None
+    providers_payload = payload.get("providers", [])
+    if not isinstance(providers_payload, list) or len(providers_payload) > 2:
+        return None
+    providers = []
+    for provider in providers_payload:
+        if not isinstance(provider, dict) or provider.get("provider") not in {
+            "ndvi",
+            "multi",
+        }:
+            return None
+        counters_payload = provider.get("counters")
+        counters = None
+        if counters_payload is not None:
+            if (
+                not isinstance(counters_payload, dict)
+                or set(counters_payload) != PROVIDER_COUNTER_FIELDS
+                or any(
+                    type(value) is not int or not 0 <= value <= 10_000_000
+                    for value in counters_payload.values()
+                )
+            ):
+                return None
+            counters = counters_payload
+        providers.append(
+            {
+                "provider": provider["provider"],
+                "exit_code": provider.get("exit_code")
+                if provider.get("exit_code") in (0, 1, 2, 3, 4)
+                else None,
+                "timed_out": bool(provider.get("timed_out")),
+                "counters": counters,
+            }
+        )
     return {
         "run_id": run_id,
         "mode": payload.get("mode")
@@ -135,6 +176,7 @@ def _read_collector_file(path: Path) -> dict[str, Any] | None:
         "finished_at": finished_at.isoformat() if finished_at else None,
         "exit_code": exit_code,
         "failure_category": failure_category,
+        "providers": providers,
     }
 
 

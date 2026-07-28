@@ -40,6 +40,15 @@ MAX_CYCLE_TIMEOUT_SECONDS = 21600
 LATEST_STATUS_FILENAME = "collector_latest_status.json"
 LAST_SUCCESS_FILENAME = "collector_last_success.json"
 LAST_FAILURE_FILENAME = "collector_last_failure.json"
+MAX_CYCLE_SUMMARY_BYTES = 1024 * 1024
+PROVIDER_COUNTER_FIELDS = (
+    "success_count",
+    "failure_count",
+    "inserted_count",
+    "skipped_existing_count",
+    "quality_blocked_count",
+    "timeout_count",
+)
 MAX_CAPTURE_BYTES = 16384
 MUTEX_NAME = "Global\\AgroSatCanonicalSatelliteCollector_v1"
 
@@ -249,11 +258,32 @@ def operational_snapshot(
                 "provider": child.get("provider"),
                 "exit_code": child.get("exit_code"),
                 "timed_out": bool(child.get("timed_out")),
+                "counters": child.get("counters"),
             }
             for child in summary.get("children", [])
         ],
     }
     return sanitize(snapshot)
+
+
+def provider_counters(provider_output: Path) -> dict[str, int] | None:
+    summaries = list(provider_output.glob("cycle_*/cycle_summary.json"))
+    if len(summaries) != 1:
+        return None
+    path = summaries[0]
+    try:
+        if path.stat().st_size > MAX_CYCLE_SUMMARY_BYTES:
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    counters: dict[str, int] = {}
+    for field in PROVIDER_COUNTER_FIELDS:
+        value = payload.get(field)
+        if type(value) is not int or not 0 <= value <= 10_000_000:
+            return None
+        counters[field] = value
+    return counters
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -512,6 +542,7 @@ def run(
                     "provider": provider,
                     "exit_code": code,
                     "timed_out": bool(outcome.get("timed_out")),
+                    "counters": provider_counters(provider_output),
                     "stdout": outcome.get("stdout", ""),
                     "stderr": outcome.get("stderr", ""),
                 }

@@ -54,6 +54,21 @@ def _collector_payload(status="succeeded", **overrides):
         "finished_at": "2026-07-28T00:01:00+00:00",
         "exit_code": 0,
         "failure_category": None,
+        "providers": [
+            {
+                "provider": "ndvi",
+                "exit_code": 0,
+                "timed_out": False,
+                "counters": {
+                    "success_count": 10,
+                    "failure_count": 1,
+                    "inserted_count": 4,
+                    "skipped_existing_count": 5,
+                    "quality_blocked_count": 1,
+                    "timeout_count": 0,
+                },
+            }
+        ],
         "stdout": "must not escape",
     }
     payload.update(overrides)
@@ -125,6 +140,7 @@ def test_collector_status_is_bounded_sanitized_and_stale_aware():
     assert "must not escape" not in serialized
     assert "stdout" not in serialized
     assert directory not in serialized
+    assert snapshot["latest"]["providers"][0]["counters"]["failure_count"] == 1
 
 
 def test_running_collector_uses_started_timestamp():
