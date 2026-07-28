@@ -166,6 +166,9 @@ async def execute_load(
         headers["Authorization"] = f"Bearer {token}"
     semaphore = asyncio.Semaphore(concurrency)
     samples: dict[str, list[float]] = {scenario["name"]: [] for scenario in enabled}
+    queue_samples: dict[str, list[float]] = {
+        scenario["name"]: [] for scenario in enabled
+    }
     statuses: dict[str, Counter] = {
         scenario["name"]: Counter() for scenario in enabled
     }
@@ -198,16 +201,20 @@ async def execute_load(
                     request_headers["Idempotency-Key"] = (
                         f"task209-load-{run_id}-{scenario_position}"
                     )
-                request_started = time.perf_counter()
+                queued_at = time.perf_counter()
                 try:
                     async with semaphore:
+                        request_started = time.perf_counter()
+                        queue_samples[scenario["name"]].append(
+                            (request_started - queued_at) * 1000
+                        )
                         response = await client.request(
                             scenario["method"],
                             scenario["path"],
                             json=scenario["json"],
                             headers=request_headers,
                         )
-                    elapsed = (time.perf_counter() - request_started) * 1000
+                        elapsed = (time.perf_counter() - request_started) * 1000
                     samples[scenario["name"]].append(elapsed)
                     statuses[scenario["name"]][str(response.status_code)] += 1
                     if len(response.content) > MAX_RESPONSE_BYTES:
@@ -230,9 +237,12 @@ async def execute_load(
     completed = sum(len(value) for value in samples.values())
     scenario_results = []
     all_samples = []
+    all_queue_samples = []
     for scenario in enabled:
         values = samples[scenario["name"]]
+        queued_values = queue_samples[scenario["name"]]
         all_samples.extend(values)
+        all_queue_samples.extend(queued_values)
         scenario_results.append(
             {
                 "name": scenario["name"],
@@ -244,6 +254,9 @@ async def execute_load(
                 "p50_ms": percentile(values, 50),
                 "p95_ms": percentile(values, 95),
                 "p99_ms": percentile(values, 99),
+                "client_queue_p50_ms": percentile(queued_values, 50),
+                "client_queue_p95_ms": percentile(queued_values, 95),
+                "client_queue_p99_ms": percentile(queued_values, 99),
             }
         )
     return {
@@ -260,6 +273,9 @@ async def execute_load(
         "p50_ms": percentile(all_samples, 50),
         "p95_ms": percentile(all_samples, 95),
         "p99_ms": percentile(all_samples, 99),
+        "client_queue_p50_ms": percentile(all_queue_samples, 50),
+        "client_queue_p95_ms": percentile(all_queue_samples, 95),
+        "client_queue_p99_ms": percentile(all_queue_samples, 99),
         "error_counts": dict(sorted(errors.items())),
         "error_rate": round(sum(errors.values()) / request_count, 6),
         "authorization_configured": bool(token),

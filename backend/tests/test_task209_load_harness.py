@@ -139,6 +139,26 @@ def test_deterministic_mock_load_reports_percentiles_without_bodies():
     assert report["client_resource_metrics"]["python_peak_memory_bytes"] >= 0
 
 
+def test_http_latency_excludes_client_concurrency_queue():
+    async def handler(request):
+        await asyncio.sleep(0.02)
+        return httpx.Response(200)
+
+    report = asyncio.run(
+        load.execute_load(
+            base_url="http://127.0.0.1",
+            scenarios=scenarios(),
+            concurrency=1,
+            request_count=4,
+            timeout_seconds=1,
+            allow_writes=False,
+            token=None,
+            transport=httpx.MockTransport(handler),
+        )
+    )
+    assert report["client_queue_p99_ms"] > report["p99_ms"]
+
+
 def test_cli_validation_is_no_request_and_atomic():
     with tempfile.TemporaryDirectory() as directory:
         output = Path(directory) / "validation.json"

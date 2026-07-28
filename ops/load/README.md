@@ -14,3 +14,5 @@ write scenarios unless the target is the dedicated TASK_209 database and
 
 Performance budgets must be set from measured business-scenario baselines.
 The readiness-only run is not a substitute for those baselines.
+HTTP latency excludes time spent waiting for the harness concurrency semaphore;
+that client-side queue delay is reported separately.
