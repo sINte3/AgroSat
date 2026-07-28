@@ -92,6 +92,7 @@ from api.operational_closure import (
     inspection_router as operational_inspection_router,
     verification_router as operational_verification_router,
 )
+from api.executive_accountability import router as executive_accountability_router
 
 app.include_router(auth_router)
 app.include_router(enterprises_router)
@@ -115,6 +116,7 @@ app.include_router(operations_router)
 app.include_router(operational_inspection_router)
 app.include_router(operational_action_router)
 app.include_router(operational_verification_router)
+app.include_router(executive_accountability_router)
 
 
 # ─── Базовые эндпоинты ───────────────────────────────────────────────────────
