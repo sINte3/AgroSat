@@ -118,6 +118,11 @@ def test_success_writes_one_sanitized_parent_summary():
         persisted = json.loads(summary_path.read_text(encoding="utf-8"))
         latest_path = root / "output" / collector.LATEST_STATUS_FILENAME
         latest = json.loads(latest_path.read_text(encoding="utf-8"))
+        last_success = json.loads(
+            (root / "output" / collector.LAST_SUCCESS_FILENAME).read_text(
+                encoding="utf-8"
+            )
+        )
 
     assert code == 0
     assert len(calls) == 2
@@ -133,6 +138,8 @@ def test_success_writes_one_sanitized_parent_summary():
     assert "stdout" not in json.dumps(latest)
     assert "stderr" not in json.dumps(latest)
     assert "diagnostics" not in latest
+    assert last_success == latest
+    assert not (root / "output" / collector.LAST_FAILURE_FILENAME).exists()
 
 
 def test_latest_status_is_running_while_child_executes():
@@ -183,6 +190,39 @@ def test_failure_categories_are_bounded_labels():
     for updates, expected in cases:
         snapshot = collector.operational_snapshot({**base, **updates})
         assert snapshot["failure_category"] == expected
+
+
+def test_failure_preserves_separate_last_failure_snapshot():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+
+        code, _ = collector.run(
+            invocation(root),
+            child_runner=lambda command, timeout: {
+                "exit_code": 2,
+                "timed_out": False,
+                "stderr": "",
+            },
+            lock_acquire=lambda *args, **kwargs: "lock",
+            lock_release=lambda lock: None,
+            run_id_factory=lambda: "failed",
+        )
+        latest = json.loads(
+            (root / "output" / collector.LATEST_STATUS_FILENAME).read_text(
+                encoding="utf-8"
+            )
+        )
+        last_failure = json.loads(
+            (root / "output" / collector.LAST_FAILURE_FILENAME).read_text(
+                encoding="utf-8"
+            )
+        )
+
+    assert code == 2
+    assert latest == last_failure
+    assert latest["status"] == "failed"
+    assert latest["failure_category"] == "contract"
+    assert not (root / "output" / collector.LAST_SUCCESS_FILENAME).exists()
 
 
 def test_diagnostic_mode_never_maps_to_child_write():

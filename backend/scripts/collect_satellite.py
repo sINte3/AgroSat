@@ -38,6 +38,8 @@ MAX_ATTEMPTS = 5
 MAX_TIMEOUT_SECONDS = 900
 MAX_CYCLE_TIMEOUT_SECONDS = 21600
 LATEST_STATUS_FILENAME = "collector_latest_status.json"
+LAST_SUCCESS_FILENAME = "collector_last_success.json"
+LAST_FAILURE_FILENAME = "collector_last_failure.json"
 MAX_CAPTURE_BYTES = 16384
 MUTEX_NAME = "Global\\AgroSatCanonicalSatelliteCollector_v1"
 
@@ -558,10 +560,14 @@ def run(
                 )
         if latest_status_path is not None:
             try:
-                atomic_json(
-                    latest_status_path,
-                    operational_snapshot(summary),
+                snapshot = operational_snapshot(summary)
+                atomic_json(latest_status_path, snapshot)
+                history_path = latest_status_path.with_name(
+                    LAST_SUCCESS_FILENAME
+                    if snapshot["status"] == "succeeded"
+                    else LAST_FAILURE_FILENAME
                 )
+                atomic_json(history_path, snapshot)
             except Exception as exc:
                 final_code = 4
                 summary["exit_code"] = final_code
