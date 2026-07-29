@@ -3,6 +3,7 @@ import { getField, getFieldAlerts, acknowledgeAlert, getSatelliteIndexLatest, ge
 import NDVIChart from './NDVIChart';
 import WeatherWidget from './WeatherWidget';
 import FieldTelematicsPanel from './FieldTelematicsPanel';
+import YieldMapImportPanel from './YieldMapImportPanel';
 
 export default function FieldDetail({ fieldId, onBack }) {
   const [field, setField] = useState(null);
@@ -115,6 +116,7 @@ export default function FieldDetail({ fieldId, onBack }) {
   const tabs = [
     { key: 'info', label: 'Инфо' },
     { key: 'indices', label: 'Индексы' },
+    { key: 'yield', label: 'Урожай' },
     { key: 'weather', label: 'Погода' },
     { key: 'telematics', label: 'Техника' },
     { key: 'alerts', label: `Алерты (${alerts.length})` },
@@ -344,6 +346,12 @@ export default function FieldDetail({ fieldId, onBack }) {
           <div style={{ padding: '12px 0' }}>
             <WeatherWidget fieldId={typeof fieldId === 'string' ? parseInt(fieldId) : fieldId} />
           </div>
+        )}
+
+        {activeTab === 'yield' && (
+          <YieldMapImportPanel
+            fieldId={typeof fieldId === 'string' ? parseInt(fieldId) : fieldId}
+          />
         )}
 
         {activeTab === 'telematics' && (
