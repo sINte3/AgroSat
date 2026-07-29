@@ -5,6 +5,7 @@ import WeatherWidget from './WeatherWidget';
 import FieldTelematicsPanel from './FieldTelematicsPanel';
 import YieldMapImportPanel from './YieldMapImportPanel';
 import ProductivityZonePanel from './ProductivityZonePanel';
+import VariableRateRecommendationPanel from './VariableRateRecommendationPanel';
 
 export default function FieldDetail({ fieldId, onBack }) {
   const [field, setField] = useState(null);
@@ -352,6 +353,9 @@ export default function FieldDetail({ fieldId, onBack }) {
         {activeTab === 'yield' && (
           <>
             <ProductivityZonePanel
+              fieldId={typeof fieldId === 'string' ? parseInt(fieldId) : fieldId}
+            />
+            <VariableRateRecommendationPanel
               fieldId={typeof fieldId === 'string' ? parseInt(fieldId) : fieldId}
             />
             <YieldMapImportPanel

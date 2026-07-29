@@ -12,6 +12,8 @@ const consoleErrors = [];
 const failedRequests = [];
 const externalRequests = [];
 let resultMode = 'ready';
+let role = 'manager';
+let recommendations = [];
 
 
 function run(status = 'ready') {
@@ -73,16 +75,58 @@ function zones() {
 }
 
 
-function fixtureFor(url, method) {
+function recommendation(status = 'draft') {
+  return {
+    id: 501,
+    enterprise_id: 901,
+    field: { id: 1, name: 'TASK209 Fixture Field' },
+    productivity_run_id: 401,
+    parent_recommendation_id: null,
+    version: 1,
+    crop_code: 'cotton',
+    season_year: 2026,
+    recommendation_kind: 'fertilizer',
+    rate_unit: 'kg_ha',
+    minimum_rate: 80,
+    maximum_rate: 160,
+    zone_rates: { low: 90, medium: 120, high: 150 },
+    equipment_capability: { equipment_name: 'TASK209 spreader' },
+    source_confidence: 0.78,
+    source_unzoned_area_ha: 41.42,
+    status,
+    safety_acknowledged: true,
+    notes: 'Human-entered fixture draft',
+    created_by: { id: 20901, display_name: 'TASK209 manager' },
+    approved_by: status === 'approved'
+      ? { id: 20901, display_name: 'TASK209 manager' }
+      : null,
+    approved_at: status === 'approved' ? '2026-07-29T12:30:00Z' : null,
+    decision_note: status === 'approved' ? 'Проверено менеджером' : null,
+    source: {
+      algorithm_version: 'yield_grid_stability_v1',
+      selected_seasons: [2024, 2025, 2026],
+      source_import_ids: [100, 101, 102],
+    },
+  };
+}
+
+
+function fixtureFor(url, method, postData) {
   const parsed = new URL(url);
-  apiRequests.push({ method, path: parsed.pathname });
+  let body = null;
+  try {
+    body = postData ? JSON.parse(postData) : null;
+  } catch {
+    body = null;
+  }
+  apiRequests.push({ method, path: parsed.pathname, body });
   if (parsed.pathname === '/api/auth/me' && method === 'GET') {
     return {
       status: 200,
       body: {
         id: 20901,
-        full_name: 'TASK209 viewer',
-        role: 'viewer',
+        full_name: `TASK209 ${role}`,
+        role,
         enterprise_id: 901,
         is_active: true,
       },
@@ -125,6 +169,29 @@ function fixtureFor(url, method) {
       status: 200,
       body: { run: run(), limit: 10, offset: 0, items: zones() },
     };
+  }
+  if (
+    parsed.pathname === '/api/variable-rate-recommendations'
+    && method === 'GET'
+  ) {
+    return { status: 200, body: { limit: 50, offset: 0, items: recommendations } };
+  }
+  if (
+    parsed.pathname === '/api/variable-rate-recommendations'
+    && method === 'POST'
+  ) {
+    recommendations = [recommendation('draft')];
+    return {
+      status: 201,
+      body: { created: true, recommendation: recommendations[0] },
+    };
+  }
+  if (
+    parsed.pathname === '/api/variable-rate-recommendations/501/approve'
+    && method === 'POST'
+  ) {
+    recommendations = [recommendation('approved')];
+    return { status: 200, body: recommendations[0] };
   }
   return { status: 404, body: { detail: 'Fixture route not found' } };
 }
@@ -202,7 +269,7 @@ socket.addEventListener('message', async (message) => {
   }
   if (payload.method === 'Fetch.requestPaused') {
     const { requestId, request } = payload.params;
-    const fixture = fixtureFor(request.url, request.method);
+    const fixture = fixtureFor(request.url, request.method, request.postData);
     try {
       await send('Fetch.fulfillRequest', {
         requestId,
@@ -230,9 +297,6 @@ await Promise.all([
 ]);
 await send('Network.setBypassServiceWorker', { bypass: true });
 await send('Network.setCacheDisabled', { cacheDisabled: true });
-await send('Page.addScriptToEvaluateOnNewDocument', {
-  source: `localStorage.setItem('agrosat_token', ${JSON.stringify(fixtureToken)});`,
-});
 
 async function evaluate(expression) {
   const result = await send('Runtime.evaluate', {
@@ -272,12 +336,11 @@ async function clickText(label) {
 }
 
 await navigate(baseUrl);
-await evaluate(`localStorage.setItem('agrosat_token', ${JSON.stringify(fixtureToken)})`);
-await navigate(`${baseUrl}/fields/1`);
-await new Promise((resolve) => setTimeout(resolve, 250));
-if (await evaluate(`document.body.innerText.includes('Войти')`)) {
+for (let attempt = 0; attempt < 4; attempt += 1) {
   await evaluate(`localStorage.setItem('agrosat_token', ${JSON.stringify(fixtureToken)})`);
   await navigate(`${baseUrl}/fields/1`);
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  if (await evaluate(`document.body.innerText.includes('TASK209 Fixture Field')`)) break;
 }
 await waitFor(`document.body.innerText.includes('TASK209 Fixture Field')`);
 await clickText('Урожай');
@@ -335,6 +398,62 @@ if (evidenceDir) {
   );
 }
 
+const managerCreateAudit = await evaluate(`(() => {
+  const labels = [...document.querySelectorAll('label')];
+  const input = (text) => labels.find((label) => label.textContent.includes(text))
+    ?.querySelector('input,textarea');
+  const set = (element, value) => {
+    if (!element) return false;
+    const descriptor = Object.getOwnPropertyDescriptor(
+      element.tagName === 'TEXTAREA'
+        ? HTMLTextAreaElement.prototype
+        : HTMLInputElement.prototype,
+      'value',
+    );
+    descriptor.set.call(element, value);
+    element.dispatchEvent(new Event('input', { bubbles: true }));
+    element.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  };
+  const equipment = input('Оборудование');
+  const compatibility = input('Совместимость и калибровка');
+  const checkbox = document.querySelector('input[type="checkbox"]');
+  const equipmentSet = set(equipment, 'TASK209 spreader');
+  const compatibilitySet = set(compatibility, 'Operator calibration confirmed');
+  if (checkbox && !checkbox.checked) checkbox.click();
+  return { equipmentSet, compatibilitySet, safetyChecked: checkbox?.checked || false };
+})()`);
+assert.deepEqual(managerCreateAudit, {
+  equipmentSet: true,
+  compatibilitySet: true,
+  safetyChecked: true,
+});
+await new Promise((resolve) => setTimeout(resolve, 150));
+await waitFor(`(() => {
+  const button = [...document.querySelectorAll('button')]
+    .find((item) => item.textContent.includes('Создать черновик'));
+  return Boolean(button && !button.disabled);
+})()`);
+await clickText('Создать черновик');
+await waitFor(`document.body.innerText.includes('Удобрение · v1')`);
+const decisionInput = await evaluate(`(() => {
+  const label = [...document.querySelectorAll('label')]
+    .find((item) => item.textContent.includes('Комментарий решения'));
+  const area = label?.querySelector('textarea');
+  if (!area) return false;
+  const descriptor = Object.getOwnPropertyDescriptor(
+    HTMLTextAreaElement.prototype,
+    'value',
+  );
+  descriptor.set.call(area, 'Проверено менеджером');
+  area.dispatchEvent(new Event('input', { bubbles: true }));
+  area.dispatchEvent(new Event('change', { bubbles: true }));
+  return true;
+})()`);
+assert.equal(decisionInput, true);
+await clickText('Утвердить');
+await waitFor(`document.body.innerText.includes('Утверждено')`);
+
 await clickText('Инфо');
 await waitFor(`document.querySelectorAll('.maplibregl-canvas').length === 0`);
 await clickText('Урожай');
@@ -362,7 +481,15 @@ assert.deepEqual(insufficientAudit, {
   mapCanvases: 0,
 });
 
-assert.deepEqual(apiRequests.filter((item) => item.method !== 'GET'), []);
+const writes = apiRequests.filter((item) => item.method !== 'GET');
+assert.deepEqual(writes.map((item) => item.path), [
+  '/api/variable-rate-recommendations',
+  '/api/variable-rate-recommendations/501/approve',
+]);
+assert.equal(writes[0].body.safety_acknowledged, true);
+assert.deepEqual(writes[0].body.zone_rates, { low: 90, medium: 120, high: 150 });
+assert.equal(writes[1].body.confirm, true);
+assert.equal(writes[1].body.expected_version, 1);
 const nonFontExternalRequests = externalRequests.filter(
   (url) => !url.startsWith('https://fonts.googleapis.com/')
     && !url.startsWith('https://fonts.gstatic.com/'),
@@ -375,12 +502,22 @@ const report = {
   decision: 'PASS_CDP_FIXTURE_RUNTIME',
   runtime_adapter: 'Chrome DevTools Protocol fixture harness',
   fixture_mode: true,
-  role: 'viewer',
-  journeys: ['ready_zones', 'route_cleanup', 'remount', 'insufficient_data'],
+  role: 'manager',
+  journeys: [
+    'ready_zones',
+    'variable_rate_draft',
+    'variable_rate_approval',
+    'route_cleanup',
+    'remount',
+    'insufficient_data',
+  ],
   viewports: viewportResults,
   cleanup_audit: cleanupAudit,
   insufficient_audit: insufficientAudit,
-  api_write_requests: [],
+  api_write_requests: writes.map(({ method, path: requestPath }) => ({
+    method,
+    path: requestPath,
+  })),
   external_font_requests: externalRequests.length,
   unexpected_external_requests: nonFontExternalRequests.length,
   console_errors: 0,
