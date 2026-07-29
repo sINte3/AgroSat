@@ -96,6 +96,7 @@ from api.executive_accountability import router as executive_accountability_rout
 from api.field_tiles import router as field_tiles_router
 from api.raster import router as raster_router
 from api.pixel_anomalies import router as pixel_anomalies_router
+from api.telematics import router as telematics_router
 
 app.include_router(auth_router)
 app.include_router(enterprises_router)
@@ -123,6 +124,7 @@ app.include_router(executive_accountability_router)
 app.include_router(field_tiles_router)
 app.include_router(raster_router)
 app.include_router(pixel_anomalies_router)
+app.include_router(telematics_router)
 
 
 # ─── Базовые эндпоинты ───────────────────────────────────────────────────────

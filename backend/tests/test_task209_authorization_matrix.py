@@ -134,6 +134,7 @@ MATRIX = (
     contract("GET", "/api/pixel-anomalies/{anomaly_id}", tenant_scope="anomaly_object", cross_tenant=404, unknown_object=404),
     contract("GET", "/api/pixel-anomalies/{anomaly_id}/geometry", tenant_scope="anomaly_object", cross_tenant=404, unknown_object=404),
     contract("POST", "/api/pixel-anomalies/{anomaly_id}/inspection", MUTATING_ROLES, "anomaly_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("GET", "/api/telematics/fields/{field_id}", tenant_scope="field_object", cross_tenant=404, unknown_object=404),
 )
 
 
@@ -148,7 +149,7 @@ def openapi_operations():
 
 def test_matrix_covers_every_openapi_operation_exactly():
     expected = {(item.method, item.path) for item in MATRIX}
-    assert len(expected) == len(MATRIX) == 75
+    assert len(expected) == len(MATRIX) == 76
     assert expected == set(openapi_operations())
 
 
