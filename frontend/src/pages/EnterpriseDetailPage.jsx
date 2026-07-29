@@ -17,8 +17,10 @@ import EnterpriseDashboard from '../components/Enterprise/EnterpriseDashboard';
 import EnterpriseFieldsTable from '../components/Enterprise/EnterpriseFieldsTable';
 import NDVIHistoryModal from '../components/Enterprise/NDVIHistoryModal';
 import EnterpriseReport from '../components/Enterprise/EnterpriseReport';
+import CommercialTenantPanel from '../components/Enterprise/CommercialTenantPanel';
 import { getEnterprise, getAlerts } from '../api/client';
 import client from '../api/client';
+import { useAuth } from '../context/AuthContext';
 
 // ─── Alert formatting helpers (TASK_019) ─────────────────────────────────
 function formatAlertTitle(alert) {
@@ -491,6 +493,8 @@ function RecommendationsTab({ alerts, loading, aiResults, aiLoading, onAIRecomme
 // ═══════════════════════════════════════════════════════════════════════════
 
 export default function EnterpriseDetailPage({ enterpriseId, onBack }) {
+  const { user } = useAuth();
+  const role = String(user?.role || '').toLowerCase();
   const [enterprise, setEnterprise] = useState(null);
   const [fields, setFields] = useState([]);
   const [alerts, setAlerts] = useState([]);
@@ -574,6 +578,12 @@ export default function EnterpriseDetailPage({ enterpriseId, onBack }) {
     const dates = fields.map(f => f.last_ndvi_date).filter(Boolean).sort().reverse();
     return dates.length > 0 ? dates[0] : null;
   }, [fields]);
+  const tabs = useMemo(
+    () => role === 'admin' || role === 'manager'
+      ? [...TABS, { key: 'commercial', label: 'Коммерческий контур' }]
+      : TABS,
+    [role],
+  );
 
   if (error === 'not_found') {
     return <NotFound enterpriseId={enterpriseId} onBack={onBack} />;
@@ -591,11 +601,10 @@ export default function EnterpriseDetailPage({ enterpriseId, onBack }) {
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {/* Шапка */}
-      <div style={{
+      <div className="flex-col px-6 pb-4 pt-20 md:flex-row md:pt-4" style={{
         display: 'flex',
         alignItems: 'flex-start',
         justifyContent: 'space-between',
-        padding: '16px 24px',
         gap: 12,
         borderBottom: '1px solid #e0e7e3',
         flexShrink: 0,
@@ -647,7 +656,7 @@ export default function EnterpriseDetailPage({ enterpriseId, onBack }) {
         </div>
 
         {/* Кнопки */}
-        <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+        <div className="w-full flex-wrap md:w-auto" style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
           <button onClick={handleDownloadPDF} style={{
             background: '#f1f5f3',
             border: '1px solid #e0e7e3',
@@ -705,7 +714,7 @@ export default function EnterpriseDetailPage({ enterpriseId, onBack }) {
           borderBottom: '1px solid #e0e7e3',
           marginBottom: 16,
         }}>
-          {TABS.map(tab => (
+          {tabs.map(tab => (
             <button
               key={tab.key}
               onClick={() => setActiveTab(tab.key)}
@@ -745,6 +754,10 @@ export default function EnterpriseDetailPage({ enterpriseId, onBack }) {
             aiLoading={aiLoading}
             onAIRecommend={handleAIRecommend}
           />
+        )}
+
+        {activeTab === 'commercial' && (
+          <CommercialTenantPanel enterpriseId={enterpriseId} role={role} />
         )}
       </div>
 

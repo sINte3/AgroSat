@@ -25,7 +25,9 @@
     "test:yield-map-import-browser": "node scripts/test-yield-map-import-browser.mjs",
     "test:productivity-zones": "node scripts/test-productivity-zones.mjs",
     "test:productivity-zones-browser": "node scripts/test-productivity-zones-browser.mjs",
-    "test:variable-rate": "node scripts/test-variable-rate-recommendations.mjs"
+    "test:variable-rate": "node scripts/test-variable-rate-recommendations.mjs",
+    "test:commercial-tenant": "node scripts/test-commercial-tenant.mjs",
+    "test:commercial-tenant-browser": "node scripts/test-commercial-tenant-browser.mjs"
   },
   "dependencies": {
     "@mapbox/mapbox-gl-draw": "1.5.0",
