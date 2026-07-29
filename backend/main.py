@@ -103,6 +103,7 @@ from api.productivity_zones import router as productivity_zones_router
 from api.variable_rate_recommendations import (
     router as variable_rate_recommendations_router,
 )
+from api.commercial_tenant import router as commercial_tenant_router
 
 app.include_router(auth_router)
 app.include_router(enterprises_router)
@@ -135,6 +136,7 @@ app.include_router(irrigation_context_router)
 app.include_router(yield_map_imports_router)
 app.include_router(productivity_zones_router)
 app.include_router(variable_rate_recommendations_router)
+app.include_router(commercial_tenant_router)
 
 
 # ─── Базовые эндпоинты ───────────────────────────────────────────────────────

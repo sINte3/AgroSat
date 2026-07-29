@@ -151,6 +151,13 @@ MATRIX = (
     contract("POST", "/api/variable-rate-recommendations/{recommendation_id}/approve", MANAGEMENT_ROLES, "variable_rate_object", write=True, cross_tenant=404, unknown_object=404),
     contract("POST", "/api/variable-rate-recommendations/{recommendation_id}/reject", MANAGEMENT_ROLES, "variable_rate_object", write=True, cross_tenant=404, unknown_object=404),
     contract("GET", "/api/variable-rate-recommendations/{recommendation_id}/export.geojson", tenant_scope="variable_rate_object", cross_tenant=404, unknown_object=404),
+    contract("GET", "/api/commercial/tenants/{enterprise_id}", tenant_scope="enterprise_object", cross_tenant=404, unknown_object=404),
+    contract("PUT", "/api/commercial/tenants/{enterprise_id}", GLOBAL_ROLES, "enterprise_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("GET", "/api/commercial/tenants/{enterprise_id}/memberships", MANAGEMENT_ROLES, "enterprise_object", cross_tenant=404, unknown_object=404),
+    contract("PUT", "/api/commercial/tenants/{enterprise_id}/providers/{provider_code}", GLOBAL_ROLES, "enterprise_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("GET", "/api/commercial/tenants/{enterprise_id}/lifecycle-requests", MANAGEMENT_ROLES, "enterprise_object", cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/commercial/tenants/{enterprise_id}/lifecycle-requests", MANAGEMENT_ROLES, "enterprise_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/commercial/tenants/{enterprise_id}/lifecycle-requests/{request_id}/decision", GLOBAL_ROLES, "enterprise_object", write=True, cross_tenant=404, unknown_object=404),
 )
 
 
@@ -165,7 +172,7 @@ def openapi_operations():
 
 def test_matrix_covers_every_openapi_operation_exactly():
     expected = {(item.method, item.path) for item in MATRIX}
-    assert len(expected) == len(MATRIX) == 92
+    assert len(expected) == len(MATRIX) == 99
     assert expected == set(openapi_operations())
 
 
