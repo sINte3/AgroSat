@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { getField, getFieldAlerts, acknowledgeAlert, getSatelliteIndexLatest, getSatelliteIndexHistory } from '../../api/client';
 import NDVIChart from './NDVIChart';
 import WeatherWidget from './WeatherWidget';
+import FieldTelematicsPanel from './FieldTelematicsPanel';
 
 export default function FieldDetail({ fieldId, onBack }) {
   const [field, setField] = useState(null);
@@ -115,6 +116,7 @@ export default function FieldDetail({ fieldId, onBack }) {
     { key: 'info', label: 'Инфо' },
     { key: 'indices', label: 'Индексы' },
     { key: 'weather', label: 'Погода' },
+    { key: 'telematics', label: 'Техника' },
     { key: 'alerts', label: `Алерты (${alerts.length})` },
   ];
 
@@ -134,12 +136,12 @@ export default function FieldDetail({ fieldId, onBack }) {
       </div>
 
       {/* Табы */}
-      <div className="flex border-b border-agro-surface2 px-4">
+      <div className="flex overflow-x-auto border-b border-agro-surface2 px-4">
         {tabs.map((tab) => (
           <button
             key={tab.key}
             onClick={() => setActiveTab(tab.key)}
-            className={`px-4 py-2.5 text-sm border-b-2 transition-colors ${
+            className={`flex-none px-4 py-2.5 text-sm border-b-2 transition-colors ${
               activeTab === tab.key
                 ? 'border-agro-accent text-agro-accent'
                 : 'border-transparent text-agro-muted hover:text-agro-text'
@@ -342,6 +344,12 @@ export default function FieldDetail({ fieldId, onBack }) {
           <div style={{ padding: '12px 0' }}>
             <WeatherWidget fieldId={typeof fieldId === 'string' ? parseInt(fieldId) : fieldId} />
           </div>
+        )}
+
+        {activeTab === 'telematics' && (
+          <FieldTelematicsPanel
+            fieldId={typeof fieldId === 'string' ? parseInt(fieldId) : fieldId}
+          />
         )}
 
         {activeTab === 'alerts' && (
