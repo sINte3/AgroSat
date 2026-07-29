@@ -4,7 +4,7 @@
 """
 
 import logging
-from datetime import date, timedelta
+from datetime import datetime, timezone
 from typing import Optional
 import httpx
 
@@ -49,6 +49,9 @@ def get_field_weather(lat: float, lon: float) -> Optional[dict]:
             "timezone": "Asia/Tashkent",
         }
 
+        if not (-90 <= float(lat) <= 90 and -180 <= float(lon) <= 180):
+            raise ValueError("coordinates are outside EPSG:4326")
+
         response = httpx.get(OPEN_METEO_URL, params=params, timeout=10.0)
         response.raise_for_status()
         data = response.json()
@@ -77,6 +80,16 @@ def get_field_weather(lat: float, lon: float) -> Optional[dict]:
         risks = detect_weather_risks(forecast_days)
 
         return {
+            "status": "available",
+            "provider": "open_meteo",
+            "provenance": {
+                "provider": "open_meteo",
+                "fetched_at": datetime.now(timezone.utc).isoformat(),
+                "provider_observed_at": current.get("time"),
+                "timezone": data.get("timezone") or "Asia/Tashkent",
+                "latitude": data.get("latitude", lat),
+                "longitude": data.get("longitude", lon),
+            },
             "current": {
                 "temperature": current.get("temperature_2m"),
                 "feels_like": current.get("apparent_temperature"),
@@ -92,8 +105,8 @@ def get_field_weather(lat: float, lon: float) -> Optional[dict]:
             "location": {"lat": lat, "lon": lon},
         }
 
-    except Exception as e:
-        logger.error(f"Ошибка получения погоды: {e}")
+    except Exception:
+        logger.warning("Weather provider request failed")
         return None
 
 

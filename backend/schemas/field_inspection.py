@@ -17,6 +17,7 @@ class InspectionStatus(str, Enum):
 class InspectionSource(str, Enum):
     attention_queue = "attention_queue"
     manual = "manual"
+    irrigation_context = "irrigation_context"
 
 
 class InspectionPriority(str, Enum):
@@ -72,6 +73,25 @@ class CreateInspectionRequest(BaseModel):
             raise ValueError("attention_queue requires priority, score and reason codes")
         if self.source == InspectionSource.manual and (any(x is not None for x in snapshot) or self.source_reason_codes):
             raise ValueError("manual source forbids attention snapshot")
+        if self.source == InspectionSource.irrigation_context:
+            supported = {
+                "water_stress_suspicion",
+                "weather_water_deficit",
+                "irrigation_interruption",
+                "irrigation_delivery_check",
+                "irrigation_equipment_check",
+            }
+            if (
+                self.source_priority is None
+                or self.source_attention_score is not None
+                or self.source_observation_date is None
+                or not self.source_reason_codes
+                or not set(self.source_reason_codes) <= supported
+            ):
+                raise ValueError(
+                    "irrigation_context requires priority, context date, "
+                    "and supported reason codes without an attention score"
+                )
         return self
 
 

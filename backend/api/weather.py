@@ -37,7 +37,10 @@ def get_weather_for_field(
         )
 
     # Cache after auth, keyed by field_id
-    cache_key = f"weather:field:{field_id}"
+    cache_key = (
+        f"weather:v2:enterprise:{int(field_row.enterprise_id)}:"
+        f"field:{int(field_row.id)}"
+    )
     cached = cache_get(cache_key)
     if cached:
         return cached
@@ -87,7 +90,9 @@ def get_weather_by_location(
             detail="Координаты вне разрешённого региона (Бухарская область)"
         )
 
-    cache_key = f"weather:location:{lat}:{lon}"
+    scope = require_enterprise_scope(current_user)
+    scope_key = "global" if scope is None else f"enterprise:{int(scope)}"
+    cache_key = f"weather:v2:{scope_key}:location:{lat}:{lon}"
     cached = cache_get(cache_key)
     if cached:
         return cached
