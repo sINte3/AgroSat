@@ -142,6 +142,9 @@ MATRIX = (
     contract("GET", "/api/yield-map-imports", tenant_scope="field_object", cross_tenant=404, unknown_object=404),
     contract("GET", "/api/yield-map-imports/{import_id}", tenant_scope="yield_import_object", cross_tenant=404, unknown_object=404),
     contract("GET", "/api/yield-map-imports/{import_id}/points", tenant_scope="yield_import_object", cross_tenant=404, unknown_object=404),
+    contract("GET", "/api/productivity-zones/fields/{field_id}", tenant_scope="field_object", cross_tenant=404, unknown_object=404),
+    contract("GET", "/api/productivity-zones/runs/{run_id}", tenant_scope="productivity_run_object", cross_tenant=404, unknown_object=404),
+    contract("GET", "/api/productivity-zones/runs/{run_id}/zones", tenant_scope="productivity_run_object", cross_tenant=404, unknown_object=404),
 )
 
 
@@ -156,7 +159,7 @@ def openapi_operations():
 
 def test_matrix_covers_every_openapi_operation_exactly():
     expected = {(item.method, item.path) for item in MATRIX}
-    assert len(expected) == len(MATRIX) == 83
+    assert len(expected) == len(MATRIX) == 86
     assert expected == set(openapi_operations())
 
 
@@ -193,6 +196,7 @@ def test_object_contracts_hide_cross_tenant_existence():
         "action_object",
         "verification_object",
         "anomaly_object",
+        "productivity_run_object",
     }
     for item in MATRIX:
         if item.tenant_scope in object_scopes:
