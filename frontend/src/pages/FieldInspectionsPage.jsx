@@ -8,6 +8,12 @@ import InspectionCard from '../components/Inspections/InspectionCard';
 import InspectionCreateModal from '../components/Inspections/InspectionCreateModal';
 import InspectionActionModal from '../components/Inspections/InspectionActionModal';
 import InspectionDetailDrawer from '../components/Inspections/InspectionDetailDrawer';
+import OfflineScoutingStatus from '../components/Inspections/OfflineScoutingStatus';
+import {
+  cacheAssignedInspections,
+  getCachedAssignedInspections,
+  offlineScope,
+} from '../offline/offlineScoutingStore.js';
 import {
   canWriteInspections,
   displayName,
@@ -39,6 +45,7 @@ function listError(error) {
 export default function FieldInspectionsPage({ onNavigate, enterprises = [], selectedInspectionId }) {
   const { user } = useAuth();
   const role = normalizeRole(user?.role);
+  const scope = offlineScope(user);
   const canWrite = canWriteInspections(role);
   const [draft, setDraft] = useState(() => defaultFilters(user));
   const [applied, setApplied] = useState(() => defaultFilters(user));
@@ -95,15 +102,32 @@ export default function FieldInspectionsPage({ onNavigate, enterprises = [], sel
         }
         setData(normalized);
         setState('ready');
+        if (role === 'agronomist' && scope) {
+          void cacheAssignedInspections(scope, normalized).catch(() => {});
+        }
       })
-      .catch((requestError) => {
+      .catch(async (requestError) => {
         if (!mountedRef.current || controller.signal.aborted || generation !== requestGenerationRef.current || requestError?.code === 'ERR_CANCELED') return;
+        if (role === 'agronomist' && scope) {
+          try {
+            const cached = await getCachedAssignedInspections(scope);
+            if (!mountedRef.current || controller.signal.aborted || generation !== requestGenerationRef.current) return;
+            if (cached) {
+              setData(cached);
+              setState('offline');
+              setError('Показан последний сохранённый список. Данные могут быть устаревшими.');
+              return;
+            }
+          } catch {
+            // Continue to the normal network error when no safe partitioned snapshot exists.
+          }
+        }
         const failure = listError(requestError);
         setState(failure.state);
         setError(failure.message);
       });
     return () => controller.abort();
-  }, [applied, listReloadToken, role, user]);
+  }, [applied, listReloadToken, role, scope, user]);
 
   const assignees = useMemo(() => Array.from(knownAssigneesRef.current.values()), [data, user]);
   const changeFilter = useCallback((key, value) => setDraft((current) => ({ ...current, [key]: value })), []);
@@ -147,6 +171,18 @@ export default function FieldInspectionsPage({ onNavigate, enterprises = [], sel
           <p className="text-sm text-agro-muted">Планирование, выполнение и результаты полевых проверок.</p>
           {canWrite && <button type="button" onClick={() => setCreateOpen(true)} className="btn-primary rounded-lg px-4 py-2">Создать осмотр</button>}
         </div>
+        <OfflineScoutingStatus
+          user={user}
+          onSynchronized={() => {
+            reloadList();
+            reloadDetail();
+          }}
+        />
+        {state === 'offline' && (
+          <div role="status" className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+            {error}
+          </div>
+        )}
         <InspectionFilters draft={draft} onChange={changeFilter} onApply={applyFilters} onReset={resetFilters} onRefresh={reloadList} enterprises={enterprises} assignees={assignees} role={role} loading={state === 'loading'} />
         {data && <InspectionSummaryCards data={data} />}
         <div aria-live="polite">
@@ -155,14 +191,14 @@ export default function FieldInspectionsPage({ onNavigate, enterprises = [], sel
 <p>{error}</p>
 <button type="button" onClick={reloadList} className="btn-primary mt-3 px-3 py-2">Повторить</button>
 </div>}
-          {state === 'ready' && items.length === 0 && <div className="card p-8 text-center">
+          {['ready', 'offline'].includes(state) && items.length === 0 && <div className="card p-8 text-center">
 <p>По выбранным условиям осмотров нет.</p>
 <div className="mt-3 flex justify-center gap-2">
 <button type="button" onClick={resetFilters} className="btn-secondary px-3 py-2">Сбросить фильтры</button>{canWrite && <button type="button" onClick={() => setCreateOpen(true)} className="btn-primary px-3 py-2">Создать осмотр</button>}</div>
 </div>}
-          {state === 'ready' && <div className="space-y-3">{items.map((item) => <InspectionCard key={item.id} inspection={item} user={user} onNavigate={onNavigate} onAction={(mode, value) => setAction({ mode, item: value })} />)}</div>}
+          {['ready', 'offline'].includes(state) && <div className="space-y-3">{items.map((item) => <InspectionCard key={item.id} inspection={item} user={user} onNavigate={onNavigate} onAction={(mode, value) => setAction({ mode, item: value })} />)}</div>}
         </div>
-        {state === 'ready' && <div className="flex justify-between">
+        {['ready', 'offline'].includes(state) && <div className="flex justify-between">
 <button type="button" disabled={applied.offset === 0} onClick={() => setApplied((current) => ({ ...current, offset: Math.max(0, current.offset - current.limit) }))} className="btn-secondary px-4 py-2 disabled:opacity-50">Назад</button>
 <button type="button" disabled={applied.offset + items.length >= Number(data?.summary?.total || 0)} onClick={() => setApplied((current) => ({ ...current, offset: current.offset + current.limit }))} className="btn-secondary px-4 py-2 disabled:opacity-50">Вперёд</button>
 </div>}

@@ -1,9 +1,15 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { getFieldInspection } from '../../api/fieldInspections';
 import InspectionCard from './InspectionCard';
 import OperationalClosurePanel from './OperationalClosurePanel';
+import OfflineScoutingPanel from './OfflineScoutingPanel';
 import { formatDate, safeArray, safeString } from './inspectionPresentation';
+import {
+  cacheInspectionDetail,
+  getCachedInspectionDetail,
+  offlineScope,
+} from '../../offline/offlineScoutingStore.js';
 
 function DetailContent({
   item,
@@ -14,6 +20,9 @@ function DetailContent({
   reloadToken,
   onInspectionReload,
   onWorkflowModalState,
+  offline,
+  offlineNotice,
+  onOfflineSynchronized,
 }) {
   return (
     <div className="space-y-4">
@@ -30,14 +39,28 @@ function DetailContent({
         <p><b>Итог осмотра:</b> {safeString(item.completion_summary)}</p>
         <p><b>Причина отмены:</b> {safeString(item.cancellation_reason)}</p>
       </section>
-      <OperationalClosurePanel
-        inspectionId={item.id}
+      <OfflineScoutingPanel
+        inspection={item}
         user={user}
-        assignees={assignees}
-        reloadToken={reloadToken}
-        onInspectionReload={onInspectionReload}
-        onModalState={onWorkflowModalState}
+        externalNotice={offlineNotice}
+        onSynchronized={onOfflineSynchronized}
       />
+      {offline ? (
+        <section className="card p-4" aria-label="Операционный цикл недоступен без сети">
+          <p className="text-sm text-amber-900">
+            Серверная хронология и подтверждённые действия недоступны без сети. Ниже не показаны локальные данные как серверные.
+          </p>
+        </section>
+      ) : (
+        <OperationalClosurePanel
+          inspectionId={item.id}
+          user={user}
+          assignees={assignees}
+          reloadToken={reloadToken}
+          onInspectionReload={onInspectionReload}
+          onModalState={onWorkflowModalState}
+        />
+      )}
     </div>
   );
 }
@@ -61,6 +84,16 @@ export default function InspectionDetailDrawer({
   const mountedRef = useRef(false);
   const controllerRef = useRef(null);
   const [workflowModalOpen, setWorkflowModalOpen] = useState(false);
+  const [offlineNotice, setOfflineNotice] = useState('');
+  const scope = offlineScope(user);
+  const handleOfflineSynchronized = useCallback(() => {
+    setOfflineNotice('Все изменения подтверждены сервером.');
+    onRetry();
+  }, [onRetry]);
+
+  useEffect(() => {
+    setOfflineNotice('');
+  }, [id]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -84,17 +117,32 @@ export default function InspectionDetailDrawer({
         if (!mountedRef.current || controller.signal.aborted || generation !== generationRef.current) return;
         setItem(value);
         setState('ready');
+        if (scope) void cacheInspectionDetail(scope, value).catch(() => {});
         onLoaded?.(value);
       })
-      .catch((requestError) => {
+      .catch(async (requestError) => {
         if (!mountedRef.current || controller.signal.aborted || generation !== generationRef.current || requestError?.code === 'ERR_CANCELED') return;
+        if (scope) {
+          try {
+            const cached = await getCachedInspectionDetail(scope, id);
+            if (!mountedRef.current || controller.signal.aborted || generation !== generationRef.current) return;
+            if (cached) {
+              setItem(cached);
+              setState('offline');
+              onLoaded?.(cached);
+              return;
+            }
+          } catch {
+            // Continue to the normal network error without a safe cached detail.
+          }
+        }
         const status = requestError?.response?.status;
         setState(status === 403 ? '403' : status === 404 ? '404' : 'error');
         setError('Не удалось загрузить осмотр.');
       });
 
     return () => controller.abort();
-  }, [id, reloadToken, onLoaded]);
+  }, [id, reloadToken, onLoaded, scope]);
 
   useEffect(() => {
     const handleEscape = (event) => {
@@ -121,7 +169,8 @@ export default function InspectionDetailDrawer({
           {state === '403' && <p role="alert">Недостаточно прав для просмотра осмотра.</p>}
           {state === '404' && <p role="alert">Осмотр не найден или недоступен.</p>}
           {state === 'error' && <div role="alert"><p>{error}</p><button type="button" onClick={onRetry} className="btn-primary mt-3 px-3 py-2">Повторить</button></div>}
-          {state === 'ready' && item && <DetailContent item={item} user={user} assignees={assignees} onNavigate={onNavigate} onAction={onAction} reloadToken={reloadToken} onInspectionReload={onRetry} onWorkflowModalState={setWorkflowModalOpen} />}
+          {state === 'offline' && <p role="status" className="mb-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">Показана последняя сохранённая версия осмотра.</p>}
+          {['ready', 'offline'].includes(state) && item && <DetailContent item={item} user={user} assignees={assignees} onNavigate={onNavigate} onAction={onAction} reloadToken={reloadToken} onInspectionReload={onRetry} onWorkflowModalState={setWorkflowModalOpen} offline={state === 'offline'} offlineNotice={offlineNotice} onOfflineSynchronized={handleOfflineSynchronized} />}
         </div>
       </aside>
     </div>

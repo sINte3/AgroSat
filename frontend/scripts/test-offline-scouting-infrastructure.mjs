@@ -16,6 +16,10 @@ const read = (relative) => fs.readFileSync(path.join(root, relative), 'utf8');
 const store = read('src/offline/offlineScoutingStore.js');
 const sync = read('src/offline/offlineScoutingSync.js');
 const worker = read('public/sw.js');
+const statusPanel = read('src/components/Inspections/OfflineScoutingStatus.jsx');
+const draftPanel = read('src/components/Inspections/OfflineScoutingPanel.jsx');
+const listPage = read('src/pages/FieldInspectionsPage.jsx');
+const detailDrawer = read('src/components/Inspections/InspectionDetailDrawer.jsx');
 
 assert.equal(offlineScope({ id: 5, enterprise_id: 7 }), '7:5');
 assert.equal(offlineScope({ id: 5, enterprise_id: null }), null);
@@ -103,6 +107,29 @@ for (const required of [
 assert.match(worker, /url\.pathname\.startsWith\('\/api\/'\)/);
 assert.doesNotMatch(worker, /sync|authorization|cookie|token/i);
 assert.match(worker, /CACHE_NAME = `\$\{CACHE_PREFIX\}v1`/);
+for (const required of [
+  'Отправка не начнётся автоматически',
+  'syncOfflineQueue(scope',
+  "window.addEventListener('online'",
+  "window.removeEventListener('online'",
+]) {
+  assert.ok(statusPanel.includes(required), `missing offline status contract: ${required}`);
+}
+for (const required of [
+  'Офлайн-черновик осмотра',
+  'Изменения ещё не являются серверными данными',
+  'Конфликт версии',
+  'syncOfflineQueueItem',
+  'crypto.subtle.digest',
+  'Файл не сохраняется офлайн и не загружается',
+  'controllerRef.current?.abort()',
+]) {
+  assert.ok(draftPanel.includes(required), `missing offline draft contract: ${required}`);
+}
+assert.match(listPage, /getCachedAssignedInspections/);
+assert.match(listPage, /state === 'offline'/);
+assert.match(detailDrawer, /getCachedInspectionDetail/);
+assert.match(detailDrawer, /offline=\{state === 'offline'\}/);
 
 console.log(JSON.stringify({
   status: 'PASS',
@@ -113,4 +140,6 @@ console.log(JSON.stringify({
   maxEvidence: OFFLINE_SCOUTING_LIMITS.maxEvidence,
   apiCachePaths: 0,
   binaryPayloads: 0,
+  manualSyncControls: 2,
+  offlineFallbacks: 2,
 }));
