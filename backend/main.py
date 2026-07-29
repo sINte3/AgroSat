@@ -98,6 +98,7 @@ from api.raster import router as raster_router
 from api.pixel_anomalies import router as pixel_anomalies_router
 from api.telematics import router as telematics_router
 from api.irrigation_context import router as irrigation_context_router
+from api.yield_map_imports import router as yield_map_imports_router
 
 app.include_router(auth_router)
 app.include_router(enterprises_router)
@@ -127,6 +128,7 @@ app.include_router(raster_router)
 app.include_router(pixel_anomalies_router)
 app.include_router(telematics_router)
 app.include_router(irrigation_context_router)
+app.include_router(yield_map_imports_router)
 
 
 # ─── Базовые эндпоинты ───────────────────────────────────────────────────────
