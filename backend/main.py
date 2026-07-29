@@ -100,6 +100,9 @@ from api.telematics import router as telematics_router
 from api.irrigation_context import router as irrigation_context_router
 from api.yield_map_imports import router as yield_map_imports_router
 from api.productivity_zones import router as productivity_zones_router
+from api.variable_rate_recommendations import (
+    router as variable_rate_recommendations_router,
+)
 
 app.include_router(auth_router)
 app.include_router(enterprises_router)
@@ -131,6 +134,7 @@ app.include_router(telematics_router)
 app.include_router(irrigation_context_router)
 app.include_router(yield_map_imports_router)
 app.include_router(productivity_zones_router)
+app.include_router(variable_rate_recommendations_router)
 
 
 # ─── Базовые эндпоинты ───────────────────────────────────────────────────────

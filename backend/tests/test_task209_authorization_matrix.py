@@ -145,6 +145,12 @@ MATRIX = (
     contract("GET", "/api/productivity-zones/fields/{field_id}", tenant_scope="field_object", cross_tenant=404, unknown_object=404),
     contract("GET", "/api/productivity-zones/runs/{run_id}", tenant_scope="productivity_run_object", cross_tenant=404, unknown_object=404),
     contract("GET", "/api/productivity-zones/runs/{run_id}/zones", tenant_scope="productivity_run_object", cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/variable-rate-recommendations", MUTATING_ROLES, "field_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("GET", "/api/variable-rate-recommendations", tenant_scope="field_object", cross_tenant=404, unknown_object=404),
+    contract("GET", "/api/variable-rate-recommendations/{recommendation_id}", tenant_scope="variable_rate_object", cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/variable-rate-recommendations/{recommendation_id}/approve", MANAGEMENT_ROLES, "variable_rate_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/variable-rate-recommendations/{recommendation_id}/reject", MANAGEMENT_ROLES, "variable_rate_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("GET", "/api/variable-rate-recommendations/{recommendation_id}/export.geojson", tenant_scope="variable_rate_object", cross_tenant=404, unknown_object=404),
 )
 
 
@@ -159,7 +165,7 @@ def openapi_operations():
 
 def test_matrix_covers_every_openapi_operation_exactly():
     expected = {(item.method, item.path) for item in MATRIX}
-    assert len(expected) == len(MATRIX) == 86
+    assert len(expected) == len(MATRIX) == 92
     assert expected == set(openapi_operations())
 
 
@@ -197,6 +203,7 @@ def test_object_contracts_hide_cross_tenant_existence():
         "verification_object",
         "anomaly_object",
         "productivity_run_object",
+        "variable_rate_object",
     }
     for item in MATRIX:
         if item.tenant_scope in object_scopes:
