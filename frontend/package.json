@@ -17,7 +17,8 @@
     "benchmark:map-vector": "node scripts/benchmark-map-vector.mjs",
     "test:pixel-anomaly": "node scripts/test-pixel-anomaly-workflow.mjs",
     "test:offline-scouting": "node scripts/test-offline-scouting-infrastructure.mjs",
-    "test:wialon-read-only": "node scripts/test-wialon-read-only.mjs"
+    "test:wialon-read-only": "node scripts/test-wialon-read-only.mjs",
+    "test:wialon-read-only-browser": "node scripts/test-wialon-read-only-browser.mjs"
   },
   "dependencies": {
     "@mapbox/mapbox-gl-draw": "1.5.0",

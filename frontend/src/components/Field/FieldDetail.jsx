@@ -141,7 +141,7 @@ export default function FieldDetail({ fieldId, onBack }) {
           <button
             key={tab.key}
             onClick={() => setActiveTab(tab.key)}
-            className={`flex-none px-4 py-2.5 text-sm border-b-2 transition-colors ${
+            className={`min-h-11 flex-none px-4 py-2.5 text-sm border-b-2 transition-colors ${
               activeTab === tab.key
                 ? 'border-agro-accent text-agro-accent'
                 : 'border-transparent text-agro-muted hover:text-agro-text'
