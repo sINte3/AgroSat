@@ -4,6 +4,7 @@ import NDVIChart from './NDVIChart';
 import WeatherWidget from './WeatherWidget';
 import FieldTelematicsPanel from './FieldTelematicsPanel';
 import YieldMapImportPanel from './YieldMapImportPanel';
+import ProductivityZonePanel from './ProductivityZonePanel';
 
 export default function FieldDetail({ fieldId, onBack }) {
   const [field, setField] = useState(null);
@@ -125,7 +126,7 @@ export default function FieldDetail({ fieldId, onBack }) {
   return (
     <div className="flex flex-col h-full">
       {/* Шапка */}
-      <div className="flex items-center gap-3 px-4 py-3 border-b border-agro-surface2">
+      <div className="flex items-center gap-3 py-3 pl-16 pr-4 border-b border-agro-surface2 md:px-4">
         <button onClick={onBack} className="text-agro-muted hover:text-agro-text transition-colors">
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -349,9 +350,14 @@ export default function FieldDetail({ fieldId, onBack }) {
         )}
 
         {activeTab === 'yield' && (
-          <YieldMapImportPanel
-            fieldId={typeof fieldId === 'string' ? parseInt(fieldId) : fieldId}
-          />
+          <>
+            <ProductivityZonePanel
+              fieldId={typeof fieldId === 'string' ? parseInt(fieldId) : fieldId}
+            />
+            <YieldMapImportPanel
+              fieldId={typeof fieldId === 'string' ? parseInt(fieldId) : fieldId}
+            />
+          </>
         )}
 
         {activeTab === 'telematics' && (
