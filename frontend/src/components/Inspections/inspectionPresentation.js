@@ -1,5 +1,9 @@
 export const STATUS_LABELS = { pending: 'Ожидает', in_progress: 'В работе', completed: 'Завершён', cancelled: 'Отменён' };
-export const SOURCE_LABELS = { attention_queue: 'Очередь внимания', manual: 'Вручную' };
+export const SOURCE_LABELS = {
+  attention_queue: 'Очередь внимания',
+  irrigation_context: 'Контекст орошения',
+  manual: 'Вручную',
+};
 export const PRIORITY_LABELS = { low: 'Низкий', medium: 'Средний', high: 'Высокий', critical: 'Критический' };
 export const CAUSE_LABELS = {
   irrigation: 'Орошение',

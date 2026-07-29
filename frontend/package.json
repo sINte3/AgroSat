@@ -18,7 +18,9 @@
     "test:pixel-anomaly": "node scripts/test-pixel-anomaly-workflow.mjs",
     "test:offline-scouting": "node scripts/test-offline-scouting-infrastructure.mjs",
     "test:wialon-read-only": "node scripts/test-wialon-read-only.mjs",
-    "test:wialon-read-only-browser": "node scripts/test-wialon-read-only-browser.mjs"
+    "test:wialon-read-only-browser": "node scripts/test-wialon-read-only-browser.mjs",
+    "test:weather-irrigation": "node scripts/test-weather-irrigation-workflow.mjs",
+    "test:weather-irrigation-browser": "node scripts/test-weather-irrigation-browser.mjs"
   },
   "dependencies": {
     "@mapbox/mapbox-gl-draw": "1.5.0",
