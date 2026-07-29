@@ -90,4 +90,3 @@ The billing interface may return a stable internal plan code, quota summary,
 and externally managed subscription state. It cannot collect payment details or
 perform a financial transaction. An unavailable billing provider produces an
 explicit `unsupported` state.
-
