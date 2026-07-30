@@ -81,8 +81,13 @@ def test_schema_enforces_human_bounds_kind_unit_safety_and_status():
         "ck_variable_rate_events_type",
     ):
         assert name in source
-    assert "zone_rates ?& ARRAY['low','medium','high']" in source
-    assert "jsonb_object_length(zone_rates)=3" in source
+    assert "jsonb_object_length" not in source
+    assert "zone_rates ?& ARRAY['low','medium','high']::text[]" in source
+    assert (
+        "zone_rates - ARRAY['low','medium','high']::text[]) = '{}'::jsonb"
+        in source
+    )
+    assert "jsonb_typeof(equipment_capability)='object'" in source
 
 
 def test_live_downgrade_fails_before_changes_when_rows_exist():

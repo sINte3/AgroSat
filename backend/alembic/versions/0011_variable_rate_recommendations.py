@@ -145,8 +145,8 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "jsonb_typeof(zone_rates)='object' "
-            "AND zone_rates ?& ARRAY['low','medium','high'] "
-            "AND jsonb_object_length(zone_rates)=3 "
+            "AND zone_rates ?& ARRAY['low','medium','high']::text[] "
+            "AND (zone_rates - ARRAY['low','medium','high']::text[]) = '{}'::jsonb "
             "AND jsonb_typeof(equipment_capability)='object'",
             name="ck_variable_rate_recommendations_json_shapes",
         ),
