@@ -19,7 +19,9 @@ Safety guarantees:
 """
 
 import argparse
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -125,21 +127,39 @@ def create_local_database_if_missing(local_url: str) -> None:
             pass
 
 
-def init_local_schema(local_engine: Any) -> None:
-    safe_info("[2/8] Initializing local PostGIS extension and SQLAlchemy schema...")
+def init_local_schema(local_url: str) -> None:
+    """Apply the canonical Alembic chain to the isolated local database."""
+    safe_info("[2/8] Applying the full Alembic migration chain...")
+    environment = os.environ.copy()
+    environment["DATABASE_URL"] = local_url
+    # The one-time tool owns its backend/.env contract. Do not let an unrelated
+    # parent-process runtime-file override redirect Alembic configuration.
+    environment.pop("AGROSAT_RUNTIME_ENV_FILE", None)
+    command = [
+        sys.executable,
+        "-m",
+        "alembic",
+        "-c",
+        str(BACKEND_DIR / "alembic.ini"),
+        "upgrade",
+        "head",
+    ]
     try:
-        with local_engine.begin() as conn:
-            conn.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
-
-        from database import Base
-        from models.enterprise import Enterprise
-        from models.crop import CropType
-        from models.field import Field, CropSeason
-        from models.monitoring import NDVIRecord, Alert, ScoutingNote, User
-
-        Base.metadata.create_all(bind=local_engine)
-    except SQLAlchemyError:
-        fail("Could not initialize local schema/PostGIS.")
+        completed = subprocess.run(
+            command,
+            cwd=BACKEND_DIR,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        fail("Could not execute the local Alembic migration chain.")
+    if completed.returncode != 0:
+        # Alembic output can contain connection context. Keep the console error
+        # intentionally generic and do not echo stdout/stderr.
+        fail("The local Alembic migration chain failed; inspect sanitized operator logs.")
 
 
 def get_table_counts(engine: Any) -> dict[str, int]:
@@ -390,7 +410,7 @@ def run_migration(wipe_local: bool) -> None:
     local_engine = create_engine(local_url, pool_pre_ping=True, poolclass=NullPool)
 
     try:
-        init_local_schema(local_engine)
+        init_local_schema(local_url)
         assert_local_empty_or_wipe(local_engine, wipe_local=wipe_local)
 
         safe_info("[4/8] Reading remote row counts...")
@@ -414,8 +434,7 @@ def run_migration(wipe_local: bool) -> None:
         safe_info("Local database is ready for manual DATABASE_URL switch after review.")
         safe_info("====================================================")
 
-    except SQLAlchemyError as e:
-        print(f"[DEBUG] Database error: {e}")
+    except SQLAlchemyError:
         fail("Migration failed due to a database error. Details above are safe — no credentials.")
     finally:
         remote_engine.dispose()
