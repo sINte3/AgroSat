@@ -1,5 +1,4 @@
 import React, { useEffect, useRef, useState } from 'react';
-import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import MapboxDraw from '@mapbox/mapbox-gl-draw';
 import '@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css';
@@ -13,6 +12,7 @@ import MapLegend from './MapLegend';
 import MapHoverPopup from './MapHoverPopup';
 import NDVIRasterControl from './NDVIRasterControl';
 import { getIndexColor } from '../../config/indexMetadata';
+import maplibregl from '../../maplibreRuntime';
 
 // ─── Constants ──────────────────────────────────────────────────────────────────
 

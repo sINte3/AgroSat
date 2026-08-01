@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 
 import {
@@ -16,6 +15,7 @@ import {
   safeErrorDetail,
   todayTashkentDate,
 } from '../Inspections/inspectionPresentation';
+import maplibregl from '../../maplibreRuntime';
 
 
 const SOURCE_ID = 'pixel-anomaly-zone-source';
