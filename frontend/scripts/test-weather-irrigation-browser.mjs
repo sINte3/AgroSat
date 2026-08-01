@@ -10,6 +10,7 @@ const apiRequests = [];
 const externalRequests = [];
 const consoleErrors = [];
 const failedRequests = [];
+const expectedReadCancellations = [];
 const events = [];
 const fixtureToken = crypto.randomUUID();
 let activeInspection = null;
@@ -231,15 +232,23 @@ socket.addEventListener('message', async (message) => {
   if (payload.method === 'Fetch.requestPaused') {
     const { requestId, request } = payload.params;
     const fixture = fixtureFor(request.url, request.method, request.postData);
-    await send('Fetch.fulfillRequest', {
-      requestId,
-      responseCode: fixture.status,
-      responseHeaders: [
-        { name: 'Content-Type', value: 'application/json; charset=utf-8' },
-        { name: 'Cache-Control', value: 'no-store' },
-      ],
-      body: Buffer.from(JSON.stringify(fixture.body)).toString('base64'),
-    });
+    try {
+      await send('Fetch.fulfillRequest', {
+        requestId,
+        responseCode: fixture.status,
+        responseHeaders: [
+          { name: 'Content-Type', value: 'application/json; charset=utf-8' },
+          { name: 'Cache-Control', value: 'no-store' },
+        ],
+        body: Buffer.from(JSON.stringify(fixture.body)).toString('base64'),
+      });
+    } catch (error) {
+      if (request.method === 'GET' && error.message.includes('Invalid InterceptionId')) {
+        expectedReadCancellations.push(new URL(request.url).pathname);
+        return;
+      }
+      throw error;
+    }
   }
 });
 
@@ -350,7 +359,7 @@ for (const [width, height] of [[1920, 1080], [1440, 900], [1024, 768], [390, 844
 }
 
 await clickText('Зафиксировать событие');
-await waitFor(`document.body.innerText.includes('Наблюдение в поле')`);
+await waitFor(`document.querySelector('[aria-labelledby="irrigation-event-list-title"]')?.innerText.includes('TASK209 manager')`);
 await waitFor(`document.body.innerText.includes('Создать осмотр')`);
 await clickText('Создать осмотр');
 await waitFor(`document.body.innerText.includes('Активный осмотр #209')`);
@@ -406,6 +415,7 @@ const report = {
   external_asset_requests: externalRequests.length,
   console_errors: consoleErrors.length,
   failed_network_requests: failedRequests.length,
+  expected_cancelled_read_interceptions: expectedReadCancellations.length,
   unexpected_business_writes: 0,
   live_weather_validated: false,
   isolated_database_validated: false,
