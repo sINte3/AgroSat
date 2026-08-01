@@ -4,7 +4,12 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from database import get_db
 from datetime import date
-from services.cache import cache_get, cache_set, cache_delete_pattern
+from services.cache import (
+    cache_delete_patterns,
+    cache_get,
+    cache_set,
+    field_read_model_cache_patterns,
+)
 from api.dependencies import (
     require_enterprise_scope,
     get_authorized_field_row,
@@ -30,10 +35,10 @@ _cache_keys = {
 }
 
 
-def _invalidate_field_caches():
-    cache_delete_pattern("fields:list:*")
-    cache_delete_pattern("fields:geojson:*")
-    cache_delete_pattern("field-tiles:*")
+def _invalidate_field_caches(enterprise_id: int):
+    cache_delete_patterns(
+        field_read_model_cache_patterns(int(enterprise_id))
+    )
 
 
 def _scope_label(enterprise_id):
@@ -412,7 +417,7 @@ def create_field(
     }).fetchone()
     db.commit()
 
-    _invalidate_field_caches()
+    _invalidate_field_caches(int(row.enterprise_id))
 
     return {
         "id": row.id,
@@ -512,7 +517,7 @@ def update_field(
     db.execute(sql, params)
     db.commit()
 
-    _invalidate_field_caches()
+    _invalidate_field_caches(int(_auth_field.enterprise_id))
 
     return {"status": "ok", "field_id": field_id}
 
@@ -556,6 +561,6 @@ def set_field_season(
     )
     db.commit()
 
-    _invalidate_field_caches()
+    _invalidate_field_caches(int(_auth_field.enterprise_id))
 
     return {"status": "ok", "field_id": field_id, "season_year": season_year}

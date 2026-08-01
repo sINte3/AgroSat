@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 from fastapi import HTTPException
 
+from api import alerts as alerts_api
 from api.alerts import acknowledge_alert
 from models.monitoring import UserRole
 
@@ -36,9 +37,9 @@ def user(role, enterprise_id, user_id=7):
     return SimpleNamespace(role=role, enterprise_id=enterprise_id, id=user_id)
 
 
-@patch("api.alerts.cache_delete_pattern")
+@patch("api.alerts.cache_delete_patterns")
 def test_manager_acknowledge_is_scoped_inside_update(cache_delete):
-    db = RecordingSession(row=SimpleNamespace(id=31, field_id=4))
+    db = RecordingSession(row=SimpleNamespace(id=31, field_id=4, enterprise_id=17))
     result = acknowledge_alert(
         alert_id=31,
         db=db,
@@ -50,7 +51,9 @@ def test_manager_acknowledge_is_scoped_inside_update(cache_delete):
     assert "AND f.enterprise_id = :eid" in statement
     assert params["eid"] == 17
     assert db.commits == 1
-    assert cache_delete.call_count == 3
+    cache_delete.assert_called_once_with(
+        alerts_api.alert_mutation_cache_patterns(17, 4)
+    )
 
 
 def test_manager_cross_tenant_alert_is_non_enumerable_404():
@@ -70,7 +73,7 @@ def test_manager_cross_tenant_alert_is_non_enumerable_404():
 
 
 def test_viewer_enum_role_cannot_acknowledge():
-    db = RecordingSession(row=SimpleNamespace(id=31, field_id=4))
+    db = RecordingSession(row=SimpleNamespace(id=31, field_id=4, enterprise_id=17))
     with pytest.raises(HTTPException) as exc:
         acknowledge_alert(
             alert_id=31,
@@ -83,9 +86,9 @@ def test_viewer_enum_role_cannot_acknowledge():
     assert db.commits == 0
 
 
-@patch("api.alerts.cache_delete_pattern")
+@patch("api.alerts.cache_delete_patterns")
 def test_admin_acknowledge_remains_global(cache_delete):
-    db = RecordingSession(row=SimpleNamespace(id=31, field_id=4))
+    db = RecordingSession(row=SimpleNamespace(id=31, field_id=4, enterprise_id=17))
     acknowledge_alert(
         alert_id=31,
         db=db,
@@ -96,4 +99,6 @@ def test_admin_acknowledge_remains_global(cache_delete):
     assert "AND f.enterprise_id = :eid" not in statement
     assert "eid" not in params
     assert db.commits == 1
-    assert cache_delete.call_count == 3
+    cache_delete.assert_called_once_with(
+        alerts_api.alert_mutation_cache_patterns(17, 4)
+    )

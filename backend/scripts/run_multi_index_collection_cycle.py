@@ -337,7 +337,7 @@ def run(args: argparse.Namespace, *, field_query: Callable[[], list[int]] = quer
             selected = selected[:args.max_fields]
         if not selected:
             raise CycleValidationError("NO_ACTIVE_FIELDS_OR_EMPTY_BATCH")
-        failures: list[int] = []; totals = {"inserted": 0, "skipped_existing": 0, "quality_blocked": 0, "timeouts": 0, "attempts": 0}; fatal = False
+        failures: list[int] = []; successes: list[int] = []; totals = {"inserted": 0, "skipped_existing": 0, "quality_blocked": 0, "timeouts": 0, "attempts": 0}; fatal = False
         for field_id in selected:
             success = False
             for attempt in range(1, args.max_attempts + 1):
@@ -376,15 +376,18 @@ def run(args: argparse.Namespace, *, field_query: Callable[[], list[int]] = quer
                             child_log.unlink()
                         except OSError:
                             pass
+            if success:
+                successes.append(field_id)
+            else:
+                failures.append(field_id)
             if fatal:
                 break
-            if not success:
-                failures.append(field_id)
         retry_after = [item for item in state["retry_field_ids"] if item not in selected and item not in failures]
         retry_after.extend(item for item in failures if item not in retry_after)
         retry_after = retry_after[:MAX_BATCH_SIZE]
         final_exit_code = 2 if fatal else (1 if failures else 0)
-        summary.update({"mode": mode, "indices": indices, "date_from": start_date.isoformat(), "date_to": end_date.isoformat(), "selected_field_ids": selected, "batch_source_counts": {"retry": retry_count, "rotation": rotation_count}, "attempt_counts": totals["attempts"], "success_count": len(selected) - len(failures), "failure_count": len(failures), "timeout_count": totals["timeouts"], "inserted_count": totals["inserted"], "skipped_existing_count": totals["skipped_existing"], "quality_blocked_count": totals["quality_blocked"], "retry_queue_before": state["retry_field_ids"], "retry_queue_after": retry_after, "state_advanced": False})
+        unattempted = [field_id for field_id in selected if field_id not in successes and field_id not in failures]
+        summary.update({"mode": mode, "indices": indices, "date_from": start_date.isoformat(), "date_to": end_date.isoformat(), "selected_field_ids": selected, "successful_field_ids": successes, "failed_field_ids": failures, "unattempted_field_ids": unattempted, "unattempted_count": len(unattempted), "batch_source_counts": {"retry": retry_count, "rotation": rotation_count}, "attempt_counts": totals["attempts"], "success_count": len(successes), "failure_count": len(failures), "timeout_count": totals["timeouts"], "inserted_count": totals["inserted"], "skipped_existing_count": totals["skipped_existing"], "quality_blocked_count": totals["quality_blocked"], "retry_queue_before": state["retry_field_ids"], "retry_queue_after": retry_after, "state_advanced": False})
         if not fatal and state_file:
             next_state = {"schema_version": STATE_SCHEMA_VERSION, "next_offset": next_offset, "retry_field_ids": retry_after, "last_completed_run_id": run_id, "updated_at": utc_now()}
     except CycleValidationError as exc:

@@ -9,7 +9,12 @@ from sqlalchemy import text
 from database import get_db
 from models.monitoring import User
 from datetime import datetime
-from services.cache import cache_get, cache_set, cache_delete_pattern
+from services.cache import (
+    alert_mutation_cache_patterns,
+    cache_delete_patterns,
+    cache_get,
+    cache_set,
+)
 from api.auth import get_current_active_user
 from api.dependencies import (
     require_enterprise_scope,
@@ -20,6 +25,15 @@ from api.dependencies import (
 )
 
 router = APIRouter(prefix="/api/alerts", tags=["alerts"])
+
+
+def _invalidate_alert_caches(enterprise_id: int, field_id: int) -> None:
+    cache_delete_patterns(
+        alert_mutation_cache_patterns(
+            int(enterprise_id),
+            int(field_id),
+        )
+    )
 
 
 @router.get("/")
@@ -249,7 +263,7 @@ def acknowledge_alert(
             WHERE a.id = :aid
               AND a.is_active = true
               AND f.id = a.field_id
-            RETURNING a.id, a.field_id
+            RETURNING a.id, a.field_id, f.enterprise_id
         """)
         params = {"aid": alert_id, "now": datetime.utcnow(), "uid": current_user.id}
     elif is_tenant_role(role):
@@ -267,7 +281,7 @@ def acknowledge_alert(
               AND a.is_active = true
               AND f.id = a.field_id
               AND f.enterprise_id = :eid
-            RETURNING a.id, a.field_id
+            RETURNING a.id, a.field_id, f.enterprise_id
         """)
         params = {"aid": alert_id, "now": datetime.utcnow(), "uid": current_user.id, "eid": eid}
     else:
@@ -278,9 +292,9 @@ def acknowledge_alert(
         raise HTTPException(status_code=404, detail="Алерт не найден")
     db.commit()
 
-    # Invalidate caches
-    cache_delete_pattern("alerts:*")
-    cache_delete_pattern("dashboard:*")
-    cache_delete_pattern("map:*")
+    _invalidate_alert_caches(
+        int(row.enterprise_id),
+        int(row.field_id),
+    )
 
     return {"status": "ok", "alert_id": alert_id}

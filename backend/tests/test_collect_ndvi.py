@@ -35,10 +35,10 @@ class CollectNdviTests(unittest.TestCase):
   with tempfile.TemporaryDirectory() as d:self.assertEqual(c.run(self.args("--apply","--field-id","1","--output-log",str(Path(d)/"x.json")),lookup=lambda _:{"geometry_wkt":"X"},service_factory=lambda:service),0)
  def test_13_writer_insert(self):
   service=Mock(is_mock=False,source="Sentinel-2");service.get_ndvi_stats.return_value={"satellite":"Sentinel-2","mean_ndvi":.5,"captured_date":date.today().isoformat()};writer=Mock(return_value=True)
-  with tempfile.TemporaryDirectory() as d:self.assertEqual(c.run(self.args("--write","--field-id","1","--output-log",str(Path(d)/"x.json")),lookup=lambda _:{"geometry_wkt":"X"},service_factory=lambda:service,writer=writer),0);writer.assert_called_once()
+  with tempfile.TemporaryDirectory() as d:self.assertEqual(c.run(self.args("--write","--field-id","1","--output-log",str(Path(d)/"x.json")),lookup=lambda _:{"geometry_wkt":"X","enterprise_id":17},service_factory=lambda:service,writer=writer),0);writer.assert_called_once()
  def test_14_writer_skip_existing(self):
   service=Mock(is_mock=False,source="Sentinel-2");service.get_ndvi_stats.return_value={"satellite":"Sentinel-2","mean_ndvi":.5,"captured_date":date.today().isoformat()};writer=Mock(return_value=False)
-  with tempfile.TemporaryDirectory() as d:self.assertEqual(c.run(self.args("--write","--field-id","1","--output-log",str(Path(d)/"x.json")),lookup=lambda _:{"geometry_wkt":"X"},service_factory=lambda:service,writer=writer),0);self.assertEqual(json.loads((Path(d)/"x.json").read_text())["skipped_existing_count"],1)
+  with tempfile.TemporaryDirectory() as d:self.assertEqual(c.run(self.args("--write","--field-id","1","--output-log",str(Path(d)/"x.json")),lookup=lambda _:{"geometry_wkt":"X","enterprise_id":17},service_factory=lambda:service,writer=writer),0);self.assertEqual(json.loads((Path(d)/"x.json").read_text())["skipped_existing_count"],1)
  def test_15_lock_contention(self):
   with tempfile.TemporaryDirectory() as d,patch.object(c,"acquire_lock",side_effect=SystemExit(3)):self.assertEqual(c.run(self.args("--apply","--field-id","1","--output-log",str(Path(d)/"x.json"))),3)
  def test_16_mandatory_log_external(self): self.assertEqual(c.run(self.args("--apply","--field-id","1","--output-log","relative.json")),2)
@@ -58,7 +58,7 @@ class CollectNdviTests(unittest.TestCase):
   with tempfile.TemporaryDirectory() as d:self.assertEqual(c.run(self.args("--apply","--field-id","1","--output-log",str(Path(d)/"x")),lookup=lambda _:{"geometry_wkt":"X"},service_factory=lambda:service),2)
  def test_23_persistence_exception_is_contract_error(self):
   service=Mock(is_mock=False,source="Sentinel-2");service.get_ndvi_stats.return_value={"satellite":"Sentinel-2","mean_ndvi":.5,"captured_date":date.today().isoformat()}
-  with tempfile.TemporaryDirectory() as d:self.assertEqual(c.run(self.args("--write","--field-id","1","--output-log",str(Path(d)/"x")),lookup=lambda _:{"geometry_wkt":"X"},service_factory=lambda:service,writer=Mock(side_effect=RuntimeError("db"))),2)
+  with tempfile.TemporaryDirectory() as d:self.assertEqual(c.run(self.args("--write","--field-id","1","--output-log",str(Path(d)/"x")),lookup=lambda _:{"geometry_wkt":"X","enterprise_id":17},service_factory=lambda:service,writer=Mock(side_effect=RuntimeError("db"))),2)
  def test_24_sanitizer_windows_user_path(self): self.assertNotIn("Example User",c.sanitize_text(r"\\?\C:\Users\Example User\file"))
  def test_25_sanitizer_device_user_path(self): self.assertNotIn("Example User",c.sanitize_text(r"\Device\HarddiskVolume3\Users\Example User\file"))
  def test_26_sanitizer_authorization(self): self.assertNotIn("secret",c.sanitize_text("Authorization: Bearer secret token=secret"))
@@ -89,3 +89,30 @@ class CollectNdviTests(unittest.TestCase):
   session=Session();import types
   with patch.dict(sys.modules,{"database":types.SimpleNamespace(SessionLocal=lambda:session)}),self.assertRaises(RuntimeError): c.field_lookup(1)
   self.assertTrue(session.rollback_called);self.assertTrue(session.closed)
+ def test_30_persist_invalidates_only_after_commit(self):
+  events=[]
+  class Result:
+   def first(self): events.append("insert_result");return object()
+  class Session:
+   def __init__(self): self.rollback_called=False;self.closed=False
+   def execute(self,*args,**kwargs): events.append("execute");return Result()
+   def commit(self): events.append("commit")
+   def rollback(self): self.rollback_called=True
+   def close(self): self.closed=True
+  session=Session();record={"captured_date":date.today().isoformat(),"satellite":"Sentinel-2","mean_ndvi":.5};import types
+  with patch.dict(sys.modules,{"database":types.SimpleNamespace(SessionLocal=lambda:session)}),patch.object(c,"validate_observation",return_value=(record,False)),patch.object(c,"invalidate_observation_cache",side_effect=lambda enterprise_id:events.append("invalidate")):
+   self.assertTrue(c.persist(1,17,record,date.today(),date.today()))
+  self.assertLess(events.index("commit"),events.index("invalidate"));self.assertFalse(session.rollback_called);self.assertTrue(session.closed)
+ def test_31_cache_failure_cannot_rollback_committed_observation(self):
+  class Result:
+   def first(self): return object()
+  class Session:
+   def __init__(self): self.committed=False;self.rollback_called=False;self.closed=False
+   def execute(self,*args,**kwargs): return Result()
+   def commit(self): self.committed=True
+   def rollback(self): self.rollback_called=True
+   def close(self): self.closed=True
+  session=Session();record={"captured_date":date.today().isoformat(),"satellite":"Sentinel-2","mean_ndvi":.5};import types
+  with patch.dict(sys.modules,{"database":types.SimpleNamespace(SessionLocal=lambda:session)}),patch.object(c,"validate_observation",return_value=(record,False)),patch.object(c,"invalidate_observation_cache",side_effect=RuntimeError("offline")):
+   self.assertTrue(c.persist(1,17,record,date.today(),date.today()))
+  self.assertTrue(session.committed);self.assertFalse(session.rollback_called);self.assertTrue(session.closed)

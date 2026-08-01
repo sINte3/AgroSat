@@ -2,6 +2,7 @@
 """Collect one real Sentinel-2 NDVI observation with safe persistence."""
 import argparse
 import json
+import logging
 import math
 import os
 import re
@@ -22,6 +23,7 @@ from services.collector_locking import acquire_lock, release_lock
 DEFAULT_LOCK = Path(tempfile.gettempdir()) / "agrosat_ndvi_collector.lock"
 MUTEX = "Global\\AgroSatNdviCollector_v1"
 SCHEMA = 1
+logger = logging.getLogger(__name__)
 
 
 class ValidationError(ValueError):
@@ -120,7 +122,7 @@ def field_lookup(field_id: int) -> dict[str, Any]:
     session = SessionLocal()
     try:
         session.execute(text("SET TRANSACTION READ ONLY"))
-        row = session.execute(text("SELECT id, ST_AsText(geometry) AS geometry_wkt FROM fields WHERE id=:id AND is_active=true AND geometry IS NOT NULL AND NOT ST_IsEmpty(geometry)"), {"id": field_id}).mappings().first()
+        row = session.execute(text("SELECT id, enterprise_id, ST_AsText(geometry) AS geometry_wkt FROM fields WHERE id=:id AND is_active=true AND geometry IS NOT NULL AND NOT ST_IsEmpty(geometry)"), {"id": field_id}).mappings().first()
         if not row:
             raise ValidationError("field is missing, inactive, or has empty geometry")
         return dict(row)
@@ -150,7 +152,15 @@ def validate_observation(observation: Any, start: date, end: date) -> tuple[dict
     return observation, not valid
 
 
-def persist(field_id: int, record: dict[str, Any], start: date, end: date) -> bool:
+def invalidate_observation_cache(enterprise_id: int) -> bool:
+    from services.cache import cache_delete_patterns, observation_cache_patterns
+
+    return cache_delete_patterns(
+        observation_cache_patterns(int(enterprise_id))
+    )
+
+
+def persist(field_id: int, enterprise_id: int, record: dict[str, Any], start: date, end: date) -> bool:
     """Insert once, returning true only when PostgreSQL returned an inserted id."""
     from database import SessionLocal
     from sqlalchemy import text
@@ -167,6 +177,13 @@ def persist(field_id: int, record: dict[str, Any], start: date, end: date) -> bo
         result = session.execute(statement, values)
         inserted = result.first() is not None
         session.commit()
+        if inserted:
+            try:
+                invalidate_observation_cache(enterprise_id)
+            except Exception:
+                logger.warning(
+                    "Redis invalidation failed after committed NDVI write"
+                )
         return inserted
     except Exception:
         session.rollback()
@@ -175,7 +192,7 @@ def persist(field_id: int, record: dict[str, Any], start: date, end: date) -> bo
         session.close()
 
 
-def run(args: argparse.Namespace, *, lookup: Callable[[int], dict[str, Any]] = field_lookup, service_factory: Callable[[], Any] | None = None, writer: Callable[[int, dict[str, Any], date, date], bool] = persist) -> int:
+def run(args: argparse.Namespace, *, lookup: Callable[[int], dict[str, Any]] = field_lookup, service_factory: Callable[[], Any] | None = None, writer: Callable[[int, int, dict[str, Any], date, date], bool] = persist) -> int:
     started = time.monotonic()
     result: dict[str, Any] = {"schema_version": SCHEMA, "field_id": args.field_id, "mode": mode(args), "scenes_received": 0, "candidate_count": 0, "inserted_count": 0, "skipped_existing_count": 0, "quality_blocked_count": 0, "error_count": 0, "started_at": datetime.now(timezone.utc).isoformat(), "diagnostics": []}
     lock = None
@@ -216,7 +233,7 @@ def run(args: argparse.Namespace, *, lookup: Callable[[int], dict[str, Any]] = f
                 result["quality_blocked_count"] = 1
             elif current_mode == "write":
                 try:
-                    inserted = writer(args.field_id, observation, start, end)
+                    inserted = writer(args.field_id, int(field["enterprise_id"]), observation, start, end)
                 except Exception as exc:
                     raise ValidationError(f"persistence failed: {exc}") from exc
                 if inserted:

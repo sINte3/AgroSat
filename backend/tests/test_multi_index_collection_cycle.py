@@ -107,7 +107,10 @@ class CycleRunTests(unittest.TestCase):
     def test_23_timeout_retries(self):
         temp, root, result, calls, summary = self.run_cycle((1, 0), timed_out=True); self.addCleanup(temp.cleanup); self.assertEqual((result, len(calls), summary["timeout_count"]), (0, 2, 2))
     def test_24_child_exit_two_aborts(self):
-        temp, _, result, calls, summary = self.run_cycle((2,)); self.addCleanup(temp.cleanup); self.assertEqual((result, len(calls), summary["exit_code"]), (2, 1, 2))
+        temp, _, result, calls, summary = self.run_cycle((2,), field_ids="4,5", attempts=1); self.addCleanup(temp.cleanup)
+        self.assertEqual((result, len(calls), summary["exit_code"]), (2, 1, 2))
+        self.assertEqual((summary["success_count"], summary["failure_count"], summary["unattempted_count"]), (0, 1, 1))
+        self.assertEqual((summary["successful_field_ids"], summary["failed_field_ids"], summary["unattempted_field_ids"]), ([], [4], [5]))
     def test_25_malformed_child_json_aborts(self):
         temp, _, result, calls, summary = self.run_cycle((0,), child_json=False); self.addCleanup(temp.cleanup); self.assertEqual((result, len(calls), summary["exit_code"]), (2, 1, 2))
     def test_26_field_results_failure_is_two(self):

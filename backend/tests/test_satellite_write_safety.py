@@ -315,12 +315,22 @@ class CollectorModeTests(unittest.TestCase):
         from scripts import collect_satellite_indices as collector
         with patch.object(collector, "check_exists_by_key", return_value=False), patch.object(
             collector, "SessionLocal"
-        ) as session:
+        ) as session, patch.object(
+            collector,
+            "_invalidate_observation_cache",
+            side_effect=RuntimeError("offline"),
+        ) as invalidate:
             session.return_value.execute.return_value = None
             self.assertTrue(collector._insert_satellite_index_record(
-                1, __import__("datetime").date.today(), "savi", 0.5, "Sentinel-2"
+                1,
+                __import__("datetime").date.today(),
+                "savi",
+                0.5,
+                "Sentinel-2",
+                enterprise_id=17,
             ))
         session.assert_called_once()
+        invalidate.assert_called_once_with(17)
 
     def test_bypassed_validator_mock_write_rejected(self):
         from scripts import collect_satellite_indices as collector

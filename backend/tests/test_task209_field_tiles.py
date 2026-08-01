@@ -190,14 +190,12 @@ def test_matching_etag_returns_private_304(get_tile):
     get_tile.assert_called_once()
 
 
-@patch.object(fields_api, "cache_delete_pattern")
-def test_field_mutation_invalidation_includes_vector_namespaces(delete_pattern):
-    fields_api._invalidate_field_caches()
-    assert [call.args[0] for call in delete_pattern.call_args_list] == [
-        "fields:list:*",
-        "fields:geojson:*",
-        "field-tiles:*",
-    ]
+@patch.object(fields_api, "cache_delete_patterns")
+def test_field_mutation_invalidation_includes_vector_namespaces(delete_patterns):
+    fields_api._invalidate_field_caches(5)
+    expected = fields_api.field_read_model_cache_patterns(5)
+    delete_patterns.assert_called_once_with(expected)
+    assert all("enterprise:6" not in pattern for pattern in expected)
 
 
 def test_existing_spatial_index_is_declared_in_migration_history():

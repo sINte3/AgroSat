@@ -649,6 +649,14 @@ def _get_satellite_service(
     return get_multi_index_satellite_service()
 
 
+def _invalidate_observation_cache(enterprise_id: int) -> bool:
+    from services.cache import cache_delete_patterns, observation_cache_patterns
+
+    return cache_delete_patterns(
+        observation_cache_patterns(int(enterprise_id))
+    )
+
+
 def _insert_satellite_index_record(
     field_id: int,
     captured_date: date,
@@ -662,6 +670,7 @@ def _insert_satellite_index_record(
     p90_value: float | None = None,
     valid_pixels_pct: float | None = None,
     cloud_cover_pct: float | None = None,
+    enterprise_id: int | None = None,
 ) -> bool:
     """
     Insert a single satellite_index_record. Returns True on success, False on skip/error.
@@ -670,6 +679,8 @@ def _insert_satellite_index_record(
     before inserting. Does NOT overwrite existing records.
     """
     require_real_provenance(satellite)
+    if type(enterprise_id) is not int or enterprise_id <= 0:
+        raise ValueError("enterprise_id is required for cache invalidation")
     if check_exists_by_key(field_id, captured_date, index_code):
         logger.info("  SKIP (exists): field=%d date=%s code=%s", field_id, captured_date, index_code)
         return False
@@ -701,6 +712,12 @@ def _insert_satellite_index_record(
             },
         )
         db.commit()
+        try:
+            _invalidate_observation_cache(enterprise_id)
+        except Exception:
+            logger.warning(
+                "Redis invalidation failed after committed satellite-index write"
+            )
         logger.info("  INSERTED: field=%d date=%s code=%s mean=%.4f", field_id, captured_date, index_code, mean_value or 0)
         return True
     except Exception:
@@ -1113,6 +1130,7 @@ def run_real(args: argparse.Namespace) -> None:
                     valid_pixels_pct=vpp,
                     cloud_cover_pct=ccp,
                     satellite=getattr(service, "source", None),
+                    enterprise_id=int(field["enterprise_id"]),
                 )
                 if inserted:
                     field_db_inserted += 1

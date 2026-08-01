@@ -120,7 +120,9 @@ class RasterServiceTests(unittest.TestCase):
         with patch.object(cache, "CACHE_AVAILABLE", True), patch.object(cache, "_redis", redis_client):
             self.assertTrue(cache.cache_set("legacy-key", {"captured": date(2026, 7, 14)}, 60))
         redis_client.setex.assert_called_once_with(
-            "legacy-key", 60, json.dumps({"captured": date(2026, 7, 14)}, default=str)
+            f"agrosat:{cache.settings.environment}:legacy-key",
+            60,
+            json.dumps({"captured": date(2026, 7, 14)}, default=str),
         )
 
         redis_client = Mock()
