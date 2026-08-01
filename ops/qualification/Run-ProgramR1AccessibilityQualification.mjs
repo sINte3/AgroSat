@@ -324,9 +324,14 @@ try {
   const dialog = page.getByRole('dialog', { name: `NDVI История — ${fieldTwo.name}` });
   const dialogCount = await dialog.count();
   check('ndvi_history_uses_named_modal_dialog', dialogCount === 1, { count: dialogCount });
-  const focusInside = dialogCount === 1
-    ? await dialog.evaluate((node) => node.contains(document.activeElement))
-    : false;
+  let focusInside = false;
+  if (dialogCount === 1) {
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      focusInside = await dialog.evaluate((node) => node.contains(document.activeElement));
+      if (focusInside) break;
+      await page.waitForTimeout(50);
+    }
+  }
   check('ndvi_history_initial_focus_inside_dialog', focusInside);
   await capture(page, 'manager', desktopViewport, '/enterprises/1', 'ndvi-history-dialog');
   await page.keyboard.press('Escape');
