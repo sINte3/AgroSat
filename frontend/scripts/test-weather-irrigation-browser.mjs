@@ -291,14 +291,18 @@ async function navigate(url) {
 }
 
 async function clickText(label) {
-  const clicked = await evaluate(`(() => {
-    const control = [...document.querySelectorAll('button, a')]
-      .find((item) => item.textContent.trim().includes(${JSON.stringify(label)}));
-    if (!control) return false;
-    control.click();
-    return true;
-  })()`);
-  assert.equal(clicked, true, `Missing control: ${label}`);
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const clicked = await evaluate(`(() => {
+      const control = [...document.querySelectorAll('button, a')]
+        .find((item) => item.textContent.trim().includes(${JSON.stringify(label)}));
+      if (!control) return false;
+      control.click();
+      return true;
+    })()`);
+    if (clicked) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.fail(`Missing control after UI stabilization: ${label}`);
 }
 
 await navigate(baseUrl);

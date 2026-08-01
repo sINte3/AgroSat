@@ -33,18 +33,16 @@ function Invoke-NpmContract {
     New-Item -ItemType Directory -Path $contractEvidence -Force | Out-Null
     $start = [DateTimeOffset]::UtcNow
     $info = New-Object Diagnostics.ProcessStartInfo
-    $info.FileName = $script:NpmPath
-    $info.ArgumentList.Add("run")
-    $info.ArgumentList.Add($Name)
-    $info.ArgumentList.Add("--silent")
+    $info.FileName = $script:NodePath
+    $info.Arguments = "`"$script:NpmCliPath`" run $Name --silent"
     $info.WorkingDirectory = Join-Path $WorktreeRoot "frontend"
     $info.UseShellExecute = $false
     $info.CreateNoWindow = $true
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
-    $info.Environment["TASK209_BASE_URL"] = $BaseUrl
-    $info.Environment["TASK209_CDP_PORT"] = [string]$CdpPort
-    $info.Environment["TASK209_EVIDENCE_DIR"] = $contractEvidence
+    $info.EnvironmentVariables["TASK209_BASE_URL"] = $BaseUrl
+    $info.EnvironmentVariables["TASK209_CDP_PORT"] = [string]$CdpPort
+    $info.EnvironmentVariables["TASK209_EVIDENCE_DIR"] = $contractEvidence
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $info
     $null = $process.Start()
@@ -89,7 +87,12 @@ $actualHead = (& git -C $WorktreeRoot rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $actualHead -ne $ExpectedHead) {
     throw "Unexpected worktree HEAD."
 }
-$script:NpmPath = (Get-Command npm.cmd -ErrorAction Stop).Source
+$npmPath = (Get-Command npm.cmd -ErrorAction Stop).Source
+$script:NodePath = (Get-Command node.exe -ErrorAction Stop).Source
+$script:NpmCliPath = Join-Path (Split-Path $npmPath) "node_modules\npm\bin\npm-cli.js"
+if (-not (Test-Path -LiteralPath $script:NpmCliPath -PathType Leaf)) {
+    throw "npm CLI entry point is unavailable."
+}
 New-Item -ItemType Directory -Path $resolvedEvidence -Force | Out-Null
 
 $staticContracts = @(
@@ -120,55 +123,71 @@ $browserContracts = @(
 )
 
 $results = @()
-$chrome = $null
-$profile = Join-Path $resolvedRuntime "frontend-contract-cdp-profile"
-try {
-    foreach ($name in $staticContracts) {
-        $results += Invoke-NpmContract -Name $name -Browser $false
-    }
+$profiles = @()
+foreach ($name in $staticContracts) {
+    $results += Invoke-NpmContract -Name $name -Browser $false
+}
 
-    if (Test-Path -LiteralPath $profile) {
-        $resolvedProfile = [IO.Path]::GetFullPath($profile)
-        if (-not $resolvedProfile.StartsWith($resolvedRuntime + "\", [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Unsafe browser profile cleanup target."
-        }
+$browserIndex = 0
+foreach ($name in $browserContracts) {
+    $browserIndex += 1
+    $profile = Join-Path $resolvedRuntime "frontend-contract-cdp-profile-$browserIndex"
+    $profiles += $profile
+    $resolvedProfile = [IO.Path]::GetFullPath($profile)
+    if (-not $resolvedProfile.StartsWith($resolvedRuntime + "\", [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Unsafe browser profile target."
+    }
+    if (Test-Path -LiteralPath $resolvedProfile) {
         Remove-Item -LiteralPath $resolvedProfile -Recurse -Force
     }
-    $chrome = Start-Process -FilePath $resolvedChromium -ArgumentList @(
-        "--headless=new",
-        "--disable-gpu",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--remote-debugging-address=127.0.0.1",
-        "--remote-debugging-port=$CdpPort",
-        "--user-data-dir=$profile",
-        "about:blank"
-    ) -PassThru -WindowStyle Hidden
-    $ready = $false
-    for ($attempt = 0; $attempt -lt 120; $attempt++) {
-        try {
-            $null = Invoke-RestMethod -Uri "http://127.0.0.1:$CdpPort/json/version" -TimeoutSec 1
-            $ready = $true
-            break
-        } catch {
-            Start-Sleep -Milliseconds 250
+    $chrome = $null
+    try {
+        $chrome = Start-Process -FilePath $resolvedChromium -ArgumentList @(
+            "--headless=new",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--remote-debugging-address=127.0.0.1",
+            "--remote-debugging-port=$CdpPort",
+            "--user-data-dir=$resolvedProfile",
+            "about:blank"
+        ) -PassThru -WindowStyle Hidden
+        $ready = $false
+        for ($attempt = 0; $attempt -lt 120; $attempt++) {
+            try {
+                $null = Invoke-RestMethod -Uri "http://127.0.0.1:$CdpPort/json/version" -TimeoutSec 1
+                $ready = $true
+                break
+            } catch {
+                Start-Sleep -Milliseconds 250
+            }
         }
-    }
-    if (-not $ready) {
-        throw "Chromium CDP did not become ready."
-    }
-    foreach ($name in $browserContracts) {
+        if (-not $ready) {
+            throw "Chromium CDP did not become ready."
+        }
         $results += Invoke-NpmContract -Name $name -Browser $true
-    }
-} finally {
-    if ($null -ne $chrome -and -not $chrome.HasExited) {
-        Stop-Process -Id $chrome.Id -Force -ErrorAction SilentlyContinue
-        $chrome.WaitForExit(5000) | Out-Null
-    }
-    if (Test-Path -LiteralPath $profile) {
-        $resolvedProfile = [IO.Path]::GetFullPath($profile)
-        if ($resolvedProfile.StartsWith($resolvedRuntime + "\", [StringComparison]::OrdinalIgnoreCase)) {
-            Remove-Item -LiteralPath $resolvedProfile -Recurse -Force -ErrorAction SilentlyContinue
+    } finally {
+        $scopedChromeProcesses = @(
+            Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" |
+                Where-Object {
+                    $_.CommandLine -and
+                    $_.CommandLine.IndexOf($resolvedProfile, [StringComparison]::OrdinalIgnoreCase) -ge 0
+                }
+        )
+        foreach ($item in $scopedChromeProcesses) {
+            Stop-Process -Id ([int]$item.ProcessId) -Force -ErrorAction SilentlyContinue
+        }
+        if ($null -ne $chrome -and -not $chrome.HasExited) {
+            Stop-Process -Id $chrome.Id -Force -ErrorAction SilentlyContinue
+        }
+        for ($attempt = 0; $attempt -lt 100; $attempt++) {
+            if (-not (Get-NetTCPConnection -LocalPort $CdpPort -State Listen -ErrorAction SilentlyContinue)) { break }
+            Start-Sleep -Milliseconds 100
+        }
+        if (Get-NetTCPConnection -LocalPort $CdpPort -State Listen -ErrorAction SilentlyContinue) {
+            throw "Scoped Chromium CDP process did not stop."
+        }
+        if (Test-Path -LiteralPath $resolvedProfile) {
+            Remove-Item -LiteralPath $resolvedProfile -Recurse -Force -ErrorAction Stop
         }
     }
 }
@@ -183,7 +202,7 @@ $report = [ordered]@{
     browserFixtureContractCount = $browserContracts.Count
     fixtureBrowserContractsAreNotLiveProductEvidence = $true
     results = $results
-    browserProfileCleaned = -not (Test-Path -LiteralPath $profile)
+    browserProfileCleaned = (@($profiles | Where-Object { Test-Path -LiteralPath $_ }).Count -eq 0)
     credentialsIncluded = $false
     productionWrites = 0
     status = $(if ($failed.Count -eq 0) { "PASS" } else { "FAIL" })
