@@ -162,8 +162,11 @@ export function clearGeoCache() {
 
 // ─── NDVI ───────────────────────────────────────────────────────────────────
 
-export async function getNDVIHistory(fieldId, days = 90) {
-  const { data } = await client.get(`ndvi/${fieldId}/history`, { params: { days } });
+export async function getNDVIHistory(fieldId, days = 90, options = {}) {
+  const { data } = await client.get(`ndvi/${fieldId}/history`, {
+    params: { days },
+    signal: options.signal,
+  });
   return data;
 }
 

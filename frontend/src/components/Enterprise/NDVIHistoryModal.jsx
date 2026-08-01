@@ -15,7 +15,7 @@
  */
 
 import { useState, useEffect, useMemo } from 'react';
-import apiClient from '../../api/client';
+import { getNDVIHistory } from '../../api/client';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, Area, AreaChart,
@@ -87,19 +87,29 @@ export default function NDVIHistoryModal({ field, onClose }) {
   useEffect(() => {
     if (!field?.id) {
       setLoading(false);
-      return;
+      return undefined;
     }
+    const controller = new AbortController();
     setLoading(true);
     setError(null);
 
-    apiClient.get(`/api/ndvi/${field.id}/history`, { params: { days: 30 } })
-      .then(r => setNdviHistory(r.data || []))
+    getNDVIHistory(field.id, 30, { signal: controller.signal })
+      .then(data => {
+        if (!controller.signal.aborted) {
+          setNdviHistory(Array.isArray(data?.records) ? data.records : []);
+        }
+      })
       .catch(err => {
+        if (controller.signal.aborted || err?.code === 'ERR_CANCELED') return;
         console.error('NDVI history error:', err);
         setError('Не удалось загрузить историю NDVI');
         setNdviHistory([]);
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+
+    return () => controller.abort();
   }, [field?.id]);
 
   // Подготовка данных для графика
