@@ -25,7 +25,7 @@ export default function Header({ title, subtitle, currentView, alertCount, mobil
         <div className="flex min-w-0 items-center gap-3">
           <button
             type="button"
-            className="inline-flex h-10 w-10 flex-none items-center justify-center rounded-lg border border-agro-border text-agro-text hover:bg-agro-hover focus:outline-none focus:ring-2 focus:ring-agro-accent md:hidden"
+            className="inline-flex h-11 w-11 flex-none items-center justify-center rounded-lg border border-agro-border text-agro-text hover:bg-agro-hover focus:outline-none focus:ring-2 focus:ring-agro-accent md:hidden"
             aria-label="Открыть основную навигацию"
             aria-expanded={mobileNavigationOpen}
             onClick={onMobileNavigationToggle}

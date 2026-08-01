@@ -122,7 +122,30 @@ function FieldRow({ field, onViewGraph, style }) {
     >
       {/* Контур */}
       <td style={{ ...tdStyle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 0 }}>
-        {field.name || '—'}
+        <button
+          type="button"
+          aria-label={`Открыть историю NDVI поля ${field.name || field.id}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            handleRowClick();
+          }}
+          style={{
+            maxWidth: '100%',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            border: 0,
+            padding: '4px 2px',
+            background: 'transparent',
+            color: 'inherit',
+            cursor: 'pointer',
+            textDecoration: 'underline',
+            textDecorationColor: 'transparent',
+            textUnderlineOffset: 3,
+          }}
+        >
+          {field.name || '—'}
+        </button>
       </td>
       {/* Культура */}
       <td style={{ ...tdStyle, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -217,6 +240,7 @@ function FilterSelect({ value, onChange, options, label, allLabel = 'Все' }) 
     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
       <label style={{ fontSize: 12, color: '#6b8578', whiteSpace: 'nowrap' }}>{label}:</label>
       <select
+        aria-label={label}
         value={value}
         onChange={e => onChange(e.target.value)}
         style={{
@@ -362,6 +386,7 @@ export default function EnterpriseFieldsTable({
         }}
       >
         <input
+          aria-label="Поиск по контуру"
           value={search}
           onChange={e => { setSearch(e.target.value); setPage(0); }}
           placeholder="🔍  Поиск по контуру..."
@@ -439,15 +464,35 @@ export default function EnterpriseFieldsTable({
                 {columnHeaders.map(ch => (
                   <th
                     key={ch.key}
-                    onClick={() => handleSort(ch.key)}
+                    aria-sort={sortKey === ch.key ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
                     style={{
                       ...thStyle,
                       textAlign: ch.align || 'left',
                       width: ch.width || 'auto',
                     }}
                   >
-                    {ch.label}
-                    <SortIcon active={sortKey === ch.key} dir={sortDir} />
+                    <button
+                      type="button"
+                      onClick={() => handleSort(ch.key)}
+                      aria-label={`Сортировать по столбцу ${ch.label}`}
+                      style={{
+                        display: 'inline-flex',
+                        width: '100%',
+                        alignItems: 'center',
+                        justifyContent: ch.align === 'right' ? 'flex-end' : ch.align === 'center' ? 'center' : 'flex-start',
+                        border: 0,
+                        padding: 0,
+                        background: 'transparent',
+                        color: 'inherit',
+                        cursor: 'pointer',
+                        font: 'inherit',
+                        textTransform: 'inherit',
+                        letterSpacing: 'inherit',
+                      }}
+                    >
+                      {ch.label}
+                      <SortIcon active={sortKey === ch.key} dir={sortDir} />
+                    </button>
                   </th>
                 ))}
               </tr>

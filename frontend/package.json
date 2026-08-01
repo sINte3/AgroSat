@@ -15,6 +15,7 @@
     "test:vector-raster": "node scripts/test-vector-raster-architecture.mjs",
     "test:index-request-lifecycle": "node scripts/test-index-request-lifecycle.mjs",
     "test:enterprise-ndvi-history": "node scripts/test-enterprise-ndvi-history.mjs",
+    "test:program-r1-accessibility": "node scripts/test-program-r1-accessibility.mjs",
     "test:vector-raster-browser": "node scripts/test-vector-raster-browser.mjs",
     "benchmark:map-vector": "node scripts/benchmark-map-vector.mjs",
     "test:pixel-anomaly": "node scripts/test-pixel-anomaly-workflow.mjs",

@@ -14,7 +14,7 @@
  *   - Адаптив: на мобиле fullscreen, на десктопе — centered modal 640px
  */
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { getNDVIHistory } from '../../api/client';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
@@ -82,6 +82,49 @@ export default function NDVIHistoryModal({ field, onClose }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [showAll, setShowAll] = useState(false);
+  const dialogRef = useRef(null);
+  const closeButtonRef = useRef(null);
+  const dialogTitleId = `ndvi-history-title-${field?.id || 'field'}`;
+
+  useEffect(() => {
+    const previouslyFocused = document.activeElement;
+    const focusFrame = requestAnimationFrame(() => closeButtonRef.current?.focus());
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      const focusable = Array.from(dialog.querySelectorAll(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+      ));
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      cancelAnimationFrame(focusFrame);
+      document.removeEventListener('keydown', handleKeyDown);
+      if (previouslyFocused instanceof HTMLElement && document.contains(previouslyFocused)) {
+        previouslyFocused.focus();
+      }
+    };
+  }, [onClose]);
 
   // Загрузка NDVI при открытии модала — только для одного поля
   useEffect(() => {
@@ -157,6 +200,11 @@ export default function NDVIHistoryModal({ field, onClose }) {
       onClick={onClose}
     >
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={dialogTitleId}
+        tabIndex={-1}
         onClick={e => e.stopPropagation()}
         style={{
           background: '#f8faf9',
@@ -183,6 +231,7 @@ export default function NDVIHistoryModal({ field, onClose }) {
           }}
         >
           <h2
+            id={dialogTitleId}
             style={{
               margin: 0,
               fontSize: 16,
@@ -193,6 +242,9 @@ export default function NDVIHistoryModal({ field, onClose }) {
             NDVI История — {field?.name || `Поле #${field?.id}`}
           </h2>
           <button
+            ref={closeButtonRef}
+            type="button"
+            aria-label="Закрыть историю NDVI"
             onClick={onClose}
             style={{
               background: 'transparent',
@@ -200,8 +252,8 @@ export default function NDVIHistoryModal({ field, onClose }) {
               color: '#6b8578',
               fontSize: 22,
               cursor: 'pointer',
-              width: 32,
-              height: 32,
+              width: 44,
+              height: 44,
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'center',

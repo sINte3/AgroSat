@@ -88,6 +88,8 @@ function AppLayout() {
   const [selectedInspectionId, setSelectedInspectionId] = useState(initialRoute.selectedInspectionId);
   const [enterprises, setEnterprises] = useState([]);
   const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
+  const closeMobileNavigation = useCallback(() => setMobileNavigationOpen(false), []);
+  const toggleMobileNavigation = useCallback(() => setMobileNavigationOpen(open => !open), []);
   const routeAtRender = resolvePathname(location.pathname);
   const role = user?.role;
 
@@ -291,7 +293,7 @@ function AppLayout() {
         onNavigate={handleNavigate}
         enterprises={enterprises}
         mobileOpen={mobileNavigationOpen}
-        onMobileClose={() => setMobileNavigationOpen(false)}
+        onMobileClose={closeMobileNavigation}
       />
 
       <main className="flex-1 overflow-hidden relative">
@@ -299,7 +301,7 @@ function AppLayout() {
           {...getHeaderInfo()}
           currentView={view}
           mobileNavigationOpen={mobileNavigationOpen}
-          onMobileNavigationToggle={() => setMobileNavigationOpen(open => !open)}
+          onMobileNavigationToggle={toggleMobileNavigation}
         />
         {renderContent()}
       </main>

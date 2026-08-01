@@ -242,6 +242,7 @@ export default function FieldListPanel({
           <div className="relative mb-2">
             <input
               type="text"
+              aria-label="Поиск поля"
               placeholder="Поиск поля"
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
@@ -282,6 +283,7 @@ export default function FieldListPanel({
           {/* Crop filter dropdown */}
           <div className="flex gap-2 mb-2">
             <select
+              aria-label="Фильтр по культуре"
               value={cropFilter || ''}
               onChange={e => setCropFilter(e.target.value || null)}
               className="flex-1 px-2 py-1.5 text-xs border border-gray-200 rounded-lg bg-gray-50 text-gray-700 focus:outline-none focus:ring-2 focus:ring-green-500/30 focus:border-green-500"
@@ -485,12 +487,17 @@ export default function FieldListPanel({
             const indices = cov?.indices || {};
 
             return (
-              <div
+              <button
+                type="button"
                 key={field.id}
                 onClick={() => onFieldSelect(field.id)}
                 onMouseEnter={() => onFieldHover?.(field.id)}
                 onMouseLeave={() => onFieldHover?.(null)}
-                className={`px-4 py-3 border-b border-gray-100 cursor-pointer transition-colors hover:bg-gray-50 ${
+                onFocus={() => onFieldHover?.(field.id)}
+                onBlur={() => onFieldHover?.(null)}
+                aria-label={`Выбрать поле ${field.name}`}
+                aria-pressed={selectedFieldId === field.id}
+                className={`block w-full px-4 py-3 border-b border-gray-100 cursor-pointer text-left transition-colors hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-green-600 ${
                   highlightedFieldId === field.id ? 'bg-green-50' : ''
                 } ${selectedFieldId === field.id ? 'bg-green-50 border-l-4 border-l-green-500' : ''}`}
               >
@@ -595,7 +602,7 @@ export default function FieldListPanel({
                     )}
                   </div>
                 </div>
-              </div>
+              </button>
             );
           })}
         </div>

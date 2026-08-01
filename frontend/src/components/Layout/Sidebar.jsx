@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import {
   getNavigationKeysForRole,
@@ -21,6 +21,8 @@ const ROLE_LABELS = { admin: 'Администратор', manager: 'Менед�
 
 export default function Sidebar({ activeView, onNavigate, mobileOpen, onMobileClose }) {
   const { user, logout } = useAuth();
+  const drawerRef = useRef(null);
+  const closeButtonRef = useRef(null);
   const profileName = user?.name || user?.full_name || user?.username || 'Профиль';
   const roleLabel = ROLE_LABELS[user?.role] || 'Профиль';
   const navigationItems = getNavigationKeysForRole(user?.role)
@@ -29,11 +31,43 @@ export default function Sidebar({ activeView, onNavigate, mobileOpen, onMobileCl
 
   useEffect(() => {
     if (!mobileOpen) return undefined;
+    const previouslyFocused = document.activeElement;
+    const focusFrame = requestAnimationFrame(() => closeButtonRef.current?.focus());
     const handleKeyDown = event => {
-      if (event.key === 'Escape') onMobileClose();
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onMobileClose();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const drawer = drawerRef.current;
+      if (!drawer) return;
+      const focusable = Array.from(drawer.querySelectorAll(
+        'button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ));
+      if (focusable.length === 0) {
+        event.preventDefault();
+        drawer.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    return () => {
+      cancelAnimationFrame(focusFrame);
+      window.removeEventListener('keydown', handleKeyDown);
+      if (previouslyFocused instanceof HTMLElement && document.contains(previouslyFocused)) {
+        previouslyFocused.focus();
+      }
+    };
   }, [mobileOpen, onMobileClose]);
   const isActive = (key) => {
     if (activeView === 'field-detail') return key === 'fields';
@@ -46,14 +80,21 @@ export default function Sidebar({ activeView, onNavigate, mobileOpen, onMobileCl
       {mobileOpen && (
         <button type="button" className="fixed inset-0 z-30 bg-slate-950/40 md:hidden" aria-label="Закрыть навигацию" onClick={onMobileClose} />
       )}
-    <aside className={`${mobileOpen ? 'translate-x-0' : '-translate-x-full'} fixed inset-y-0 left-0 z-40 flex w-72 flex-shrink-0 flex-col border-r border-agro-border bg-white transition-transform md:static md:h-screen md:w-64 md:translate-x-0`}>
+    <aside
+      ref={drawerRef}
+      role={mobileOpen ? 'dialog' : undefined}
+      aria-modal={mobileOpen ? 'true' : undefined}
+      aria-label={mobileOpen ? 'Основная навигация' : undefined}
+      tabIndex={mobileOpen ? -1 : undefined}
+      className={`${mobileOpen ? 'visible translate-x-0' : 'invisible -translate-x-full md:visible'} fixed inset-y-0 left-0 z-40 flex w-72 flex-shrink-0 flex-col border-r border-agro-border bg-white transition-transform md:static md:h-screen md:w-64 md:translate-x-0`}
+    >
       {/* Logo */}
       <div className="flex h-16 items-center gap-3 border-b border-agro-border px-5">
         <div className="w-7 h-7 rounded-full bg-agro-accent flex items-center justify-center">
           <span className="text-white font-bold text-xs">A</span>
         </div>
         <div className="min-w-0 flex-1"><p className="text-base font-bold text-agro-text">AgroSat</p><p className="text-xs text-agro-muted">Мониторинг полей</p></div>
-        <button type="button" onClick={onMobileClose} aria-label="Закрыть навигацию" className="rounded-lg p-2 text-agro-muted hover:bg-agro-hover focus:outline-none focus:ring-2 focus:ring-agro-accent md:hidden">×</button>
+        <button ref={closeButtonRef} type="button" onClick={onMobileClose} aria-label="Закрыть навигацию" className="inline-flex h-11 w-11 items-center justify-center rounded-lg text-agro-muted hover:bg-agro-hover focus:outline-none focus:ring-2 focus:ring-agro-accent md:hidden">×</button>
       </div>
 
       {/* Navigation */}

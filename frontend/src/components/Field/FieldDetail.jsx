@@ -158,7 +158,12 @@ export default function FieldDetail({ fieldId, onBack }) {
     <div className="flex flex-col h-full">
       {/* Шапка */}
       <div className="flex items-center gap-3 py-3 pl-16 pr-4 border-b border-agro-surface2 md:px-4">
-        <button onClick={onBack} className="text-agro-muted hover:text-agro-text transition-colors">
+        <button
+          type="button"
+          onClick={onBack}
+          aria-label="Вернуться к списку полей"
+          className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-agro-muted transition-colors hover:text-agro-text focus:outline-none focus:ring-2 focus:ring-agro-accent"
+        >
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
           </svg>
@@ -170,10 +175,13 @@ export default function FieldDetail({ fieldId, onBack }) {
       </div>
 
       {/* Табы */}
-      <div className="flex overflow-x-auto border-b border-agro-surface2 px-4">
+      <div className="flex overflow-x-auto border-b border-agro-surface2 px-4" role="tablist" aria-label="Разделы поля">
         {tabs.map((tab) => (
           <button
             key={tab.key}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === tab.key}
             onClick={() => setActiveTab(tab.key)}
             className={`min-h-11 flex-none px-4 py-2.5 text-sm border-b-2 transition-colors ${
               activeTab === tab.key
@@ -262,6 +270,8 @@ export default function FieldDetail({ fieldId, onBack }) {
             {/* Sub-selector: NDVI + multi-indices */}
             <div className="flex flex-wrap gap-2">
               <button
+                type="button"
+                aria-pressed={activeIndex === 'ndvi'}
                 onClick={() => setActiveIndex('ndvi')}
                 className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
                   activeIndex === 'ndvi'
@@ -274,6 +284,8 @@ export default function FieldDetail({ fieldId, onBack }) {
               {MULTI_INDICES.map(code => (
                 <button
                   key={code}
+                  type="button"
+                  aria-pressed={activeIndex === code}
                   onClick={() => setActiveIndex(code)}
                   className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
                     activeIndex === code
