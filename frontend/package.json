@@ -13,6 +13,7 @@
     "test:executive-browser": "node scripts/test-executive-accountability-browser.mjs",
     "benchmark:map-baseline": "node scripts/benchmark-map-baseline.mjs",
     "test:vector-raster": "node scripts/test-vector-raster-architecture.mjs",
+    "test:index-request-lifecycle": "node scripts/test-index-request-lifecycle.mjs",
     "test:vector-raster-browser": "node scripts/test-vector-raster-browser.mjs",
     "benchmark:map-vector": "node scripts/benchmark-map-vector.mjs",
     "test:pixel-anomaly": "node scripts/test-pixel-anomaly-workflow.mjs",

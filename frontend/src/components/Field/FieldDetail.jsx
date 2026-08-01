@@ -24,39 +24,66 @@ export default function FieldDetail({ fieldId, onBack }) {
   const [indexLoading, setIndexLoading] = useState(false);
   const [indexError, setIndexError] = useState(null);
   const indexMounted = useRef(true);
+  const indexRequestController = useRef(null);
+  const indexRequestGeneration = useRef(0);
 
   const fetchMultiIndex = useCallback(async (fid, code) => {
-    if (!fid || code === 'ndvi') { setLatestIndex(null); setIndexHistory([]); return; }
+    indexRequestController.current?.abort();
+    const controller = new AbortController();
+    const generation = indexRequestGeneration.current + 1;
+    indexRequestController.current = controller;
+    indexRequestGeneration.current = generation;
+
+    if (!fid || code === 'ndvi') {
+      setLatestIndex(null);
+      setIndexHistory([]);
+      setIndexLoading(false);
+      return;
+    }
     setIndexLoading(true);
     setIndexError(null);
     try {
       const [latestRes, historyRes] = await Promise.all([
-        getSatelliteIndexLatest(fid, code),
-        getSatelliteIndexHistory(fid, code, { days: 30 }),
+        getSatelliteIndexLatest(fid, code, { signal: controller.signal }),
+        getSatelliteIndexHistory(fid, code, { days: 30, signal: controller.signal }),
       ]);
-      if (!indexMounted.current) return;
+      if (!indexMounted.current || controller.signal.aborted || generation !== indexRequestGeneration.current) return;
       setLatestIndex(latestRes);
       setIndexHistory(Array.isArray(historyRes?.records) ? historyRes.records : []);
     } catch (err) {
-      if (!indexMounted.current) return;
+      if (!indexMounted.current || controller.signal.aborted || generation !== indexRequestGeneration.current || err?.code === 'ERR_CANCELED') return;
       setIndexError('Ошибка загрузки индекса');
       setLatestIndex(null);
       setIndexHistory([]);
       console.error(err);
     } finally {
-      if (indexMounted.current) setIndexLoading(false);
+      if (indexRequestController.current === controller) indexRequestController.current = null;
+      if (indexMounted.current && !controller.signal.aborted && generation === indexRequestGeneration.current) {
+        setIndexLoading(false);
+      }
     }
   }, []);
 
   useEffect(() => {
     indexMounted.current = true;
-    return () => { indexMounted.current = false; };
+    return () => {
+      indexMounted.current = false;
+      indexRequestGeneration.current += 1;
+      indexRequestController.current?.abort();
+      indexRequestController.current = null;
+    };
   }, []);
 
   useEffect(() => {
     if (fieldId && activeTab === 'indices') {
       fetchMultiIndex(typeof fieldId === 'string' ? parseInt(fieldId) : fieldId, activeIndex);
+      return () => indexRequestController.current?.abort();
     }
+    indexRequestGeneration.current += 1;
+    indexRequestController.current?.abort();
+    indexRequestController.current = null;
+    setIndexLoading(false);
+    return undefined;
   }, [fieldId, activeTab, activeIndex, fetchMultiIndex]);
 
   useEffect(() => {

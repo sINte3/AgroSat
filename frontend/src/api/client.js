@@ -245,6 +245,7 @@ export async function getLocationWeather(lat, lon) {
 export async function getSatelliteIndexLatest(fieldId, indexCode, options = {}) {
   const { data } = await client.get(`satellite-indices/${fieldId}/latest`, {
     params: { index_code: indexCode, include_cloudy: options.includeCloudy ?? false },
+    signal: options.signal,
   });
   return data;
 }
@@ -252,6 +253,7 @@ export async function getSatelliteIndexLatest(fieldId, indexCode, options = {}) 
 export async function getSatelliteIndexHistory(fieldId, indexCode, options = {}) {
   const { data } = await client.get(`satellite-indices/${fieldId}/history`, {
     params: { index_code: indexCode, days: options.days ?? 30, include_cloudy: options.includeCloudy ?? false },
+    signal: options.signal,
   });
   return data;
 }
