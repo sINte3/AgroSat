@@ -17,7 +17,7 @@ from sqlalchemy.exc import IntegrityError  # noqa: E402
 from api.field_inspections import router  # noqa: E402
 from schemas.field_inspection import (CancelInspectionRequest, CompleteInspectionRequest,
     CreateInspectionRequest, TransitionRequest, UpdateInspectionRequest)  # noqa: E402
-from services.field_inspections import (ActorScope, create, fingerprint, get, list_items,
+from services.field_inspections import (ITEM_SELECT, ActorScope, create, fingerprint, get, list_items,
                                         transition, update)  # noqa: E402
 
 
@@ -93,6 +93,12 @@ def integrity_error():
 
 
 class ContractTests(unittest.TestCase):
+    def test_nullable_due_date_projects_a_boolean_overdue_flag(self):
+        self.assertIn(
+            "COALESCE(i.status IN ('pending','in_progress') AND i.due_date < :today, false) AS is_overdue",
+            ITEM_SELECT,
+        )
+
     def test_actor_scope_is_frozen_scalar_data_and_session_expires_on_commit(self):
         from dataclasses import FrozenInstanceError
         from database import SessionLocal

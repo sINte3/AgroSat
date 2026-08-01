@@ -18,7 +18,7 @@ SELECT i.id, i.field_id, f.name AS field_name, i.enterprise_id, e.name AS enterp
  i.assigned_to_id, assignee.full_name AS assigned_to_name,
  i.source, i.source_priority, i.source_attention_score, i.source_observation_date,
  i.source_reason_codes, i.title, i.instructions, i.due_date, i.status,
- (i.status IN ('pending','in_progress') AND i.due_date < :today) AS is_overdue,
+ COALESCE(i.status IN ('pending','in_progress') AND i.due_date < :today, false) AS is_overdue,
  i.version, i.created_at, i.updated_at, i.started_at, i.completed_at, i.cancelled_at,
  i.completion_summary, i.cancellation_reason
 FROM field_inspections i JOIN fields f ON f.id=i.field_id
