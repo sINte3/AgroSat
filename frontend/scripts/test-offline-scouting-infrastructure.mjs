@@ -9,6 +9,11 @@ import {
   offlineScope,
 } from '../src/offline/offlineScoutingStore.js';
 import { classifyOfflineSyncError } from '../src/offline/offlineScoutingSync.js';
+import {
+  isSessionRevoked,
+  isTransientSessionFailure,
+  readCachedActiveUser,
+} from '../src/offline/offlineSession.js';
 
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -82,6 +87,30 @@ assert.deepEqual(classifyOfflineSyncError({ code: 'ECONNABORTED' }), {
   category: 'transient',
   retryable: true,
 });
+
+const cachedUser = readCachedActiveUser({
+  getItem: () => JSON.stringify({
+    id: 5,
+    role: 'agronomist',
+    enterprise_id: 7,
+    is_active: true,
+  }),
+});
+assert.deepEqual(
+  { id: cachedUser.id, role: cachedUser.role, enterprise_id: cachedUser.enterprise_id },
+  { id: 5, role: 'agronomist', enterprise_id: 7 },
+);
+assert.equal(readCachedActiveUser({
+  getItem: () => JSON.stringify({ id: 5, role: 'viewer', enterprise_id: 7, is_active: false }),
+}), null);
+assert.equal(readCachedActiveUser({
+  getItem: () => JSON.stringify({ id: 5, role: 'owner', enterprise_id: 7, is_active: true }),
+}), null);
+assert.equal(isTransientSessionFailure({ code: 'ERR_NETWORK' }), true);
+assert.equal(isTransientSessionFailure({ response: { status: 401 } }), false);
+assert.equal(isSessionRevoked({ response: { status: 401 } }), true);
+assert.equal(isSessionRevoked({ response: { status: 403 } }), true);
+assert.equal(isSessionRevoked({ code: 'ERR_NETWORK' }), false);
 
 for (const required of [
   "const DATABASE_VERSION = 1",

@@ -1,6 +1,11 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import apiClient, { loginWithPassword } from '../api/client';
 import { purgeOfflineScoutingData } from '../offline/offlineScoutingStore.js';
+import {
+  isSessionRevoked,
+  isTransientSessionFailure,
+  readCachedActiveUser,
+} from '../offline/offlineSession.js';
 
 const AuthContext = createContext(null);
 
@@ -33,7 +38,6 @@ export function AuthProvider({ children }) {
 
       return true;
     } catch {
-      console.error('Failed to log in');
       logout();
       return false;
     }
@@ -45,9 +49,16 @@ export function AuthProvider({ children }) {
     try {
       const res = await apiClient.get('auth/me');
       setUser(res.data);
-    } catch {
-      console.error('Revalidation failed');
-      logout();
+      localStorage.setItem('agrosat_user', JSON.stringify(res.data));
+      return true;
+    } catch (error) {
+      const cachedUser = readCachedActiveUser();
+      if (isTransientSessionFailure(error) && cachedUser) {
+        setUser(cachedUser);
+        return false;
+      }
+      if (isSessionRevoked(error) || !cachedUser) logout();
+      return false;
     }
   };
 
@@ -61,9 +72,14 @@ export function AuthProvider({ children }) {
       try {
         const res = await apiClient.get('auth/me');
         setUser(res.data);
-      } catch {
-        console.error('Session initialization failed');
-        logout();
+        localStorage.setItem('agrosat_user', JSON.stringify(res.data));
+      } catch (error) {
+        const cachedUser = readCachedActiveUser();
+        if (isTransientSessionFailure(error) && cachedUser) {
+          setUser(cachedUser);
+        } else {
+          logout();
+        }
       } finally {
         setLoading(false);
       }
@@ -83,7 +99,14 @@ export function AuthProvider({ children }) {
     };
 
     window.addEventListener('storage', handleStorageChange);
-    return () => window.removeEventListener('storage', handleStorageChange);
+    const handleOnline = () => {
+      void revalidateSession();
+    };
+    window.addEventListener('online', handleOnline);
+    return () => {
+      window.removeEventListener('storage', handleStorageChange);
+      window.removeEventListener('online', handleOnline);
+    };
   }, [token]);
 
   return (
