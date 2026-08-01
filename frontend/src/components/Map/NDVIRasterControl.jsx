@@ -37,7 +37,7 @@ export default function NDVIRasterControl({ map, fieldId, onMetadataChange }) {
       : raster.status === 'error' ? 'Не удалось загрузить пиксельный NDVI.' : null;
 
   return (
-    <section className="absolute top-[104px] right-3 z-10 w-[min(18rem,calc(100vw-1.5rem))] rounded-lg border border-slate-200 bg-white/95 p-3 text-xs shadow-lg backdrop-blur-sm max-sm:top-[148px]">
+    <section className="absolute top-[140px] right-3 z-10 w-[min(18rem,calc(100vw-1.5rem))] rounded-lg border border-slate-200 bg-white/95 p-3 text-xs shadow-lg backdrop-blur-sm max-sm:top-[148px]">
       <label className="flex cursor-pointer items-center justify-between gap-3 font-semibold text-slate-800">
         <span>Пиксельный NDVI</span>
         <input

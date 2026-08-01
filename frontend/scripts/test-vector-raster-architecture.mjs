@@ -79,5 +79,6 @@ assert.match(rasterHook, /removeLayer\(NDVI_RASTER_LAYER_ID\)/);
 assert.match(rasterHook, /removeSource\(NDVI_RASTER_SOURCE_ID\)/);
 assert.doesNotMatch(rasterControl, /Sentinel-2/);
 assert.match(rasterControl, /max-sm:top-\[148px\]/);
+assert.match(rasterControl, /top-\[140px\]/);
 
 console.log('TASK209 vector/raster frontend static contract: PASS');
