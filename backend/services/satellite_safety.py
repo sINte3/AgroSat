@@ -1,4 +1,9 @@
-"""Pure credential and provenance guards for satellite write paths."""
+"""Pure credential, provenance, and sanitized provider-error guards."""
+
+from dataclasses import asdict, dataclass
+import json
+
+import httpx
 
 REAL_SATELLITE_SOURCE = "Sentinel-2"
 MOCK_SATELLITE_SOURCE = "Mock/Dev"
@@ -11,6 +16,49 @@ class SatelliteConfigurationError(RuntimeError):
 
 class SatelliteProvenanceError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderErrorClassification:
+    category: str
+    retryable: bool
+    status_code: int | None = None
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+def classify_provider_error(error: BaseException) -> ProviderErrorClassification:
+    """Classify provider failures without retaining exception text or response bodies."""
+    if isinstance(error, SatelliteConfigurationError):
+        return ProviderErrorClassification("configuration", False)
+    if isinstance(error, httpx.TimeoutException):
+        return ProviderErrorClassification("timeout", True)
+    if isinstance(error, httpx.HTTPStatusError):
+        status_code = error.response.status_code
+        if status_code in (401, 403):
+            return ProviderErrorClassification("authentication", False, status_code)
+        if status_code == 429:
+            return ProviderErrorClassification("quota_or_rate_limit", True, status_code)
+        if status_code in (408, 425):
+            return ProviderErrorClassification("timeout", True, status_code)
+        if 500 <= status_code <= 599:
+            return ProviderErrorClassification("provider_unavailable", True, status_code)
+        if 400 <= status_code <= 499:
+            return ProviderErrorClassification("request_rejected", False, status_code)
+        return ProviderErrorClassification("unexpected_http_status", False, status_code)
+    if isinstance(error, httpx.RequestError):
+        return ProviderErrorClassification("network", True)
+    if isinstance(error, (json.JSONDecodeError, IndexError, KeyError, TypeError, ValueError)):
+        return ProviderErrorClassification("invalid_response", False)
+    return ProviderErrorClassification("provider_error", False)
+
+
+def safe_provider_error_summary(error: BaseException) -> str:
+    classification = classify_provider_error(error)
+    status = "" if classification.status_code is None else f" status={classification.status_code}"
+    retryable = str(classification.retryable).lower()
+    return f"Sentinel provider error category={classification.category}{status} retryable={retryable}"
 
 
 def validate_credentials(client_id, client_secret):

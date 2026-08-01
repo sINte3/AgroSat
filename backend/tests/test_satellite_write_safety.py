@@ -114,6 +114,61 @@ class CredentialAndFactoryTests(unittest.TestCase):
             self.assertIsNotNone(importlib.import_module("main"))
 
 
+class ProviderErrorClassificationTests(unittest.TestCase):
+    @staticmethod
+    def http_error(status_code):
+        import httpx
+        request = httpx.Request("POST", "https://provider.invalid/bounded")
+        response = httpx.Response(status_code, request=request, text="provider-body-must-not-escape")
+        return httpx.HTTPStatusError("unsafe-exception-text", request=request, response=response)
+
+    def test_auth_quota_request_and_provider_statuses_are_distinct(self):
+        from services.satellite_safety import classify_provider_error
+        expected = {
+            401: ("authentication", False),
+            403: ("authentication", False),
+            429: ("quota_or_rate_limit", True),
+            422: ("request_rejected", False),
+            503: ("provider_unavailable", True),
+        }
+        for status_code, (category, retryable) in expected.items():
+            with self.subTest(status_code=status_code):
+                result = classify_provider_error(self.http_error(status_code))
+                self.assertEqual((category, retryable, status_code), (result.category, result.retryable, result.status_code))
+
+    def test_timeout_network_invalid_response_and_unknown_are_distinct(self):
+        import httpx
+        from services.satellite_safety import classify_provider_error
+        request = httpx.Request("POST", "https://provider.invalid/bounded")
+        cases = [
+            (httpx.ReadTimeout("sensitive-timeout", request=request), "timeout", True),
+            (httpx.ConnectError("sensitive-network", request=request), "network", True),
+            (KeyError("sensitive-json-key"), "invalid_response", False),
+            (RuntimeError("sensitive-unknown"), "provider_error", False),
+        ]
+        for error, category, retryable in cases:
+            with self.subTest(category=category):
+                result = classify_provider_error(error)
+                self.assertEqual((category, retryable), (result.category, result.retryable))
+
+    def test_safe_summary_never_contains_exception_or_response_body(self):
+        from services.satellite_safety import safe_provider_error_summary
+        error = self.http_error(429)
+        summary = safe_provider_error_summary(error)
+        self.assertIn("category=quota_or_rate_limit", summary)
+        self.assertIn("status=429", summary)
+        for forbidden in ("unsafe-exception-text", "provider-body-must-not-escape"):
+            self.assertNotIn(forbidden, summary)
+
+    def test_release_paths_do_not_log_or_store_raw_provider_exceptions(self):
+        collector = (BACKEND / "scripts" / "collect_satellite_indices.py").read_text(encoding="utf-8")
+        legacy = (BACKEND / "services" / "satellite.py").read_text(encoding="utf-8")
+        self.assertNotIn("field_errors.append(str(e))", collector)
+        self.assertNotIn("Satellite collection failed: {e}", collector)
+        self.assertNotIn("e.response.text", legacy)
+        self.assertNotIn("Sentinel Hub: {e}", legacy)
+
+
 class ProvenanceTests(unittest.TestCase):
     def test_fetch_rejects_source_only_mock_before_execute(self):
         from services.satellite import fetch_ndvi_for_field_date

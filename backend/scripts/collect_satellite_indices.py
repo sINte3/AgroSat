@@ -78,8 +78,10 @@ from services.satellite_collection import (
 )
 from services.satellite_safety import (
     SatelliteConfigurationError,
+    classify_provider_error,
     require_real_provenance,
     require_real_service,
+    safe_provider_error_summary,
     validate_credentials,
 )
 # -- Constants --
@@ -976,10 +978,11 @@ def run_real(args: argparse.Namespace) -> None:
             )
             total_sentinel_calls += 1
             print(f"      Sentinel Hub returned {len(flat_records)} flat records (per-interval, per-index)")
-        except Exception as e:
-            err_msg = f"Satellite collection failed: {e}"
+        except Exception as error:
+            provider_error = classify_provider_error(error)
+            err_msg = safe_provider_error_summary(error)
             print(f"      ERROR: {err_msg}")
-            field_errors.append(str(e))
+            field_errors.append(err_msg)
             total_errors += 1
             per_field_results.append({
                 "field_id": fid,
@@ -994,6 +997,7 @@ def run_real(args: argparse.Namespace) -> None:
                 "db_inserted": field_db_inserted,
                 "db_skipped": field_db_skipped,
                 "collection_error": err_msg,
+                "provider_error": provider_error.as_dict(),
             })
             continue
 
@@ -1359,4 +1363,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -23,6 +23,7 @@ from services.satellite_safety import (
     SatelliteConfigurationError,
     require_payload_provenance,
     require_real_service,
+    safe_provider_error_summary,
     validate_credentials,
 )
 
@@ -222,8 +223,8 @@ class SentinelHubService:
         """
         try:
             token = self._get_access_token()
-        except Exception as e:
-            logger.error(f"Ошибка получения токена Sentinel Hub: {e}")
+        except Exception as error:
+            logger.error(safe_provider_error_summary(error))
             return None
 
         # Преобразуем WKT в GeoJSON
@@ -283,11 +284,11 @@ class SentinelHubService:
 
             return self._parse_stats_response(data)
 
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Sentinel Hub API error: {e.response.status_code} — {e.response.text}")
+        except httpx.HTTPStatusError as error:
+            logger.error(safe_provider_error_summary(error))
             return None
-        except Exception as e:
-            logger.error(f"Непредвиденная ошибка при запросе NDVI: {e}")
+        except Exception as error:
+            logger.error(safe_provider_error_summary(error))
             return None
 
     def _parse_stats_response(self, response_data: dict) -> Optional[dict]:
@@ -332,8 +333,8 @@ class SentinelHubService:
                 "satellite": REAL_SATELLITE_SOURCE,
             }
 
-        except (KeyError, IndexError, TypeError) as e:
-            logger.error(f"Ошибка парсинга ответа Sentinel Hub: {e}")
+        except (KeyError, IndexError, TypeError) as error:
+            logger.error(safe_provider_error_summary(error))
             return None
 
     def get_latest_ndvi(self, geometry_wkt: str) -> Optional[dict]:
