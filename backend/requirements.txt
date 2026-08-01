@@ -21,7 +21,7 @@ sentinelhub==3.11.5
 
 # HTTP & API
 httpx==0.28.1
-requests==2.31.0
+requests==2.33.0
 
 # AI
 anthropic==0.109.2
@@ -36,7 +36,7 @@ redis==5.0.4
 
 # Config
 python-dotenv==1.2.2
-pydantic-settings==2.14.1
+pydantic-settings==2.14.2
 pydantic==2.13.4
 
 # Utils
