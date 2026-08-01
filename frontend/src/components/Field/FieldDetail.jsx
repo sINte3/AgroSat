@@ -6,6 +6,7 @@ import FieldTelematicsPanel from './FieldTelematicsPanel';
 import YieldMapImportPanel from './YieldMapImportPanel';
 import ProductivityZonePanel from './ProductivityZonePanel';
 import VariableRateRecommendationPanel from './VariableRateRecommendationPanel';
+import { FIRST_PILOT_FEATURES } from '../../config/pilotFeatures';
 
 export default function FieldDetail({ fieldId, onBack }) {
   const [field, setField] = useState(null);
@@ -120,7 +121,9 @@ export default function FieldDetail({ fieldId, onBack }) {
     { key: 'indices', label: 'Индексы' },
     { key: 'yield', label: 'Урожай' },
     { key: 'weather', label: 'Погода' },
-    { key: 'telematics', label: 'Техника' },
+    ...(FIRST_PILOT_FEATURES.wialon
+      ? [{ key: 'telematics', label: 'Техника' }]
+      : []),
     { key: 'alerts', label: `Алерты (${alerts.length})` },
   ];
 
@@ -364,7 +367,7 @@ export default function FieldDetail({ fieldId, onBack }) {
           </>
         )}
 
-        {activeTab === 'telematics' && (
+        {FIRST_PILOT_FEATURES.wialon && activeTab === 'telematics' && (
           <FieldTelematicsPanel
             fieldId={typeof fieldId === 'string' ? parseInt(fieldId) : fieldId}
           />

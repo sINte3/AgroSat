@@ -41,4 +41,6 @@ def test_contract_defines_safe_ui_and_live_blocker():
     value = contract_text()
     assert "contains no write controls" in value
     assert "cancels requests and rejects stale responses" in value
-    assert "Live Wialon validation remains blocked" in value
+    assert "deferred to the next pilot wave: Integrated Operations" in value
+    assert "disabled by default" in value
+    assert "does not require a Wialon token or mapping" in value

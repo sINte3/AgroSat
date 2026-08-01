@@ -2,11 +2,12 @@
 
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from api.auth import get_current_active_user
 from api.dependencies import get_authorized_field_row
+from config import settings
 from database import get_db
 from models.monitoring import User
 from services.cache import cache_get, cache_set
@@ -34,6 +35,11 @@ def get_field_telematics(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user),
 ):
+    # Keep the deferred first-pilot surface non-enumerable. This check runs
+    # before field lookup so disabled deployments expose neither field nor
+    # telematics availability through response differences.
+    if not settings.wialon_enabled:
+        raise HTTPException(status_code=404, detail="Not found")
     field = get_authorized_field_row(field_id, db, current_user)
     ended_at = datetime.now(timezone.utc)
     started_at = ended_at - timedelta(hours=hours)

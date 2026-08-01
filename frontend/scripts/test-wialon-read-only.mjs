@@ -7,10 +7,11 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (name) => readFile(path.join(root, name), 'utf8');
 
-const [api, panel, fieldDetail] = await Promise.all([
+const [api, panel, fieldDetail, pilotFeatures] = await Promise.all([
   read('src/api/telematics.js'),
   read('src/components/Field/FieldTelematicsPanel.jsx'),
   read('src/components/Field/FieldDetail.jsx'),
+  read('src/config/pilotFeatures.js'),
 ]);
 
 assert.ok(api.includes('telematics/fields/${fieldId}'));
@@ -34,5 +35,11 @@ assert.doesNotMatch(panel, /\b(?:POST|PUT|PATCH|DELETE)\b|\.post\(|\.put\(|\.pat
 assert.match(fieldDetail, /FieldTelematicsPanel/);
 assert.match(fieldDetail, /key: 'telematics'/);
 assert.match(fieldDetail, /activeTab === 'telematics'/);
+assert.match(fieldDetail, /FIRST_PILOT_FEATURES\.wialon/);
+assert.match(pilotFeatures, /VITE_WIALON_ENABLED/);
+assert.match(pilotFeatures, /=== 'true'/);
 
-console.log('TASK209_WIALON_FRONTEND_CONTRACT=PASS');
+const { FIRST_PILOT_FEATURES } = await import('../src/config/pilotFeatures.js');
+assert.equal(FIRST_PILOT_FEATURES.wialon, false);
+
+console.log('TASK209_WIALON_FIRST_PILOT_DISABLED_CONTRACT=PASS');

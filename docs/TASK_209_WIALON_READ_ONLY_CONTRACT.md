@@ -58,4 +58,6 @@ The field UI:
 
 ## Validation status
 
-Deterministic contract fixtures may validate mapping, pagination, error classification, tenant-safe cache keys, response filtering, and UI states. They must be labeled fixtures. Live Wialon validation remains blocked until review-approved read-only credentials and tenant mappings are supplied.
+Deterministic contract fixtures may validate mapping, pagination, error classification, tenant-safe cache keys, response filtering, and UI states. They must be labeled fixtures.
+
+For the first AgroSat pilot, Wialon is deferred to the next pilot wave: Integrated Operations. The backend `WIALON_ENABLED` flag and frontend `VITE_WIALON_ENABLED` build flag are disabled by default. While disabled, the backend route returns the same non-enumerating `404` before field lookup, the field UI exposes no telematics tab or action, and the first pilot does not require a Wialon token or mapping. Enabling the later pilot requires separate authorization, configuration of both flags, and renewed live qualification; this PROGRAM R1 completion run does not call Wialon.

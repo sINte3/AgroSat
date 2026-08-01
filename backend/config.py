@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     secret_key: str = ""
     debug: bool = True
     public_registration_enabled: bool = False
+    # First-pilot boundary: Wialon stays disabled until the separately approved
+    # Integrated Operations pilot enables both the backend and frontend flags.
+    wialon_enabled: bool = False
 
     # Database
     database_url: str = ""
