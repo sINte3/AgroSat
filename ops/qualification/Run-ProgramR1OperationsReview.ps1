@@ -55,7 +55,11 @@ $checks = [ordered]@{
     migrationHead0012 = ($ready.components.database.migration_revision -eq "0012_commercial_tenant_boundary")
     compatibilityHealthOk = ($compatibility.status -eq "ok")
     structuredSanitizingJsonLogs = ($loggingSource -match 'class SanitizingJsonFormatter' -and $loggingSource -match 'release_revision')
-    authenticatedLowCardinalityMetrics = ($metricsSource -match 'get_current_active_user' -and $metricsSource -match 'MANAGEMENT_ROLES')
+    authenticatedLowCardinalityMetrics = (
+        $metricsSource -match 'Depends\(get_current_active_user\)' -and
+        $metricsSource -match 'normalize_role\(current_user\)' -and
+        $metricsSource -match '\{"admin",\s*"manager"\}'
+    )
     webStartupHasNoSchedulerOrDdl = (-not ($mainSource -match 'create_all|APScheduler|BackgroundScheduler|AsyncIOScheduler|start_scheduler'))
     wialonBackendDefaultsDisabled = ($configSource -match '(?m)^\s*wialon_enabled:\s*bool\s*=\s*False\s*$')
     wialonDeferralRunbookPresent = ($wialonRunbook -match 'deferred to the next pilot wave: Integrated Operations')
