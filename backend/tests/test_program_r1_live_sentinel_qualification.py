@@ -9,7 +9,7 @@ from datetime import date
 import importlib.util
 from pathlib import Path
 import sys
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import httpx
 import pytest
@@ -77,7 +77,14 @@ def _raster_payload(day: date, size: int = 256):
                 },
             }],
         },
-        "output": {"width": size, "height": size},
+        "output": {
+            "width": size,
+            "height": size,
+            "responses": [{
+                "identifier": "default",
+                "format": {"type": "image/png"},
+            }],
+        },
         "evalscript": "let ndvi = 0.5;",
     }
 
@@ -115,6 +122,50 @@ def test_statistical_request_rejects_window_over_fourteen_days_without_http():
     assert recorder.contract_failure is True
 
 
+def test_cdse_recorder_rejects_planet_and_arbitrary_endpoints_without_http():
+    delegate = Mock()
+    recorder = _recorder(delegate)
+    form = {
+        "grant_type": "client_credentials",
+        "client_id": "fixture-id",
+        "client_secret": "fixture-value",
+    }
+    for url in (
+        HARNESS.PLANET_ENDPOINTS.token_url,
+        HARNESS.PLANET_ENDPOINTS.statistical_url,
+        HARNESS.PLANET_ENDPOINTS.process_url,
+        "https://example.invalid/arbitrary",
+    ):
+        with pytest.raises(HARNESS.RequestContractError):
+            recorder.post(url, data=form)
+    delegate.assert_not_called()
+    assert recorder.counts == {"oauth": 0, "statistical": 0, "raster": 0}
+
+
+def test_statistical_request_rejects_changed_geometry_and_extra_index_without_http():
+    delegate = Mock()
+    payload = _statistical_payload(date(2026, 7, 19), date(2026, 8, 1))
+    payload["input"]["bounds"]["geometry"] = {
+        "type": "Polygon",
+        "coordinates": [[[64.0, 39.0], [64.1, 39.0], [64.0, 39.0]]],
+    }
+    with pytest.raises(HARNESS.RequestContractError):
+        _recorder(delegate).post(HARNESS.STATISTICAL_API_URL, json=payload)
+    delegate.assert_not_called()
+
+    payload = _statistical_payload(date(2026, 7, 19), date(2026, 8, 1))
+    payload["calculations"]["unexpected"] = {}
+    with pytest.raises(HARNESS.RequestContractError):
+        _recorder(delegate).post(HARNESS.STATISTICAL_API_URL, json=payload)
+    delegate.assert_not_called()
+
+    payload = _statistical_payload(date(2026, 7, 19), date(2026, 8, 1))
+    payload["calculations"] = {"evi": {}}
+    with pytest.raises(HARNESS.RequestContractError):
+        _recorder(delegate).post(HARNESS.STATISTICAL_API_URL, json=payload)
+    delegate.assert_not_called()
+
+
 def test_raster_request_rejects_size_over_256_without_http():
     delegate = Mock()
     recorder = _recorder(delegate)
@@ -136,6 +187,44 @@ def test_request_counter_enforces_oauth_hard_bound_with_mocked_http():
         recorder.post(HARNESS.TOKEN_URL, data=form)
     assert delegate.call_count == HARNESS.MAX_OAUTH_REQUESTS
     assert recorder.counts["oauth"] == HARNESS.MAX_OAUTH_REQUESTS
+
+
+@pytest.mark.parametrize(
+    ("kind", "url", "payload_factory", "maximum"),
+    [
+        (
+            "statistical",
+            HARNESS.STATISTICAL_API_URL,
+            lambda: {"json": _statistical_payload(date(2026, 7, 19), date(2026, 8, 1))},
+            HARNESS.MAX_STATISTICAL_REQUESTS,
+        ),
+        (
+            "raster",
+            HARNESS.PROCESS_API_URL,
+            lambda: {"json": _raster_payload(date(2026, 7, 25))},
+            HARNESS.MAX_RASTER_REQUESTS,
+        ),
+    ],
+)
+def test_statistical_and_raster_request_counters_enforce_hard_bounds(
+    kind,
+    url,
+    payload_factory,
+    maximum,
+):
+    delegate = Mock(side_effect=lambda called_url, **_: _response(
+        called_url,
+        200,
+        json_value={"data": []} if kind == "statistical" else None,
+        content=b"\x89PNG\r\n\x1a\nfixture" if kind == "raster" else b"",
+    ))
+    recorder = _recorder(delegate)
+    for _ in range(maximum):
+        recorder.post(url, **payload_factory())
+    with pytest.raises(HARNESS.RequestContractError):
+        recorder.post(url, **payload_factory())
+    assert recorder.counts[kind] == maximum
+    assert delegate.call_count == maximum
 
 
 def test_mocked_statistical_response_records_only_sanitized_metadata():
@@ -165,6 +254,81 @@ def test_mocked_statistical_response_records_only_sanitized_metadata():
     assert recorder.ledger[-1]["geometryFingerprint"]
 
 
+def test_current_application_service_chain_uses_one_cdse_token_for_stats_and_process():
+    backend = ROOT / "backend"
+    if str(backend) not in sys.path:
+        sys.path.insert(0, str(backend))
+    from services import ndvi_raster
+    from services.satellite import SentinelHubService
+    from shapely.geometry import shape
+
+    stats_body = {
+        "data": [{
+            "interval": {
+                "from": "2026-07-25T00:00:00Z",
+                "to": "2026-07-25T23:59:59Z",
+            },
+            "outputs": {
+                "ndvi": {
+                    "bands": {
+                        "B0": {
+                            "stats": {
+                                "sampleCount": 12,
+                                "noDataCount": 1,
+                                "mean": 0.5,
+                                "min": 0.2,
+                                "max": 0.8,
+                                "stDev": 0.1,
+                                "percentiles": {"10.0": 0.3, "90.0": 0.7},
+                            }
+                        }
+                    }
+                }
+            },
+        }]
+    }
+
+    def delegate(url: str, **_kwargs):
+        if url == HARNESS.TOKEN_URL:
+            return _response(
+                url,
+                200,
+                json_value={"access_token": "fixture-token", "expires_in": 3600},
+            )
+        if url == HARNESS.STATISTICAL_API_URL:
+            return _response(url, 200, json_value=stats_body)
+        if url == HARNESS.PROCESS_API_URL:
+            return _response(url, 200, content=b"\x89PNG\r\n\x1a\nfixture")
+        raise AssertionError("unexpected endpoint")
+
+    recorder = _recorder(delegate)
+    service = SentinelHubService(
+        "fixture-id",
+        "fixture-secret",
+        provider=HARNESS.QUALIFICATION_PROVIDER,
+    )
+    geometry_wkt = shape(HARNESS.QUALIFICATION_GEOMETRY).wkt
+    with patch.object(httpx, "post", side_effect=recorder.post):
+        stats = service.get_ndvi_stats(
+            geometry_wkt,
+            date(2026, 7, 19),
+            date(2026, 8, 1),
+            aggregation_interval="P1D",
+        )
+        response = service.get_process_png(
+            ndvi_raster.build_process_payload(
+                HARNESS.QUALIFICATION_GEOMETRY,
+                date(2026, 7, 25),
+                HARNESS.MAX_RASTER_SIZE,
+            )
+        )
+
+    assert stats and stats["captured_date"] == "2026-07-25"
+    assert ndvi_raster.validate_png(response.content)
+    assert recorder.counts == {"oauth": 1, "statistical": 1, "raster": 1}
+    assert {entry["providerPreset"] for entry in recorder.ledger} == {"cdse"}
+
+
 @pytest.mark.parametrize(
     ("status", "category", "retryable"),
     [
@@ -181,10 +345,18 @@ def test_provider_status_classification(status, category, retryable):
     assert HARNESS._provider_status_classification(status) == (category, retryable)
 
 
-def test_sanitizer_rejects_authorization_token_raw_body_and_runtime_value():
+def test_sanitizer_rejects_credentials_tokens_headers_bodies_urls_and_private_keys():
     for unsafe in (
         '{"authorization":"Bearer fixture"}',
+        '{"token":"fixture"}',
+        '{"access_token":"fixture"}',
+        '{"sentinel_hub_client_id":"fixture"}',
+        '{"sentinel_hub_client_secret":"fixture"}',
         '{"rawProviderBody":"fixture"}',
+        '{"database":"postgresql+psycopg://fixture@localhost/db"}',
+        '{"redis":"rediss://localhost/0"}',
+        '{"url":"https://user:password@example.invalid/path"}',
+        '{"key":"-----BEGIN PRIVATE KEY-----"}',
         '{"safe":"runtime-credential-fixture"}',
     ):
         with pytest.raises(HARNESS.EvidenceSanitizationError):
@@ -214,6 +386,28 @@ def test_internal_request_rejection_cannot_be_reclassified_as_external():
     assert marker == "FAIL_PROGRAM_R1_INTERNAL_SENTINEL_BLOCKER"
     assert status == "FAIL"
     assert exit_code == HARNESS.EXIT_INTERNAL_BLOCKER
+
+
+@pytest.mark.parametrize("status_code", [400, 422])
+def test_payload_rejection_is_always_internal(status_code):
+    marker, status, exit_code = HARNESS.classify_program_outcome(
+        contract_failure=False,
+        oauth_succeeded=True,
+        statistical_entry={
+            "httpStatus": status_code,
+            "providerClassification": "request_rejected",
+        },
+        statistical_parseable=False,
+        usable_observation=False,
+        quality_passed=False,
+        raster_entry=None,
+        raster_passed=False,
+    )
+    assert (marker, status, exit_code) == (
+        "FAIL_PROGRAM_R1_INTERNAL_SENTINEL_BLOCKER",
+        "FAIL",
+        HARNESS.EXIT_INTERNAL_BLOCKER,
+    )
 
 
 def test_authentication_rejection_maps_to_account_prerequisite():
@@ -270,6 +464,81 @@ def test_no_data_maps_to_provider_prerequisite_without_mock_success():
     assert marker == "PARTIAL_PROGRAM_R1_SENTINEL_PROVIDER_PREREQUISITE"
     assert status == "BLOCKED"
     assert exit_code == HARNESS.EXIT_PROVIDER_PREREQUISITE
+
+
+@pytest.mark.parametrize(
+    ("provider_classification", "http_status"),
+    [
+        ("quota_or_rate_limit", 429),
+        ("provider_unavailable", 503),
+        ("timeout", None),
+        ("network", None),
+    ],
+)
+def test_retryable_provider_and_quota_outcomes_are_provider_prerequisites(
+    provider_classification,
+    http_status,
+):
+    marker, status, exit_code = HARNESS.classify_program_outcome(
+        contract_failure=False,
+        oauth_succeeded=True,
+        statistical_entry={
+            "httpStatus": http_status,
+            "providerClassification": provider_classification,
+        },
+        statistical_parseable=False,
+        usable_observation=False,
+        quality_passed=False,
+        raster_entry=None,
+        raster_passed=False,
+    )
+    assert (marker, status, exit_code) == (
+        "PARTIAL_PROGRAM_R1_SENTINEL_PROVIDER_PREREQUISITE",
+        "BLOCKED",
+        HARNESS.EXIT_PROVIDER_PREREQUISITE,
+    )
+
+
+def test_statistical_authentication_rejection_is_account_prerequisite():
+    marker, status, exit_code = HARNESS.classify_program_outcome(
+        contract_failure=False,
+        oauth_succeeded=True,
+        statistical_entry={
+            "httpStatus": 403,
+            "providerClassification": "authentication",
+        },
+        statistical_parseable=False,
+        usable_observation=False,
+        quality_passed=False,
+        raster_entry=None,
+        raster_passed=False,
+    )
+    assert (marker, status, exit_code) == (
+        "PARTIAL_PROGRAM_R1_SENTINEL_ACCOUNT_PREREQUISITE",
+        "BLOCKED",
+        HARNESS.EXIT_ACCOUNT_PREREQUISITE,
+    )
+
+
+def test_invalid_statistical_success_body_is_internal_blocker():
+    marker, status, exit_code = HARNESS.classify_program_outcome(
+        contract_failure=False,
+        oauth_succeeded=True,
+        statistical_entry={
+            "httpStatus": 200,
+            "providerClassification": "invalid_response",
+        },
+        statistical_parseable=False,
+        usable_observation=False,
+        quality_passed=False,
+        raster_entry=None,
+        raster_passed=False,
+    )
+    assert (marker, status, exit_code) == (
+        "FAIL_PROGRAM_R1_INTERNAL_SENTINEL_BLOCKER",
+        "FAIL",
+        HARNESS.EXIT_INTERNAL_BLOCKER,
+    )
 
 
 def test_complete_real_path_facts_map_to_full_merge_readiness():

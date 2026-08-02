@@ -1,8 +1,11 @@
 import os
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 from functools import lru_cache
+
+from services.sentinel_provider import normalize_sentinel_provider
 
 BACKEND_DIR = Path(__file__).resolve().parent
 RUNTIME_ENV_FILE_VARIABLE = "AGROSAT_RUNTIME_ENV_FILE"
@@ -65,8 +68,14 @@ class Settings(BaseSettings):
     collector_stale_after_seconds: int = 129600
 
     # Sentinel Hub (регистрация: https://www.sentinel-hub.com)
+    sentinel_hub_provider: str = "planet"
     sentinel_hub_client_id: str = ""
     sentinel_hub_client_secret: str = ""
+
+    @field_validator("sentinel_hub_provider", mode="before")
+    @classmethod
+    def validate_sentinel_hub_provider(cls, value: object) -> str:
+        return normalize_sentinel_provider(value)
 
     # NDVI Settings
     ndvi_drop_warning_threshold: float = 0.15   # 15% падение → предупреждение

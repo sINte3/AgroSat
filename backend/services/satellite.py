@@ -17,6 +17,7 @@ from shapely.geometry import shape, mapping
 from shapely import wkt
 
 from config import settings
+from services.sentinel_provider import resolve_sentinel_provider
 from services.satellite_safety import (
     MOCK_SATELLITE_SOURCE,
     REAL_SATELLITE_SOURCE,
@@ -145,20 +146,27 @@ function evaluatePixel(sample) {
 class SentinelHubService:
     """Клиент для Sentinel Hub Statistical API."""
 
-    STATISTICAL_API_URL = "https://services.sentinel-hub.com/api/v1/statistics"
-    TOKEN_URL = "https://services.sentinel-hub.com/auth/realms/main/protocol/openid-connect/token"
-    PROCESS_API_URL = "https://services.sentinel-hub.com/api/v1/process"
-
     source = REAL_SATELLITE_SOURCE
     is_mock = False
 
-    def __init__(self, client_id=None, client_secret=None):
+    def __init__(self, client_id=None, client_secret=None, *, provider=None):
         self.client_id, self.client_secret = validate_credentials(
             settings.sentinel_hub_client_id if client_id is None else client_id,
             settings.sentinel_hub_client_secret if client_secret is None else client_secret,
         )
+        self._provider_endpoints = resolve_sentinel_provider(
+            settings.sentinel_hub_provider if provider is None else provider
+        )
         self._access_token: Optional[str] = None
         self._token_expires_at: float = 0
+
+    @property
+    def provider(self) -> str:
+        return self._provider_endpoints.name
+
+    @property
+    def provider_metadata(self) -> dict[str, str]:
+        return self._provider_endpoints.sanitized_metadata()
 
     def _get_access_token(self) -> str:
         """Получить OAuth2 токен от Sentinel Hub с кешированием."""
@@ -178,7 +186,7 @@ class SentinelHubService:
         import time
 
         response = httpx.post(
-            self.TOKEN_URL,
+            self._provider_endpoints.token_url,
             data={
                 "grant_type": "client_credentials",
                 "client_id": self.client_id,
@@ -196,7 +204,7 @@ class SentinelHubService:
         token = self._get_access_token()
         timeout = httpx.Timeout(connect=10.0, read=45.0, write=10.0, pool=10.0)
         return httpx.post(
-            self.PROCESS_API_URL,
+            self._provider_endpoints.process_url,
             json=payload,
             headers={"Authorization": f"Bearer {token}", "Accept": "image/png"},
             timeout=timeout,
@@ -274,7 +282,7 @@ class SentinelHubService:
 
         try:
             response = httpx.post(
-                self.STATISTICAL_API_URL,
+                self._provider_endpoints.statistical_url,
                 json=payload,
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=60.0

@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any, Protocol
 
+from config import settings
 from services import ndvi_raster
+from services.sentinel_provider import resolve_sentinel_provider
 
 
 SCHEMA_VERSION = "task209_raster_provider_v1"
@@ -72,8 +74,11 @@ class SentinelProcessProvider:
 
     def metadata(self, index_code: str) -> dict[str, Any]:
         self._require_supported(index_code)
+        sentinel_endpoints = resolve_sentinel_provider(settings.sentinel_hub_provider)
         return {
             "provider": self.code,
+            "sentinel_provider": sentinel_endpoints.name,
+            "sentinel_endpoint_class": sentinel_endpoints.endpoint_class,
             "processing_version": PROCESSING_VERSION,
             "quality_mask": QUALITY_MASK,
             "request_timeout_class": REQUEST_TIMEOUT_CLASS,

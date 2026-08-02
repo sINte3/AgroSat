@@ -31,6 +31,7 @@ sys.path.insert(0, "backend")
 
 from config import settings
 from database import SessionLocal
+from services.sentinel_provider import resolve_sentinel_provider
 from services.satellite_indices import (
     SUPPORTED_INDEX_CODES,
     build_multi_index_evalscript,
@@ -44,8 +45,9 @@ from services.satellite_indices import (
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-STATISTICAL_API_URL = "https://services.sentinel-hub.com/api/v1/statistics"
-TOKEN_URL = "https://services.sentinel-hub.com/auth/realms/main/protocol/openid-connect/token"
+_SELECTED_ENDPOINTS = resolve_sentinel_provider(settings.sentinel_hub_provider)
+STATISTICAL_API_URL = _SELECTED_ENDPOINTS.statistical_url
+TOKEN_URL = _SELECTED_ENDPOINTS.token_url
 
 
 # -- Sentinel Hub OAuth2 (local helper, does not modify satellite.py) --

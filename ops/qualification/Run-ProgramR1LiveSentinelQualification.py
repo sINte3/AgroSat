@@ -16,6 +16,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -24,11 +25,24 @@ from typing import Any, Callable
 import httpx
 
 
+WORKTREE_ROOT = Path(__file__).resolve().parents[2]
+BACKEND_PATH = WORKTREE_ROOT / "backend"
+if str(BACKEND_PATH) not in sys.path:
+    sys.path.insert(0, str(BACKEND_PATH))
+
+from services.sentinel_provider import (  # noqa: E402
+    CDSE_PROVIDER,
+    PLANET_PROVIDER,
+    SentinelProviderEndpoints,
+    resolve_sentinel_provider,
+)
+
+
 PROGRAM = "PROGRAM R1 — Live Sentinel Completion"
 REQUIRED_BRANCH = "task/task209-agrosat-global-program"
 REQUIRED_SOURCE_MAIN_HEAD = "dfb57c7ff89c0af10f7907b81965487481c5b3e7"
 ALLOWED_EVIDENCE_PREFIX = Path(
-    r"C:\AgroSat_backups\PROGRAM_R1_LIVE_SENTINEL_COMPLETION"
+    r"C:\AgroSat_backups\PROGRAM_R1_CDSE_SENTINEL_COMPLETION"
 )
 SOURCE_CHECKOUT = Path(r"C:\AgroSat")
 RESTRICTED_CREDENTIAL_ROOTS = (
@@ -43,16 +57,35 @@ EXPECTED_CREDENTIAL_KEYS = {
 
 MAX_DATE_WINDOW_DAYS = 14
 MAX_FIELD_GEOMETRIES = 1
-MAX_INDEX_CODES = 2
+MAX_INDEX_CODES = 1
 MAX_STATISTICAL_REQUESTS = 3
 MAX_RASTER_REQUESTS = 2
 MAX_OAUTH_REQUESTS = 2
 MAX_RASTER_SIZE = 256
 MAX_RETRYABLE_RETRIES = 1
 
-TOKEN_URL = "https://services.sentinel-hub.com/auth/realms/main/protocol/openid-connect/token"
-STATISTICAL_API_URL = "https://services.sentinel-hub.com/api/v1/statistics"
-PROCESS_API_URL = "https://services.sentinel-hub.com/api/v1/process"
+QUALIFICATION_PROVIDER = CDSE_PROVIDER
+QUALIFICATION_ENDPOINTS = resolve_sentinel_provider(QUALIFICATION_PROVIDER)
+PLANET_ENDPOINTS = resolve_sentinel_provider(PLANET_PROVIDER)
+TOKEN_URL = QUALIFICATION_ENDPOINTS.token_url
+STATISTICAL_API_URL = QUALIFICATION_ENDPOINTS.statistical_url
+PROCESS_API_URL = QUALIFICATION_ENDPOINTS.process_url
+
+ALLOWED_CHANGED_PATHS = frozenset({
+    "backend/config.py",
+    "backend/scripts/collect_satellite_indices.py",
+    "backend/scripts/dry_run_multi_index_single_field.py",
+    "backend/scripts/preview_multi_index_batch.py",
+    "backend/scripts/write_multi_index_batch.py",
+    "backend/scripts/write_multi_index_single_field.py",
+    "backend/services/raster_provider.py",
+    "backend/services/satellite.py",
+    "backend/services/satellite_collection.py",
+    "backend/services/sentinel_provider.py",
+    "backend/tests/test_program_r1_live_sentinel_qualification.py",
+    "backend/tests/test_sentinel_provider.py",
+    "ops/qualification/Run-ProgramR1LiveSentinelQualification.py",
+})
 
 # Deterministic isolated geometry inherited from the accepted PROGRAM R1
 # qualification dataset.  It is not read from a product database.
@@ -155,7 +188,14 @@ def validate_evidence_root(path: Path) -> Path:
     resolved = path.resolve(strict=True)
     if not resolved.is_dir() or not _is_within(resolved, ALLOWED_EVIDENCE_PREFIX):
         raise BaselineError("unexpected evidence root")
-    required = {"00_BASELINE", "04_LIVE_SENTINEL", "06_FINAL", "scratch"}
+    required = {
+        "00_BASELINE",
+        "01_IMPLEMENTATION",
+        "02_TESTS",
+        "04_LIVE_SENTINEL",
+        "06_FINAL",
+        "scratch",
+    }
     if not all((resolved / item).is_dir() for item in required):
         raise BaselineError("incomplete evidence root")
     return resolved
@@ -201,11 +241,7 @@ def assert_git_baseline(
         for value in _git(worktree, "diff", "--name-only", f"{starting_head}..{actual_head}").splitlines()
         if value.strip()
     ]
-    allowed_changes = all(
-        path == "ops/qualification/Run-ProgramR1LiveSentinelQualification.py"
-        or path == "backend/tests/test_program_r1_live_sentinel_qualification.py"
-        for path in changed_paths
-    )
+    allowed_changes = set(changed_paths).issubset(ALLOWED_CHANGED_PATHS)
     checks = {
         "branchExact": branch == REQUIRED_BRANCH,
         "headExact": actual_head == expected_head,
@@ -229,7 +265,7 @@ def assert_git_baseline(
     }
 
 
-def _acl_inheritance_disabled(path: Path) -> bool:
+def _acl_security_flags(path: Path) -> tuple[bool, bool]:
     environment = os.environ.copy()
     environment["AGROSAT_RUNTIME_ENV_FILE"] = str(path)
     completed = subprocess.run(
@@ -238,7 +274,19 @@ def _acl_inheritance_disabled(path: Path) -> bool:
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            "(Get-Acl -LiteralPath $env:AGROSAT_RUNTIME_ENV_FILE).AreAccessRulesProtected",
+            (
+                "$acl = Get-Acl -LiteralPath $env:AGROSAT_RUNTIME_ENV_FILE; "
+                "$broad = @('S-1-1-0','S-1-5-11','S-1-5-32-545','S-1-5-32-546'); "
+                "$hasBroadRead = $false; "
+                "$rules = $acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]); "
+                "foreach ($rule in $rules) { "
+                "$readMask = [int][System.Security.AccessControl.FileSystemRights]::Read; "
+                "if (($broad -contains $rule.IdentityReference.Value) -and "
+                "$rule.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and "
+                "(([int]$rule.FileSystemRights -band $readMask) -ne 0)) { $hasBroadRead = $true } }; "
+                "[pscustomobject]@{protected=$acl.AreAccessRulesProtected; broadReadAbsent=(-not $hasBroadRead)} "
+                "| ConvertTo-Json -Compress"
+            ),
         ],
         capture_output=True,
         text=True,
@@ -246,7 +294,13 @@ def _acl_inheritance_disabled(path: Path) -> bool:
         check=False,
         env=environment,
     )
-    return completed.returncode == 0 and completed.stdout.strip().casefold() == "true"
+    if completed.returncode != 0:
+        return False, False
+    try:
+        flags = json.loads(completed.stdout)
+    except (json.JSONDecodeError, TypeError):
+        return False, False
+    return bool(flags.get("protected")), bool(flags.get("broadReadAbsent"))
 
 
 def validate_credential_boundary(path: Path) -> dict[str, bool]:
@@ -288,11 +342,12 @@ def validate_credential_boundary(path: Path) -> dict[str, bool]:
     )
     duplicate_keys_absent = len(keys) == len(set(keys))
     nonempty = exact_keys and all(value_present for _, value_present in assignments)
-    acl_protected = _acl_inheritance_disabled(resolved)
+    acl_protected, broad_read_absent = _acl_security_flags(resolved)
     checks = {
         "credentialFileExists": resolved.is_file(),
         "credentialFileOutsideRepositoryWorktreesAndBackups": outside_restricted,
         "accessControlInheritanceDisabled": acl_protected,
+        "broadReadAccessAbsent": broad_read_absent,
         "exactRequiredKeySet": exact_keys,
         "duplicateKeysAbsent": duplicate_keys_absent,
         "allRequiredValuesNonEmpty": nonempty,
@@ -433,9 +488,13 @@ class BoundedHttpRecorder:
         self,
         delegate: Callable[..., httpx.Response],
         geometry_summary: GeometrySummary,
+        provider_endpoints: SentinelProviderEndpoints = QUALIFICATION_ENDPOINTS,
     ) -> None:
+        if provider_endpoints.name != QUALIFICATION_PROVIDER:
+            raise RequestContractError("qualification provider is not CDSE")
         self._delegate = delegate
         self.geometry_summary = geometry_summary
+        self.provider_endpoints = provider_endpoints
         self.ledger: list[dict[str, Any]] = []
         self.counts = {"oauth": 0, "statistical": 0, "raster": 0}
         self.statistical_response_metadata: list[dict[str, Any]] = []
@@ -487,8 +546,8 @@ class BoundedHttpRecorder:
             raise RequestContractError("statistical aggregation interval is not daily")
         if not isinstance(evalscript, str) or 'id: "ndvi"' not in evalscript:
             raise RequestContractError("NDVI evalscript is absent")
-        if not isinstance(calculations, dict) or not 1 <= len(calculations) <= MAX_INDEX_CODES:
-            raise RequestContractError("statistical index count exceeds bound")
+        if not isinstance(calculations, dict) or set(calculations) != {"default"}:
+            raise RequestContractError("statistical request is not NDVI-only")
         return {
             "operation": "sentinel_statistical_ndvi",
             "indices": ["ndvi"],
@@ -519,6 +578,14 @@ class BoundedHttpRecorder:
         height = output.get("height")
         if width != MAX_RASTER_SIZE or height != MAX_RASTER_SIZE:
             raise RequestContractError("raster size exceeds qualification bound")
+        responses = output.get("responses")
+        if (
+            not isinstance(responses, list)
+            or len(responses) != 1
+            or responses[0].get("identifier") != "default"
+            or responses[0].get("format", {}).get("type") != "image/png"
+        ):
+            raise RequestContractError("raster output is not one PNG")
         if not isinstance(evalscript, str) or "ndvi" not in evalscript.casefold():
             raise RequestContractError("raster NDVI evalscript is absent")
         return {
@@ -529,17 +596,17 @@ class BoundedHttpRecorder:
         }
 
     def _request_metadata(self, url: str, kwargs: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-        if url == TOKEN_URL:
+        if url == self.provider_endpoints.token_url:
             kind = "oauth"
-            endpoint_class = "official_sentinel_hub_oauth_https"
+            endpoint_class = "official_cdse_sentinel_hub_oauth_https"
             metadata = self._validate_token(kwargs)
-        elif url == STATISTICAL_API_URL:
+        elif url == self.provider_endpoints.statistical_url:
             kind = "statistical"
-            endpoint_class = "official_sentinel_hub_statistical_https"
+            endpoint_class = "official_cdse_sentinel_hub_statistical_https"
             metadata = self._validate_statistical(kwargs)
-        elif url == PROCESS_API_URL:
+        elif url == self.provider_endpoints.process_url:
             kind = "raster"
-            endpoint_class = "official_sentinel_hub_process_https"
+            endpoint_class = "official_cdse_sentinel_hub_process_https"
             metadata = self._validate_raster(kwargs)
         else:
             raise RequestContractError("unapproved live endpoint")
@@ -564,6 +631,7 @@ class BoundedHttpRecorder:
         self.counts[kind] += 1
         entry = {
             "requestOrdinal": len(self.ledger) + 1,
+            "providerPreset": self.provider_endpoints.name,
             "endpointClass": metadata["endpointClass"],
             "operationClass": metadata["operation"],
             "indexCodes": metadata["indices"],
@@ -661,17 +729,25 @@ def classify_program_outcome(
         return "FAIL_PROGRAM_R1_INTERNAL_SENTINEL_BLOCKER", "FAIL", EXIT_INTERNAL_BLOCKER
     if "invalid_response" in categories:
         return "FAIL_PROGRAM_R1_INTERNAL_SENTINEL_BLOCKER", "FAIL", EXIT_INTERNAL_BLOCKER
+    if "authentication" in categories or statuses.intersection({401, 403}):
+        return (
+            "PARTIAL_PROGRAM_R1_SENTINEL_ACCOUNT_PREREQUISITE",
+            "BLOCKED",
+            EXIT_ACCOUNT_PREREQUISITE,
+        )
+    if categories.intersection({
+        "quota_or_rate_limit",
+        "timeout",
+        "network",
+        "provider_unavailable",
+        "no_data",
+    }):
+        return (
+            "PARTIAL_PROGRAM_R1_SENTINEL_PROVIDER_PREREQUISITE",
+            "BLOCKED",
+            EXIT_PROVIDER_PREREQUISITE,
+        )
     if not oauth_succeeded:
-        if any(
-            entry.get("operationClass") == "oauth_client_credentials"
-            and entry.get("httpStatus") in (401, 403)
-            for entry in entries
-        ):
-            return (
-                "PARTIAL_PROGRAM_R1_SENTINEL_ACCOUNT_PREREQUISITE",
-                "BLOCKED",
-                EXIT_ACCOUNT_PREREQUISITE,
-            )
         return (
             "PARTIAL_PROGRAM_R1_SENTINEL_PROVIDER_PREREQUISITE",
             "BLOCKED",
@@ -685,24 +761,7 @@ def classify_program_outcome(
             "BLOCKED",
             EXIT_PROVIDER_PREREQUISITE,
         )
-    if raster_entry and raster_entry.get("httpStatus") in (401, 403):
-        return (
-            "PARTIAL_PROGRAM_R1_SENTINEL_ACCOUNT_PREREQUISITE",
-            "BLOCKED",
-            EXIT_ACCOUNT_PREREQUISITE,
-        )
     if not raster_passed:
-        if raster_entry and raster_entry.get("providerClassification") in {
-            "timeout",
-            "network",
-            "provider_unavailable",
-            "quota_or_rate_limit",
-        }:
-            return (
-                "PARTIAL_PROGRAM_R1_SENTINEL_PROVIDER_PREREQUISITE",
-                "BLOCKED",
-                EXIT_PROVIDER_PREREQUISITE,
-            )
         return "FAIL_PROGRAM_R1_INTERNAL_SENTINEL_BLOCKER", "FAIL", EXIT_INTERNAL_BLOCKER
     return "PASS_PROGRAM_R1_FULL_MERGE_READINESS", "PASS", EXIT_PASS
 
@@ -711,17 +770,35 @@ def assert_sanitized(serialized: str, forbidden_values: list[str]) -> None:
     lowered = serialized.casefold()
     forbidden_fragments = (
         '"authorization"',
+        '"token"',
         '"access_token"',
+        '"accesstoken"',
+        '"oauth_token"',
+        '"oauthtoken"',
+        '"sentinel_hub_client_id"',
+        '"sentinel_hub_client_secret"',
+        '"client_id"',
+        '"client_secret"',
         '"rawresponsebody"',
         '"rawproviderbody"',
+        '"raw_provider_body"',
+        '"raw_response_body"',
         "bearer ",
         "-----begin private key-----",
+        "-----begin rsa private key-----",
+        "-----begin ec private key-----",
+        "-----begin openssh private key-----",
         "postgresql://",
         "postgres://",
         "redis://",
+        "rediss://",
     )
     if any(fragment in lowered for fragment in forbidden_fragments):
         raise EvidenceSanitizationError("forbidden evidence field")
+    if re.search(r"postgres(?:ql)?(?:\+[a-z0-9_]+)?://", lowered):
+        raise EvidenceSanitizationError("database URL reached evidence")
+    if re.search(r"https?://[^\s/:@]+:[^\s/@]+@", serialized, flags=re.IGNORECASE):
+        raise EvidenceSanitizationError("credentialed URL reached evidence")
     if any(value and value in serialized for value in forbidden_values):
         raise EvidenceSanitizationError("credential or token value reached evidence")
 
@@ -739,6 +816,7 @@ def run_live(
 
     os.environ.pop("SENTINEL_HUB_CLIENT_ID", None)
     os.environ.pop("SENTINEL_HUB_CLIENT_SECRET", None)
+    os.environ["SENTINEL_HUB_PROVIDER"] = QUALIFICATION_PROVIDER
     os.environ["AGROSAT_RUNTIME_ENV_FILE"] = str(runtime_env.resolve(strict=True))
     os.environ["RELEASE_REVISION"] = expected_head
     backend = worktree / "backend"
@@ -770,6 +848,8 @@ def run_live(
     credential_checks["clientSecretAvailable"] = client_secret_available
     if not (client_id_available and client_secret_available):
         raise CredentialBoundaryError("runtime settings did not load complete credentials")
+    if settings.sentinel_hub_provider != QUALIFICATION_PROVIDER:
+        raise RequestContractError("runtime Sentinel provider is not CDSE")
     if settings.wialon_enabled is not False:
         raise RequestContractError("Wialon must remain disabled")
 
@@ -782,8 +862,18 @@ def run_live(
 
     service = SentinelHubService()
     require_real_service(service)
+    if (
+        service.provider != QUALIFICATION_PROVIDER
+        or service.provider_metadata != QUALIFICATION_ENDPOINTS.sanitized_metadata()
+        or service._provider_endpoints != QUALIFICATION_ENDPOINTS
+    ):
+        raise RequestContractError("Sentinel provider chain is inconsistent")
     original_post = httpx.post
-    recorder = BoundedHttpRecorder(original_post, geometry_summary)
+    recorder = BoundedHttpRecorder(
+        original_post,
+        geometry_summary,
+        QUALIFICATION_ENDPOINTS,
+    )
     httpx.post = recorder.post
     # The raster helper normally constructs the same service class again.  Reuse
     # this already-authenticated real instance process-locally so the bounded run
@@ -897,6 +987,8 @@ def run_live(
                     except BaseException as error:
                         raster_error_class = type(error).__name__
                         entry = recorder.latest("raster")
+                        if isinstance(error, ndvi_raster.RasterUpstreamInvalid) and entry:
+                            entry["providerClassification"] = "invalid_response"
                         if retryable_entry(entry) and attempt < MAX_RETRYABLE_RETRIES:
                             mark_retry_decision(entry, "retry_once")
                             retry_count += 1
@@ -908,6 +1000,18 @@ def run_live(
 
         stats_entry = recorder.latest("statistical")
         raster_entry = recorder.latest("raster")
+        raster_provider_contract = provider_metadata("ndvi")
+        provider_chain_reconciled = (
+            service.provider == QUALIFICATION_PROVIDER
+            and recorder.provider_endpoints == QUALIFICATION_ENDPOINTS
+            and raster_provider_contract.get("sentinel_provider") == QUALIFICATION_PROVIDER
+            and all(
+                entry.get("providerPreset") == QUALIFICATION_PROVIDER
+                for entry in recorder.ledger
+            )
+        )
+        if not provider_chain_reconciled:
+            recorder.contract_failure = True
         response_meta = (
             recorder.statistical_response_metadata[-1]
             if recorder.statistical_response_metadata
@@ -946,8 +1050,9 @@ def run_live(
             "recordedAt": datetime.now(timezone.utc).isoformat(),
             "head": expected_head,
             "startingHead": starting_head,
-            "provider": "Sentinel-2",
-            "providerEndpointClass": "official_sentinel_hub_https",
+            "provider": QUALIFICATION_PROVIDER,
+            "satelliteDataSource": "Sentinel-2 L2A",
+            "providerEndpointClass": QUALIFICATION_ENDPOINTS.endpoint_class,
             "providerIsMock": False,
             "credentialBoundary": credential_checks,
             "geometry": geometry_summary.as_dict(),
@@ -976,7 +1081,7 @@ def run_live(
                 "qualityValidator": "services.satellite.validate_ndvi_quality",
                 "rasterPayload": "services.ndvi_raster.build_process_payload",
                 "rasterRequestAndValidation": "services.ndvi_raster.request_process_png",
-                "rasterProviderContract": provider_metadata("ndvi"),
+                "rasterProviderContract": raster_provider_contract,
                 "rasterCacheLayerBypassedForReadOnlyQualification": True,
             },
             "oauth": {
@@ -985,6 +1090,9 @@ def run_live(
                 "authorizationHeaderIncluded": False,
             },
             "statistical": {
+                "provider": service.provider if stats_entry else None,
+                "indexCode": "ndvi",
+                "geometryFingerprint": geometry_summary.fingerprint if stats_entry else None,
                 "requestSucceeded": bool(stats_entry and stats_entry.get("httpStatus") == 200),
                 "applicationResultParseable": stats_parseable and stats_result is not None,
                 "providerIntervalCount": response_meta["intervalCount"],
@@ -1025,7 +1133,7 @@ def run_live(
                     "official Process API request is constrained to the one-day application captured-date window; PNG response exposes no acquisition timestamp"
                 ),
                 "geometryFingerprint": geometry_summary.fingerprint if raster_entry else None,
-                "provider": "Sentinel-2" if raster_entry else None,
+                "provider": service.provider if raster_entry else None,
                 "contentTypeValid": raster_passed,
                 "nonEmptyBytes": raster_bytes_count > 0,
                 "byteCount": raster_bytes_count,
@@ -1036,10 +1144,22 @@ def run_live(
             "reconciliation": {
                 "sameIndex": bool(raster_entry and stats_result is not None),
                 "sameGeometryFingerprint": bool(raster_entry and stats_result is not None),
-                "sameProvider": bool(raster_entry and provenance_passed),
+                "sameProvider": bool(
+                    raster_entry
+                    and stats_result is not None
+                    and provider_chain_reconciled
+                ),
                 "compatibleRequestedDateSemantics": bool(raster_entry and captured_date),
+                "providerChainPresetConsistent": provider_chain_reconciled,
+                "passed": bool(
+                    raster_entry
+                    and stats_result is not None
+                    and provider_chain_reconciled
+                    and captured_date
+                ),
                 "exactNumericalRasterColorEqualityClaimed": False,
             },
+            "mocksUsed": False,
             "databaseAccessAttempted": False,
             "redisAccessAttempted": False,
             "productionWrites": 0,
@@ -1050,6 +1170,7 @@ def run_live(
         request_ledger = {
             "schemaVersion": 1,
             "head": expected_head,
+            "providerPreset": QUALIFICATION_PROVIDER,
             "requests": recorder.ledger,
             "counts": dict(recorder.counts),
             "rawProviderBodiesIncluded": False,
@@ -1061,10 +1182,12 @@ def run_live(
             "schemaVersion": 1,
             "head": expected_head,
             "credentialBoundary": credential_checks,
-            "officialHttpsEndpointsOnly": all(
-                entry["endpointClass"].startswith("official_sentinel_hub_")
+            "officialCdseEndpointsOnly": all(
+                entry.get("providerPreset") == QUALIFICATION_PROVIDER
+                and entry["endpointClass"].startswith("official_cdse_sentinel_hub_")
                 for entry in recorder.ledger
             ),
+            "providerChainPresetConsistent": provider_chain_reconciled,
             "credentialValuesIncluded": False,
             "oauthTokensIncluded": False,
             "authorizationHeadersIncluded": False,
@@ -1126,6 +1249,9 @@ def safe_failure_artifacts(
         "schemaVersion": 1,
         "program": PROGRAM,
         "head": expected_head,
+        "provider": QUALIFICATION_PROVIDER,
+        "providerEndpointClass": QUALIFICATION_ENDPOINTS.endpoint_class,
+        "providerIsMock": False,
         "status": status,
         "marker": marker,
         "errorClass": error_class,
@@ -1138,6 +1264,7 @@ def safe_failure_artifacts(
     ledger = {
         "schemaVersion": 1,
         "head": expected_head,
+        "providerPreset": QUALIFICATION_PROVIDER,
         "requests": [],
         "counts": {"oauth": 0, "statistical": 0, "raster": 0},
         "rawProviderBodiesIncluded": False,
@@ -1191,7 +1318,7 @@ def main() -> int:
     try:
         evidence_root = validate_evidence_root(Path(args.evidence_root))
     except BaseException:
-        print("BLOCKED_PROGRAM_R1_LIVE_SENTINEL_BASELINE")
+        print("BLOCKED_PROGRAM_R1_CDSE_SENTINEL_BASELINE")
         return EXIT_BASELINE
 
     try:
@@ -1206,7 +1333,7 @@ def main() -> int:
     except BaselineError as error:
         qualification, ledger, security, gate4 = safe_failure_artifacts(
             expected_head=args.expected_head,
-            marker="BLOCKED_PROGRAM_R1_LIVE_SENTINEL_BASELINE",
+            marker="BLOCKED_PROGRAM_R1_CDSE_SENTINEL_BASELINE",
             status="BLOCKED",
             error_class=type(error).__name__,
         )
@@ -1214,7 +1341,7 @@ def main() -> int:
     except CredentialBoundaryError as error:
         qualification, ledger, security, gate4 = safe_failure_artifacts(
             expected_head=args.expected_head,
-            marker="BLOCKED_PROGRAM_R1_SENTINEL_CREDENTIAL_BOUNDARY",
+            marker="BLOCKED_PROGRAM_R1_CDSE_SENTINEL_BASELINE",
             status="BLOCKED",
             error_class=type(error).__name__,
         )

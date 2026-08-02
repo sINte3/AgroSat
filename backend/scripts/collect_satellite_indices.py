@@ -95,10 +95,6 @@ SATELLITE_INDEX_CODES = {c for c in MULTI_INDEX_CODES}
 # Date format for display
 DATE_FMT = "%Y-%m-%d"
 
-# Sentinel Hub endpoints (used only when --no-sentinel is not set and not dry-run)
-STATISTICAL_API_URL = "https://services.sentinel-hub.com/api/v1/statistics"
-TOKEN_URL = "https://services.sentinel-hub.com/auth/realms/main/protocol/openid-connect/token"
-
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 

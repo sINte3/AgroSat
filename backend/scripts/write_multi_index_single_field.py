@@ -35,6 +35,7 @@ from sqlalchemy import text as sa_text
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from config import settings
+from services.sentinel_provider import resolve_sentinel_provider
 from services.satellite_safety import validate_batch_provenance, validate_credentials
 from database import SessionLocal, engine
 from models.monitoring import SatelliteIndexRecord
@@ -46,8 +47,9 @@ from services.satellite_indices import (
     validate_index_quality,
 )
 
-STATISTICAL_API_URL = "https://services.sentinel-hub.com/api/v1/statistics"
-TOKEN_URL = "https://services.sentinel-hub.com/auth/realms/main/protocol/openid-connect/token"
+_SELECTED_ENDPOINTS = resolve_sentinel_provider(settings.sentinel_hub_provider)
+STATISTICAL_API_URL = _SELECTED_ENDPOINTS.statistical_url
+TOKEN_URL = _SELECTED_ENDPOINTS.token_url
 
 
 # ── Helpers (reused from dry_run, kept local for isolation) ────────────────

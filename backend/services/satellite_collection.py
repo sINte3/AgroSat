@@ -22,6 +22,7 @@ from shapely import wkt
 from shapely.geometry import mapping
 
 from config import settings
+from services.sentinel_provider import resolve_sentinel_provider
 from services.satellite_safety import (
     MOCK_SATELLITE_SOURCE,
     REAL_SATELLITE_SOURCE,
@@ -39,8 +40,9 @@ from services.satellite_indices import (
 
 logger = logging.getLogger(__name__)
 
-STATISTICAL_API_URL = "https://services.sentinel-hub.com/api/v1/statistics"
-TOKEN_URL = "https://services.sentinel-hub.com/auth/realms/main/protocol/openid-connect/token"
+_SELECTED_ENDPOINTS = resolve_sentinel_provider(settings.sentinel_hub_provider)
+STATISTICAL_API_URL = _SELECTED_ENDPOINTS.statistical_url
+TOKEN_URL = _SELECTED_ENDPOINTS.token_url
 
 SATELLITE_INDEX_CODES = {c for c in SUPPORTED_INDEX_CODES}  # savi, evi, ndmi, ndre
 
@@ -111,14 +113,25 @@ class MultiIndexSentinelHubService:
     source = REAL_SATELLITE_SOURCE
     is_mock = False
 
-    def __init__(self, client_id=None, client_secret=None):
+    def __init__(self, client_id=None, client_secret=None, *, provider=None):
         self.client_id, self.client_secret = validate_credentials(
             settings.sentinel_hub_client_id if client_id is None else client_id,
             settings.sentinel_hub_client_secret if client_secret is None else client_secret,
         )
+        self._provider_endpoints = resolve_sentinel_provider(
+            settings.sentinel_hub_provider if provider is None else provider
+        )
         self._access_token: Optional[str] = None
         self._token_expires_at: float = 0
         self._last_response_data: Optional[dict] = None  # raw JSON, for diagnostics
+
+    @property
+    def provider(self) -> str:
+        return self._provider_endpoints.name
+
+    @property
+    def provider_metadata(self) -> dict[str, str]:
+        return self._provider_endpoints.sanitized_metadata()
 
     def _get_access_token(self) -> str:
         """Obtain OAuth2 token from Sentinel Hub with caching."""
@@ -134,7 +147,7 @@ class MultiIndexSentinelHubService:
             )
 
         resp = httpx.post(
-            TOKEN_URL,
+            self._provider_endpoints.token_url,
             data={
                 "grant_type": "client_credentials",
                 "client_id": self.client_id,
@@ -203,7 +216,7 @@ class MultiIndexSentinelHubService:
         )
 
         resp = httpx.post(
-            STATISTICAL_API_URL,
+            self._provider_endpoints.statistical_url,
             json=payload,
             headers={"Authorization": f"Bearer {token}"},
             timeout=timeout_s,
@@ -262,7 +275,7 @@ class MultiIndexSentinelHubService:
         )
 
         resp = httpx.post(
-            STATISTICAL_API_URL,
+            self._provider_endpoints.statistical_url,
             json=payload,
             headers={"Authorization": f"Bearer {token}"},
             timeout=timeout_s,
