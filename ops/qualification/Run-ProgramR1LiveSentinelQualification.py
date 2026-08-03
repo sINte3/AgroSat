@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Run one bounded, sanitized, read-only PROGRAM R1 Sentinel qualification.
+"""Run one bounded, sanitized, read-only TASK 211 CDSE qualification.
 
-The live run deliberately exercises the release-candidate application services.
-It never persists OAuth tokens, authorization headers, raw provider bodies, or
-pixel arrays.  The only filesystem writes are atomic sanitized evidence files.
+The harness exercises the real application Statistical and Process service paths.
+It never persists credentials, OAuth tokens, provider bodies, raster bytes, or
+decoded pixel arrays. Only sanitized metadata is written beneath the approved
+external evidence root.
 """
 
 from __future__ import annotations
@@ -38,11 +39,12 @@ from services.sentinel_provider import (  # noqa: E402
 )
 
 
-PROGRAM = "PROGRAM R1 — Live Sentinel Completion"
+PROGRAM = "PROGRAM R1 - TASK 211 final Sentinel closure"
 REQUIRED_BRANCH = "task/task209-agrosat-global-program"
+REQUIRED_STARTING_HEAD = "80262955e423b30dc28d2ea5a3ff6ee39188d5d1"
 REQUIRED_SOURCE_MAIN_HEAD = "dfb57c7ff89c0af10f7907b81965487481c5b3e7"
 ALLOWED_EVIDENCE_PREFIX = Path(
-    r"C:\AgroSat_backups\PROGRAM_R1_CDSE_SENTINEL_COMPLETION"
+    r"C:\AgroSat_backups\TASK_211_PROGRAM_R1_FINAL_CLOSURE"
 )
 SOURCE_CHECKOUT = Path(r"C:\AgroSat")
 RESTRICTED_CREDENTIAL_ROOTS = (
@@ -50,16 +52,17 @@ RESTRICTED_CREDENTIAL_ROOTS = (
     Path(r"C:\AgroSat_worktrees"),
     Path(r"C:\AgroSat_backups"),
 )
-EXPECTED_CREDENTIAL_KEYS = {
+EXPECTED_CREDENTIAL_KEYS = (
     "SENTINEL_HUB_CLIENT_ID",
     "SENTINEL_HUB_CLIENT_SECRET",
-}
+)
 
 MAX_DATE_WINDOW_DAYS = 14
 MAX_FIELD_GEOMETRIES = 1
 MAX_INDEX_CODES = 1
 MAX_STATISTICAL_REQUESTS = 3
-MAX_RASTER_REQUESTS = 2
+MAX_PROCESS_REQUESTS = 2
+MAX_RASTER_REQUESTS = MAX_PROCESS_REQUESTS  # compatibility alias for tests/evidence
 MAX_OAUTH_REQUESTS = 2
 MAX_RASTER_SIZE = 256
 MAX_RETRYABLE_RETRIES = 1
@@ -72,23 +75,18 @@ STATISTICAL_API_URL = QUALIFICATION_ENDPOINTS.statistical_url
 PROCESS_API_URL = QUALIFICATION_ENDPOINTS.process_url
 
 ALLOWED_CHANGED_PATHS = frozenset({
-    "backend/config.py",
-    "backend/scripts/collect_satellite_indices.py",
-    "backend/scripts/dry_run_multi_index_single_field.py",
-    "backend/scripts/preview_multi_index_batch.py",
-    "backend/scripts/write_multi_index_batch.py",
-    "backend/scripts/write_multi_index_single_field.py",
-    "backend/services/raster_provider.py",
     "backend/services/satellite.py",
-    "backend/services/satellite_collection.py",
+    "backend/services/ndvi_raster.py",
     "backend/services/sentinel_provider.py",
-    "backend/tests/test_program_r1_live_sentinel_qualification.py",
     "backend/tests/test_sentinel_provider.py",
+    "backend/tests/test_ndvi_raster.py",
+    "backend/tests/test_program_r1_live_sentinel_qualification.py",
+    "backend/tests/test_task211_program_r1_final_closure.py",
+    "backend/requirements.txt",
     "ops/qualification/Run-ProgramR1LiveSentinelQualification.py",
 })
 
-# Deterministic isolated geometry inherited from the accepted PROGRAM R1
-# qualification dataset.  It is not read from a product database.
+# Deterministic field-sized polygon; never loaded from a product database.
 QUALIFICATION_GEOMETRY: dict[str, Any] = {
     "type": "Polygon",
     "coordinates": [[
@@ -109,19 +107,19 @@ EXIT_BASELINE = 6
 
 
 class BaselineError(RuntimeError):
-    """Exact Git/release baseline was not retained."""
+    """The required Git, filesystem, or evidence baseline was not retained."""
 
 
 class CredentialBoundaryError(RuntimeError):
-    """Credential file failed the secure process-local boundary."""
+    """The process-local credential file failed its strict boundary."""
 
 
 class RequestContractError(RuntimeError):
-    """A live request would violate the qualification bounds."""
+    """A request would violate the fixed TASK 211 live bounds."""
 
 
 class EvidenceSanitizationError(RuntimeError):
-    """Evidence retained forbidden secret-bearing material."""
+    """Evidence contains a forbidden secret-bearing or raw-body field."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,9 +141,17 @@ class GeometrySummary:
                 "north": self.bbox[3],
             },
             "areaHectares": self.area_hectares,
-            "sourceClass": "deterministic_isolated_program_r1_qualification_geometry",
+            "sourceClass": "deterministic_isolated_task_211_geometry",
             "productionDatabaseLookup": False,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class ProgramOutcome:
+    task_marker: str
+    program_marker: str
+    status: str
+    exit_code: int
 
 
 def parse_args() -> argparse.Namespace:
@@ -190,9 +196,11 @@ def validate_evidence_root(path: Path) -> Path:
         raise BaselineError("unexpected evidence root")
     required = {
         "00_BASELINE",
-        "01_IMPLEMENTATION",
-        "02_TESTS",
+        "01_DIAGNOSIS",
+        "02_IMPLEMENTATION",
+        "03_TESTS",
         "04_LIVE_SENTINEL",
+        "05_SECURITY_AND_SCOPE",
         "06_FINAL",
         "scratch",
     }
@@ -215,14 +223,34 @@ def _git(worktree: Path, *arguments: str) -> str:
     return completed.stdout.strip()
 
 
+def _current_changed_paths(worktree: Path) -> list[str]:
+    tracked = {
+        value.strip().replace("\\", "/")
+        for value in _git(worktree, "diff", "--name-only").splitlines()
+        if value.strip()
+    }
+    untracked = {
+        value.strip().replace("\\", "/")
+        for value in _git(
+            worktree,
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+        ).splitlines()
+        if value.strip()
+    }
+    return sorted(tracked | untracked)
+
+
 def assert_git_baseline(
     worktree: Path,
     expected_head: str,
     starting_head: str,
 ) -> dict[str, Any]:
+    if expected_head != REQUIRED_STARTING_HEAD or starting_head != REQUIRED_STARTING_HEAD:
+        raise BaselineError("unexpected TASK 211 head argument")
     actual_head = _git(worktree, "rev-parse", "HEAD")
     branch = _git(worktree, "branch", "--show-current")
-    dirty = bool(_git(worktree, "status", "--porcelain=v1", "--untracked-files=all"))
     remote_line = _git(
         worktree,
         "ls-remote",
@@ -236,38 +264,35 @@ def assert_git_baseline(
     source_dirty = bool(
         _git(SOURCE_CHECKOUT, "status", "--porcelain=v1", "--untracked-files=all")
     )
-    changed_paths = [
-        value.strip()
-        for value in _git(worktree, "diff", "--name-only", f"{starting_head}..{actual_head}").splitlines()
-        if value.strip()
-    ]
-    allowed_changes = set(changed_paths).issubset(ALLOWED_CHANGED_PATHS)
+    changed_paths = _current_changed_paths(worktree)
+    allowed_changes = bool(changed_paths) and set(changed_paths).issubset(ALLOWED_CHANGED_PATHS)
     checks = {
         "branchExact": branch == REQUIRED_BRANCH,
-        "headExact": actual_head == expected_head,
-        "worktreeClean": not dirty,
-        "remoteHeadExact": remote_head == expected_head,
+        "headStillStartingHead": actual_head == starting_head,
+        "remoteStillStartingHead": remote_head == starting_head,
+        "implementationChangesPresent": bool(changed_paths),
+        "implementationChangesRestricted": allowed_changes,
         "sourceMainBranchExact": source_branch == "main",
         "sourceMainHeadExact": source_head == REQUIRED_SOURCE_MAIN_HEAD,
         "sourceMainClean": not source_dirty,
-        "qualificationOnlyDiff": allowed_changes,
     }
     if not all(checks.values()):
-        raise BaselineError("exact release-candidate baseline was not retained")
+        raise BaselineError("exact pre-commit live qualification baseline was not retained")
     return {
         "checks": checks,
         "head": actual_head,
         "remoteHead": remote_head,
         "sourceMainHead": source_head,
-        "repositoryChangesOccurred": bool(changed_paths),
         "changedPaths": changed_paths,
+        "changedPathsAllowed": True,
+        "qualificationExecutedBeforeImplementationCommit": True,
         "productSurfacesInvalidated": False,
     }
 
 
 def _acl_security_flags(path: Path) -> tuple[bool, bool]:
     environment = os.environ.copy()
-    environment["AGROSAT_RUNTIME_ENV_FILE"] = str(path)
+    environment["AGROSAT_TASK211_RUNTIME_ENV_FILE"] = str(path)
     completed = subprocess.run(
         [
             "powershell",
@@ -275,15 +300,18 @@ def _acl_security_flags(path: Path) -> tuple[bool, bool]:
             "-NonInteractive",
             "-Command",
             (
-                "$acl = Get-Acl -LiteralPath $env:AGROSAT_RUNTIME_ENV_FILE; "
-                "$broad = @('S-1-1-0','S-1-5-11','S-1-5-32-545','S-1-5-32-546'); "
+                "$acl = Get-Acl -LiteralPath $env:AGROSAT_TASK211_RUNTIME_ENV_FILE; "
+                "$broad = @('S-1-1-0','S-1-5-11','S-1-5-32-545','S-1-5-32-546','S-1-5-32-547'); "
                 "$hasBroadRead = $false; "
                 "$rules = $acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]); "
-                "foreach ($rule in $rules) { "
-                "$readMask = [int][System.Security.AccessControl.FileSystemRights]::Read; "
-                "if (($broad -contains $rule.IdentityReference.Value) -and "
+                "$mask = [System.Security.AccessControl.FileSystemRights]::Read -bor "
+                "[System.Security.AccessControl.FileSystemRights]::ReadData -bor "
+                "[System.Security.AccessControl.FileSystemRights]::ReadAndExecute -bor "
+                "[System.Security.AccessControl.FileSystemRights]::Modify -bor "
+                "[System.Security.AccessControl.FileSystemRights]::FullControl; "
+                "foreach ($rule in $rules) { if (($broad -contains $rule.IdentityReference.Value) -and "
                 "$rule.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and "
-                "(([int]$rule.FileSystemRights -band $readMask) -ne 0)) { $hasBroadRead = $true } }; "
+                "(($rule.FileSystemRights -band $mask) -ne 0)) { $hasBroadRead = $true } }; "
                 "[pscustomobject]@{protected=$acl.AreAccessRulesProtected; broadReadAbsent=(-not $hasBroadRead)} "
                 "| ConvertTo-Json -Compress"
             ),
@@ -308,54 +336,44 @@ def validate_credential_boundary(path: Path) -> dict[str, bool]:
     outside_restricted = not any(
         _is_within(resolved, root) for root in RESTRICTED_CREDENTIAL_ROOTS
     )
-    assignments: list[tuple[str, bool]] = []
-    malformed = False
     try:
-        with resolved.open("r", encoding="utf-8-sig") as handle:
-            for raw_line in handle:
-                line = raw_line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if line.startswith("export "):
-                    line = line[7:].lstrip()
-                if "=" not in line:
-                    malformed = True
-                    continue
-                key, value = line.split("=", 1)
-                key = key.strip()
-                value = value.strip()
-                if (
-                    len(value) >= 2
-                    and value[0] == value[-1]
-                    and value[0] in {"'", '"'}
-                ):
-                    value = value[1:-1]
-                assignments.append((key, bool(value.strip())))
+        raw_lines = resolved.read_text(encoding="utf-8-sig").splitlines()
     except (OSError, UnicodeError):
         raise CredentialBoundaryError("credential file could not be parsed") from None
-
+    assignments: list[tuple[str, bool]] = []
+    format_valid = len(raw_lines) == 2
+    for line in raw_lines:
+        if not line or line != line.strip() or line.startswith("#") or "=" not in line:
+            format_valid = False
+            continue
+        key, value = line.split("=", 1)
+        if key != key.strip() or not key:
+            format_valid = False
+        assignments.append((key, bool(value.strip())))
     keys = [key for key, _ in assignments]
-    exact_keys = (
-        not malformed
-        and set(keys) == EXPECTED_CREDENTIAL_KEYS
-        and len(keys) == len(EXPECTED_CREDENTIAL_KEYS)
-    )
-    duplicate_keys_absent = len(keys) == len(set(keys))
-    nonempty = exact_keys and all(value_present for _, value_present in assignments)
+    exact_keys = format_valid and set(keys) == set(EXPECTED_CREDENTIAL_KEYS)
+    duplicate_keys_absent = len(keys) == len(set(keys)) == len(EXPECTED_CREDENTIAL_KEYS)
+    values_nonempty = exact_keys and all(present for _, present in assignments)
     acl_protected, broad_read_absent = _acl_security_flags(resolved)
     checks = {
         "credentialFileExists": resolved.is_file(),
         "credentialFileOutsideRepositoryWorktreesAndBackups": outside_restricted,
+        "exactlyTwoPhysicalLines": len(raw_lines) == 2,
+        "strictAssignmentFormat": format_valid,
         "accessControlInheritanceDisabled": acl_protected,
         "broadReadAccessAbsent": broad_read_absent,
         "exactRequiredKeySet": exact_keys,
         "duplicateKeysAbsent": duplicate_keys_absent,
-        "allRequiredValuesNonEmpty": nonempty,
-        "clientIdAvailable": exact_keys and nonempty,
-        "clientSecretAvailable": exact_keys and nonempty,
+        "allRequiredValuesNonEmpty": values_nonempty,
+        "clientIdAvailable": exact_keys and values_nonempty,
+        "clientSecretAvailable": exact_keys and values_nonempty,
         "credentialValuesIncluded": False,
+        "credentialFileHashed": False,
     }
-    if not all(value for key, value in checks.items() if key != "credentialValuesIncluded"):
+    if not all(value for key, value in checks.items() if key not in {
+        "credentialValuesIncluded",
+        "credentialFileHashed",
+    }):
         raise CredentialBoundaryError("secure credential boundary failed")
     return checks
 
@@ -398,16 +416,45 @@ def validate_geometry(geometry: dict[str, Any]) -> GeometrySummary:
     )
 
 
-def _time_range_dates(time_range: dict[str, Any]) -> tuple[date, date, int]:
+def _parse_utc_timestamp(value: object) -> datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise RequestContractError("missing UTC timestamp")
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
     try:
-        start = date.fromisoformat(str(time_range["from"])[:10])
-        end = date.fromisoformat(str(time_range["to"])[:10])
-    except (KeyError, TypeError, ValueError):
-        raise RequestContractError("invalid provider time range") from None
-    window_days = (end - start).days + 1
-    if window_days < 1 or window_days > MAX_DATE_WINDOW_DAYS:
-        raise RequestContractError("date window exceeds bound")
-    return start, end, window_days
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        raise RequestContractError("invalid UTC timestamp") from None
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise RequestContractError("timestamp is not explicit UTC")
+    return parsed.astimezone(timezone.utc)
+
+
+def _format_utc(value: datetime) -> str:
+    if value.tzinfo is None or value.utcoffset() != timedelta(0):
+        raise RequestContractError("timestamp is not explicit UTC")
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _validate_time_range(
+    time_range: dict[str, Any],
+    *,
+    maximum_days: int,
+) -> tuple[str, str, int]:
+    if not isinstance(time_range, dict):
+        raise RequestContractError("provider time range is absent")
+    start = _parse_utc_timestamp(time_range.get("from"))
+    end = _parse_utc_timestamp(time_range.get("to"))
+    if end <= start:
+        raise RequestContractError("provider time range is reversed")
+    duration = end - start
+    if duration.total_seconds() % 86400 != 0:
+        raise RequestContractError("provider time range is not whole UTC days")
+    days = int(duration.total_seconds() // 86400)
+    if days < 1 or days > maximum_days:
+        raise RequestContractError("provider time range exceeds bound")
+    return _format_utc(start), _format_utc(end), days
 
 
 def _provider_status_classification(status: int) -> tuple[str, bool]:
@@ -442,8 +489,11 @@ def inspect_statistical_response(response: httpx.Response) -> dict[str, Any]:
         "contractShapeValid": False,
         "intervalCount": 0,
         "usableIntervalCount": 0,
-        "latestUsableIntervalFrom": None,
-        "latestUsableIntervalTo": None,
+        "invalidIntervalCount": 0,
+        "selectedIntervalFromUtc": None,
+        "selectedIntervalToUtc": None,
+        "intervalListSummary": [],
+        "rawProviderBodyIncluded": False,
     }
     try:
         payload = response.json()
@@ -452,37 +502,67 @@ def inspect_statistical_response(response: httpx.Response) -> dict[str, Any]:
     metadata["jsonParseable"] = True
     if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
         return metadata
-    metadata["contractShapeValid"] = True
     intervals = payload["data"]
     metadata["intervalCount"] = len(intervals)
-    usable: list[dict[str, Any]] = []
+    summaries: list[tuple[datetime, datetime, dict[str, Any]]] = []
+    invalid_count = 0
     for interval in intervals:
-        if not isinstance(interval, dict):
-            metadata["contractShapeValid"] = False
-            continue
-        stats = (
-            interval.get("outputs", {})
-            .get("ndvi", {})
-            .get("bands", {})
-            .get("B0", {})
-            .get("stats", {})
-        )
         try:
-            sample_count = float(stats.get("sampleCount", 0))
-        except (TypeError, ValueError):
-            sample_count = 0
-        if sample_count > 0:
-            usable.append(interval)
+            if not isinstance(interval, dict):
+                raise RequestContractError("invalid interval object")
+            bounds = interval.get("interval")
+            if not isinstance(bounds, dict):
+                raise RequestContractError("invalid interval bounds")
+            interval_from = _parse_utc_timestamp(bounds.get("from"))
+            interval_to = _parse_utc_timestamp(bounds.get("to"))
+            if interval_to <= interval_from:
+                raise RequestContractError("reversed interval")
+            stats = (
+                interval.get("outputs", {})
+                .get("ndvi", {})
+                .get("bands", {})
+                .get("B0", {})
+                .get("stats", {})
+            )
+            if not isinstance(stats, dict):
+                raise RequestContractError("invalid stats object")
+            sample_count = int(stats.get("sampleCount", 0))
+            no_data_count = int(stats.get("noDataCount", 0))
+            if sample_count < 0 or no_data_count < 0 or no_data_count > sample_count:
+                raise RequestContractError("invalid pixel counts")
+        except (RequestContractError, TypeError, ValueError, OverflowError):
+            invalid_count += 1
+            continue
+        valid_pixel_count = sample_count - no_data_count
+        summary = {
+            "intervalFromUtc": _format_utc(interval_from),
+            "intervalToUtc": _format_utc(interval_to),
+            "sampleCount": sample_count,
+            "noDataCount": no_data_count,
+            "validPixelCount": valid_pixel_count,
+            "validPixelsPct": (
+                round(valid_pixel_count / sample_count * 100, 6)
+                if sample_count > 0
+                else 0.0
+            ),
+            "usable": valid_pixel_count > 0,
+        }
+        summaries.append((interval_from, interval_to, summary))
+    summaries.sort(key=lambda item: (item[0], item[1]))
+    metadata["invalidIntervalCount"] = invalid_count
+    metadata["contractShapeValid"] = invalid_count == 0
+    metadata["intervalListSummary"] = [item[2] for item in summaries]
+    usable = [item for item in summaries if item[2]["usable"]]
     metadata["usableIntervalCount"] = len(usable)
     if usable:
-        interval = usable[-1].get("interval", {})
-        metadata["latestUsableIntervalFrom"] = interval.get("from")
-        metadata["latestUsableIntervalTo"] = interval.get("to")
+        selected = max(usable, key=lambda item: (item[0], item[1]))[2]
+        metadata["selectedIntervalFromUtc"] = selected["intervalFromUtc"]
+        metadata["selectedIntervalToUtc"] = selected["intervalToUtc"]
     return metadata
 
 
 class BoundedHttpRecorder:
-    """Process-local wrapper around the real httpx.post entry point."""
+    """Process-local guard around the real ``httpx.post`` entry point."""
 
     def __init__(
         self,
@@ -496,88 +576,178 @@ class BoundedHttpRecorder:
         self.geometry_summary = geometry_summary
         self.provider_endpoints = provider_endpoints
         self.ledger: list[dict[str, Any]] = []
-        self.counts = {"oauth": 0, "statistical": 0, "raster": 0}
+        self.counts = {"oauth": 0, "statistical": 0, "process": 0}
         self.statistical_response_metadata: list[dict[str, Any]] = []
         self.raster_response_metadata: list[dict[str, Any]] = []
         self.contract_failure = False
+        self.expected_process_interval: tuple[str, str] | None = None
+
+    def bind_selected_observation(self, result: dict[str, Any]) -> None:
+        from services.satellite import (
+            NDVI_INDEX_CODE,
+            NDVI_MASK_CONTRACT_ID,
+            SENTINEL_DATASET,
+        )
+
+        try:
+            interval_from, interval_to, days = _validate_time_range(
+                {
+                    "from": result["interval_from_utc"],
+                    "to": result["interval_to_utc"],
+                },
+                maximum_days=1,
+            )
+        except (KeyError, RequestContractError):
+            self.contract_failure = True
+            raise RequestContractError("selected observation interval is invalid") from None
+        if (
+            days != 1
+            or result.get("provider") != QUALIFICATION_PROVIDER
+            or result.get("dataset") != SENTINEL_DATASET
+            or result.get("index_code") != NDVI_INDEX_CODE
+            or result.get("mask_contract_id") != NDVI_MASK_CONTRACT_ID
+            or result.get("interval_is_daily") is not True
+            or result.get("acquisition_timestamp_available") is not False
+        ):
+            self.contract_failure = True
+            raise RequestContractError("selected observation contract is inconsistent")
+        self.expected_process_interval = (interval_from, interval_to)
 
     def _validate_token(self, kwargs: dict[str, Any]) -> dict[str, Any]:
         data = kwargs.get("data")
-        if not isinstance(data, dict):
-            raise RequestContractError("OAuth form payload is absent")
-        if data.get("grant_type") != "client_credentials":
-            raise RequestContractError("OAuth grant type is invalid")
-        present = [
+        if not isinstance(data, dict) or data.get("grant_type") != "client_credentials":
+            raise RequestContractError("OAuth client-credentials form is invalid")
+        if not all(
             isinstance(data.get(name), str) and bool(data.get(name).strip())
             for name in ("client_id", "client_secret")
-        ]
-        if not all(present):
+        ):
             raise RequestContractError("OAuth credentials are unavailable")
         return {
             "operation": "oauth_client_credentials",
             "indices": [],
             "dateWindowDays": 0,
             "geometryFingerprint": None,
+            "intervalFromUtc": None,
+            "intervalToUtc": None,
+            "dataset": None,
+            "crs": None,
+            "maskContractId": None,
+            "evalscriptSha256": None,
         }
 
     def _validate_statistical(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        from services.satellite import (
+            NDVI_EVALSCRIPT,
+            NDVI_INDEX_CODE,
+            NDVI_MASK_CONTRACT_ID,
+            SENTINEL_CRS,
+            SENTINEL_DATASET,
+            SENTINEL_MAX_CLOUD_COVERAGE,
+        )
+
         payload = kwargs.get("json")
         if not isinstance(payload, dict):
             raise RequestContractError("statistical JSON payload is absent")
         try:
-            geometry = payload["input"]["bounds"]["geometry"]
+            bounds = payload["input"]["bounds"]
+            geometry = bounds["geometry"]
+            crs = bounds["properties"]["crs"]
             data_items = payload["input"]["data"]
-            input_time = data_items[0]["dataFilter"]["timeRange"]
+            data_item = data_items[0]
+            input_time = data_item["dataFilter"]["timeRange"]
             aggregation = payload["aggregation"]
             aggregation_time = aggregation["timeRange"]
             evalscript = aggregation["evalscript"]
             calculations = payload["calculations"]
         except (KeyError, IndexError, TypeError):
             raise RequestContractError("statistical application payload is invalid") from None
-        if len(data_items) != 1 or data_items[0].get("type") != "sentinel-2-l2a":
-            raise RequestContractError("statistical data source is not bounded Sentinel-2 L2A")
+        if len(data_items) != 1 or data_item.get("type") != SENTINEL_DATASET:
+            raise RequestContractError("statistical dataset is not Sentinel-2 L2A")
         if geometry_fingerprint(geometry) != self.geometry_summary.fingerprint:
             raise RequestContractError("statistical geometry changed")
-        input_start, input_end, window_days = _time_range_dates(input_time)
-        aggregation_start, aggregation_end, _ = _time_range_dates(aggregation_time)
-        if (input_start, input_end) != (aggregation_start, aggregation_end):
+        if crs != SENTINEL_CRS:
+            raise RequestContractError("statistical CRS changed")
+        input_from, input_to, window_days = _validate_time_range(
+            input_time,
+            maximum_days=MAX_DATE_WINDOW_DAYS,
+        )
+        aggregation_from, aggregation_to, aggregation_days = _validate_time_range(
+            aggregation_time,
+            maximum_days=MAX_DATE_WINDOW_DAYS,
+        )
+        if (input_from, input_to) != (aggregation_from, aggregation_to):
             raise RequestContractError("statistical time ranges differ")
+        if aggregation_days != window_days:
+            raise RequestContractError("statistical window duration differs")
         if aggregation.get("aggregationInterval", {}).get("of") != "P1D":
-            raise RequestContractError("statistical aggregation interval is not daily")
-        if not isinstance(evalscript, str) or 'id: "ndvi"' not in evalscript:
-            raise RequestContractError("NDVI evalscript is absent")
+            raise RequestContractError("statistical aggregation is not P1D")
+        if evalscript != NDVI_EVALSCRIPT:
+            raise RequestContractError("statistical NDVI evalscript changed")
         if not isinstance(calculations, dict) or set(calculations) != {"default"}:
             raise RequestContractError("statistical request is not NDVI-only")
+        if data_item.get("dataFilter", {}).get("maxCloudCoverage") != SENTINEL_MAX_CLOUD_COVERAGE:
+            raise RequestContractError("statistical cloud filter changed")
+        if data_item.get("processing", {}).get("harmonizeValues") is not True:
+            raise RequestContractError("statistical harmonization changed")
         return {
             "operation": "sentinel_statistical_ndvi",
-            "indices": ["ndvi"],
+            "indices": [NDVI_INDEX_CODE],
             "dateWindowDays": window_days,
             "geometryFingerprint": self.geometry_summary.fingerprint,
+            "intervalFromUtc": input_from,
+            "intervalToUtc": input_to,
+            "dataset": SENTINEL_DATASET,
+            "crs": SENTINEL_CRS,
+            "maskContractId": NDVI_MASK_CONTRACT_ID,
+            "evalscriptSha256": hashlib.sha256(NDVI_EVALSCRIPT.encode("utf-8")).hexdigest(),
         }
 
-    def _validate_raster(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+    def _validate_process(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        from services.ndvi_raster import EVALSCRIPT
+        from services.satellite import (
+            NDVI_INDEX_CODE,
+            NDVI_MASK_CONTRACT_ID,
+            SENTINEL_CRS,
+            SENTINEL_DATASET,
+            SENTINEL_MAX_CLOUD_COVERAGE,
+        )
+
         payload = kwargs.get("json")
         if not isinstance(payload, dict):
-            raise RequestContractError("raster JSON payload is absent")
+            raise RequestContractError("Process JSON payload is absent")
         try:
-            geometry = payload["input"]["bounds"]["geometry"]
+            bounds = payload["input"]["bounds"]
+            geometry = bounds["geometry"]
+            crs = bounds["properties"]["crs"]
             data_items = payload["input"]["data"]
-            time_range = data_items[0]["dataFilter"]["timeRange"]
+            data_item = data_items[0]
+            time_range = data_item["dataFilter"]["timeRange"]
             output = payload["output"]
             evalscript = payload["evalscript"]
         except (KeyError, IndexError, TypeError):
-            raise RequestContractError("raster application payload is invalid") from None
-        if len(data_items) != 1 or data_items[0].get("type") != "sentinel-2-l2a":
-            raise RequestContractError("raster data source is not bounded Sentinel-2 L2A")
+            raise RequestContractError("Process application payload is invalid") from None
+        if len(data_items) != 1 or data_item.get("type") != SENTINEL_DATASET:
+            raise RequestContractError("Process dataset is not Sentinel-2 L2A")
         if geometry_fingerprint(geometry) != self.geometry_summary.fingerprint:
-            raise RequestContractError("raster geometry changed")
-        start, end, _ = _time_range_dates(time_range)
-        if (end - start).days != 1:
-            raise RequestContractError("raster request is not a one-day interval")
-        width = output.get("width")
-        height = output.get("height")
-        if width != MAX_RASTER_SIZE or height != MAX_RASTER_SIZE:
-            raise RequestContractError("raster size exceeds qualification bound")
+            raise RequestContractError("Process geometry changed")
+        if crs != SENTINEL_CRS:
+            raise RequestContractError("Process CRS changed")
+        interval_from, interval_to, interval_days = _validate_time_range(
+            time_range,
+            maximum_days=1,
+        )
+        if interval_days != 1:
+            raise RequestContractError("Process interval is not daily")
+        if self.expected_process_interval is None:
+            raise RequestContractError("Process request was not bound to a Statistical interval")
+        if (interval_from, interval_to) != self.expected_process_interval:
+            raise RequestContractError("Process interval differs from selected Statistical interval")
+        if data_item.get("dataFilter", {}).get("maxCloudCoverage") != SENTINEL_MAX_CLOUD_COVERAGE:
+            raise RequestContractError("Process cloud filter changed")
+        if data_item.get("processing", {}).get("harmonizeValues") is not True:
+            raise RequestContractError("Process harmonization changed")
+        if output.get("width") != MAX_RASTER_SIZE or output.get("height") != MAX_RASTER_SIZE:
+            raise RequestContractError("Process raster dimensions changed")
         responses = output.get("responses")
         if (
             not isinstance(responses, list)
@@ -585,15 +755,24 @@ class BoundedHttpRecorder:
             or responses[0].get("identifier") != "default"
             or responses[0].get("format", {}).get("type") != "image/png"
         ):
-            raise RequestContractError("raster output is not one PNG")
-        if not isinstance(evalscript, str) or "ndvi" not in evalscript.casefold():
-            raise RequestContractError("raster NDVI evalscript is absent")
+            raise RequestContractError("Process output is not one PNG")
+        if evalscript != EVALSCRIPT:
+            raise RequestContractError("Process NDVI evalscript changed")
         return {
             "operation": "sentinel_process_ndvi_png",
-            "indices": ["ndvi"],
-            "dateWindowDays": 1,
+            "indices": [NDVI_INDEX_CODE],
+            "dateWindowDays": interval_days,
             "geometryFingerprint": self.geometry_summary.fingerprint,
+            "intervalFromUtc": interval_from,
+            "intervalToUtc": interval_to,
+            "dataset": SENTINEL_DATASET,
+            "crs": SENTINEL_CRS,
+            "maskContractId": NDVI_MASK_CONTRACT_ID,
+            "evalscriptSha256": hashlib.sha256(EVALSCRIPT.encode("utf-8")).hexdigest(),
         }
+
+    # Backward-compatible name retained for focused tests.
+    _validate_raster = _validate_process
 
     def _request_metadata(self, url: str, kwargs: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         if url == self.provider_endpoints.token_url:
@@ -605,9 +784,9 @@ class BoundedHttpRecorder:
             endpoint_class = "official_cdse_sentinel_hub_statistical_https"
             metadata = self._validate_statistical(kwargs)
         elif url == self.provider_endpoints.process_url:
-            kind = "raster"
+            kind = "process"
             endpoint_class = "official_cdse_sentinel_hub_process_https"
-            metadata = self._validate_raster(kwargs)
+            metadata = self._validate_process(kwargs)
         else:
             raise RequestContractError("unapproved live endpoint")
         metadata["endpointClass"] = endpoint_class
@@ -620,7 +799,7 @@ class BoundedHttpRecorder:
             maximum = {
                 "oauth": MAX_OAUTH_REQUESTS,
                 "statistical": MAX_STATISTICAL_REQUESTS,
-                "raster": MAX_RASTER_REQUESTS,
+                "process": MAX_PROCESS_REQUESTS,
             }[kind]
             if self.counts[kind] >= maximum:
                 raise RequestContractError(f"{kind} request bound exceeded")
@@ -635,8 +814,14 @@ class BoundedHttpRecorder:
             "endpointClass": metadata["endpointClass"],
             "operationClass": metadata["operation"],
             "indexCodes": metadata["indices"],
+            "dataset": metadata["dataset"],
+            "crs": metadata["crs"],
             "dateWindowDays": metadata["dateWindowDays"],
+            "intervalFromUtc": metadata["intervalFromUtc"],
+            "intervalToUtc": metadata["intervalToUtc"],
             "geometryFingerprint": metadata["geometryFingerprint"],
+            "maskContractId": metadata["maskContractId"],
+            "evalscriptSha256": metadata["evalscriptSha256"],
             "httpStatus": None,
             "durationMs": None,
             "providerClassification": "pending",
@@ -648,7 +833,7 @@ class BoundedHttpRecorder:
         bounded_timeout = {
             "oauth": httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0),
             "statistical": httpx.Timeout(connect=10.0, read=60.0, write=15.0, pool=10.0),
-            "raster": httpx.Timeout(connect=10.0, read=45.0, write=10.0, pool=10.0),
+            "process": httpx.Timeout(connect=10.0, read=45.0, write=10.0, pool=10.0),
         }[kind]
         kwargs["timeout"] = bounded_timeout
         kwargs["follow_redirects"] = False
@@ -666,30 +851,32 @@ class BoundedHttpRecorder:
         entry["providerClassification"] = category
 
         if kind == "statistical" and 200 <= response.status_code <= 299:
-            metadata = inspect_statistical_response(response)
-            self.statistical_response_metadata.append(metadata)
-            if not metadata["jsonParseable"] or not metadata["contractShapeValid"]:
+            response_metadata = inspect_statistical_response(response)
+            self.statistical_response_metadata.append(response_metadata)
+            if not response_metadata["jsonParseable"] or not response_metadata["contractShapeValid"]:
                 entry["providerClassification"] = "invalid_response"
-            elif metadata["usableIntervalCount"] == 0:
+            elif response_metadata["usableIntervalCount"] == 0:
                 entry["providerClassification"] = "no_data"
-        if kind == "raster":
+        if kind == "process":
             content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-            self.raster_response_metadata.append(
-                {
-                    "contentType": content_type or None,
-                    "nonEmptyBytes": bool(response.content),
-                    "byteCount": len(response.content),
-                    "rawBytesPersisted": False,
-                }
-            )
+            response_metadata = {
+                "contentType": content_type or None,
+                "responseSha256": hashlib.sha256(response.content).hexdigest(),
+                "byteCount": len(response.content),
+                "nonEmptyBytes": bool(response.content),
+                "rawRasterPersisted": False,
+                "pixelArrayPersisted": False,
+            }
+            self.raster_response_metadata.append(response_metadata)
         return response
 
     def latest(self, kind: str) -> dict[str, Any] | None:
+        normalized_kind = "process" if kind == "raster" else kind
         operation = {
             "oauth": "oauth_client_credentials",
             "statistical": "sentinel_statistical_ndvi",
-            "raster": "sentinel_process_ndvi_png",
-        }[kind]
+            "process": "sentinel_process_ndvi_png",
+        }[normalized_kind]
         for entry in reversed(self.ledger):
             if entry["operationClass"] == operation:
                 return entry
@@ -697,13 +884,11 @@ class BoundedHttpRecorder:
 
 
 def retryable_entry(entry: dict[str, Any] | None) -> bool:
-    if not entry:
-        return False
-    return entry.get("providerClassification") in {
+    return bool(entry and entry.get("providerClassification") in {
         "timeout",
         "network",
         "provider_unavailable",
-    }
+    })
 
 
 def mark_retry_decision(entry: dict[str, Any] | None, decision: str) -> None:
@@ -718,19 +903,43 @@ def classify_program_outcome(
     statistical_entry: dict[str, Any] | None,
     statistical_parseable: bool,
     usable_observation: bool,
+    provenance_passed: bool,
     quality_passed: bool,
-    raster_entry: dict[str, Any] | None,
-    raster_passed: bool,
-) -> tuple[str, str, int]:
-    entries = [entry for entry in (statistical_entry, raster_entry) if entry]
+    process_entry: dict[str, Any] | None = None,
+    raster_entry: dict[str, Any] | None = None,
+    raster_content_valid: bool = False,
+    raster_passed: bool | None = None,
+    reconciliation_passed: bool = False,
+    mocks_used: bool = False,
+) -> ProgramOutcome:
+    process_entry = process_entry or raster_entry
+    if raster_passed is not None:
+        raster_content_valid = raster_passed
+    entries = [entry for entry in (statistical_entry, process_entry) if entry]
     categories = {str(entry.get("providerClassification")) for entry in entries}
     statuses = {entry.get("httpStatus") for entry in entries}
-    if contract_failure or "request_rejected" in categories or statuses.intersection({400, 422}):
-        return "FAIL_PROGRAM_R1_INTERNAL_SENTINEL_BLOCKER", "FAIL", EXIT_INTERNAL_BLOCKER
-    if "invalid_response" in categories:
-        return "FAIL_PROGRAM_R1_INTERNAL_SENTINEL_BLOCKER", "FAIL", EXIT_INTERNAL_BLOCKER
+    internal_categories = {
+        "request_rejected",
+        "invalid_response",
+        "invalid_raster_content",
+        "unexpected_http_status",
+        "provider_error",
+    }
+    if (
+        contract_failure
+        or mocks_used
+        or categories.intersection(internal_categories)
+        or statuses.intersection({400, 422})
+    ):
+        return ProgramOutcome(
+            "FAIL_TASK_211_INTERNAL_SENTINEL_BLOCKER",
+            "FAIL_PROGRAM_R1_INTERNAL_SENTINEL_BLOCKER",
+            "FAIL",
+            EXIT_INTERNAL_BLOCKER,
+        )
     if "authentication" in categories or statuses.intersection({401, 403}):
-        return (
+        return ProgramOutcome(
+            "PARTIAL_TASK_211_SENTINEL_ACCOUNT_PREREQUISITE",
             "PARTIAL_PROGRAM_R1_SENTINEL_ACCOUNT_PREREQUISITE",
             "BLOCKED",
             EXIT_ACCOUNT_PREREQUISITE,
@@ -742,28 +951,46 @@ def classify_program_outcome(
         "provider_unavailable",
         "no_data",
     }):
-        return (
+        return ProgramOutcome(
+            "PARTIAL_TASK_211_SENTINEL_PROVIDER_PREREQUISITE",
             "PARTIAL_PROGRAM_R1_SENTINEL_PROVIDER_PREREQUISITE",
             "BLOCKED",
             EXIT_PROVIDER_PREREQUISITE,
         )
     if not oauth_succeeded:
-        return (
+        return ProgramOutcome(
+            "PARTIAL_TASK_211_SENTINEL_PROVIDER_PREREQUISITE",
             "PARTIAL_PROGRAM_R1_SENTINEL_PROVIDER_PREREQUISITE",
             "BLOCKED",
             EXIT_PROVIDER_PREREQUISITE,
         )
     if not statistical_parseable:
-        return "FAIL_PROGRAM_R1_INTERNAL_SENTINEL_BLOCKER", "FAIL", EXIT_INTERNAL_BLOCKER
+        return ProgramOutcome(
+            "FAIL_TASK_211_INTERNAL_SENTINEL_BLOCKER",
+            "FAIL_PROGRAM_R1_INTERNAL_SENTINEL_BLOCKER",
+            "FAIL",
+            EXIT_INTERNAL_BLOCKER,
+        )
     if not usable_observation or not quality_passed:
-        return (
+        return ProgramOutcome(
+            "PARTIAL_TASK_211_SENTINEL_PROVIDER_PREREQUISITE",
             "PARTIAL_PROGRAM_R1_SENTINEL_PROVIDER_PREREQUISITE",
             "BLOCKED",
             EXIT_PROVIDER_PREREQUISITE,
         )
-    if not raster_passed:
-        return "FAIL_PROGRAM_R1_INTERNAL_SENTINEL_BLOCKER", "FAIL", EXIT_INTERNAL_BLOCKER
-    return "PASS_PROGRAM_R1_FULL_MERGE_READINESS", "PASS", EXIT_PASS
+    if not provenance_passed or not raster_content_valid or not reconciliation_passed:
+        return ProgramOutcome(
+            "FAIL_TASK_211_INTERNAL_SENTINEL_BLOCKER",
+            "FAIL_PROGRAM_R1_INTERNAL_SENTINEL_BLOCKER",
+            "FAIL",
+            EXIT_INTERNAL_BLOCKER,
+        )
+    return ProgramOutcome(
+        "PASS_TASK_211_PROGRAM_R1_FINAL_CLOSURE",
+        "PASS_PROGRAM_R1_FULL_MERGE_READINESS",
+        "PASS",
+        EXIT_PASS,
+    )
 
 
 def assert_sanitized(serialized: str, forbidden_values: list[str]) -> None:
@@ -783,6 +1010,8 @@ def assert_sanitized(serialized: str, forbidden_values: list[str]) -> None:
         '"rawproviderbody"',
         '"raw_provider_body"',
         '"raw_response_body"',
+        '"rasterbytes"',
+        '"pixelvalues"',
         "bearer ",
         "-----begin private key-----",
         "-----begin rsa private key-----",
@@ -803,6 +1032,100 @@ def assert_sanitized(serialized: str, forbidden_values: list[str]) -> None:
         raise EvidenceSanitizationError("credential or token value reached evidence")
 
 
+def _reconciliation_facts(
+    stats_result: dict[str, Any] | None,
+    statistical_entry: dict[str, Any] | None,
+    process_entry: dict[str, Any] | None,
+    raster_validation: dict[str, Any] | None,
+) -> dict[str, Any]:
+    from services.satellite import (
+        NDVI_INDEX_CODE,
+        NDVI_MASK_CONTRACT_ID,
+        SENTINEL_CRS,
+        SENTINEL_DATASET,
+    )
+
+    same_provider = bool(
+        stats_result
+        and statistical_entry
+        and process_entry
+        and stats_result.get("provider") == QUALIFICATION_PROVIDER
+        and statistical_entry.get("providerPreset") == QUALIFICATION_PROVIDER
+        and process_entry.get("providerPreset") == QUALIFICATION_PROVIDER
+    )
+    same_dataset = bool(
+        stats_result
+        and statistical_entry
+        and process_entry
+        and stats_result.get("dataset") == SENTINEL_DATASET
+        and statistical_entry.get("dataset") == SENTINEL_DATASET
+        and process_entry.get("dataset") == SENTINEL_DATASET
+    )
+    same_index = bool(
+        stats_result
+        and stats_result.get("index_code") == NDVI_INDEX_CODE
+        and statistical_entry
+        and statistical_entry.get("indexCodes") == [NDVI_INDEX_CODE]
+        and process_entry
+        and process_entry.get("indexCodes") == [NDVI_INDEX_CODE]
+    )
+    same_geometry = bool(
+        statistical_entry
+        and process_entry
+        and statistical_entry.get("geometryFingerprint")
+        == process_entry.get("geometryFingerprint")
+    )
+    same_crs = bool(
+        statistical_entry
+        and process_entry
+        and statistical_entry.get("crs") == SENTINEL_CRS
+        and process_entry.get("crs") == SENTINEL_CRS
+    )
+    exact_interval = bool(
+        stats_result
+        and process_entry
+        and stats_result.get("interval_from_utc") == process_entry.get("intervalFromUtc")
+        and stats_result.get("interval_to_utc") == process_entry.get("intervalToUtc")
+    )
+    same_mask = bool(
+        stats_result
+        and statistical_entry
+        and process_entry
+        and raster_validation
+        and stats_result.get("mask_contract_id") == NDVI_MASK_CONTRACT_ID
+        and statistical_entry.get("maskContractId") == NDVI_MASK_CONTRACT_ID
+        and process_entry.get("maskContractId") == NDVI_MASK_CONTRACT_ID
+        and raster_validation.get("maskContractId") == NDVI_MASK_CONTRACT_ID
+    )
+    facts = {
+        "sameProvider": same_provider,
+        "sameDataset": same_dataset,
+        "sameIndex": same_index,
+        "sameGeometryFingerprint": same_geometry,
+        "sameCrs": same_crs,
+        "exactIntervalBounds": exact_interval,
+        "compatibleMaskContract": same_mask,
+        "sameHarmonization": bool(statistical_entry and process_entry),
+        "sameCloudFilter": bool(statistical_entry and process_entry),
+        "exactAcquisitionTimestampClaimed": False,
+    }
+    facts["passed"] = all(
+        facts[key]
+        for key in (
+            "sameProvider",
+            "sameDataset",
+            "sameIndex",
+            "sameGeometryFingerprint",
+            "sameCrs",
+            "exactIntervalBounds",
+            "compatibleMaskContract",
+            "sameHarmonization",
+            "sameCloudFilter",
+        )
+    )
+    return facts
+
+
 def run_live(
     *,
     worktree: Path,
@@ -819,46 +1142,46 @@ def run_live(
     os.environ["SENTINEL_HUB_PROVIDER"] = QUALIFICATION_PROVIDER
     os.environ["AGROSAT_RUNTIME_ENV_FILE"] = str(runtime_env.resolve(strict=True))
     os.environ["RELEASE_REVISION"] = expected_head
-    backend = worktree / "backend"
-    sys.path.insert(0, str(backend))
 
     from config import settings
     from services import ndvi_raster
-    from services.raster_provider import provider_metadata
     from services.satellite import (
+        CANONICAL_DATE_SEMANTICS,
+        NDVI_EVALSCRIPT,
+        NDVI_INDEX_CODE,
+        NDVI_MASK_CONTRACT_ID,
+        REAL_SATELLITE_SOURCE,
+        SENTINEL_CRS,
+        SENTINEL_DATASET,
+        SENTINEL_MAX_CLOUD_COVERAGE,
         SentinelHubService,
         validate_ndvi_quality,
     )
-    from services.satellite_safety import (
-        REAL_SATELLITE_SOURCE,
-        require_payload_provenance,
-        require_real_service,
-    )
+    from services.satellite_safety import require_payload_provenance, require_real_service
 
-    client_id_available = (
-        isinstance(settings.sentinel_hub_client_id, str)
-        and bool(settings.sentinel_hub_client_id.strip())
-    )
-    client_secret_available = (
-        isinstance(settings.sentinel_hub_client_secret, str)
-        and bool(settings.sentinel_hub_client_secret.strip())
-    )
     credential_checks["runtimeSettingsLoad"] = True
-    credential_checks["clientIdAvailable"] = client_id_available
-    credential_checks["clientSecretAvailable"] = client_secret_available
-    if not (client_id_available and client_secret_available):
-        raise CredentialBoundaryError("runtime settings did not load complete credentials")
+    credential_checks["clientIdAvailable"] = bool(
+        isinstance(settings.sentinel_hub_client_id, str)
+        and settings.sentinel_hub_client_id.strip()
+    )
+    credential_checks["clientSecretAvailable"] = bool(
+        isinstance(settings.sentinel_hub_client_secret, str)
+        and settings.sentinel_hub_client_secret.strip()
+    )
+    if not credential_checks["clientIdAvailable"] or not credential_checks["clientSecretAvailable"]:
+        raise CredentialBoundaryError("runtime settings did not load credentials")
     if settings.sentinel_hub_provider != QUALIFICATION_PROVIDER:
-        raise RequestContractError("runtime Sentinel provider is not CDSE")
+        raise RequestContractError("runtime provider is not CDSE")
     if settings.wialon_enabled is not False:
         raise RequestContractError("Wialon must remain disabled")
 
     geometry_summary = validate_geometry(QUALIFICATION_GEOMETRY)
     from shapely.geometry import shape
+
     geometry_wkt = shape(QUALIFICATION_GEOMETRY).wkt
     date_from, date_to = select_date_window(datetime.now(timezone.utc).date())
-    if (date_to - date_from).days + 1 > MAX_DATE_WINDOW_DAYS:
-        raise RequestContractError("runtime date window exceeds bound")
+    if (date_to - date_from).days + 1 != MAX_DATE_WINDOW_DAYS:
+        raise RequestContractError("runtime date window changed")
 
     service = SentinelHubService()
     require_real_service(service)
@@ -868,16 +1191,10 @@ def run_live(
         or service._provider_endpoints != QUALIFICATION_ENDPOINTS
     ):
         raise RequestContractError("Sentinel provider chain is inconsistent")
+
     original_post = httpx.post
-    recorder = BoundedHttpRecorder(
-        original_post,
-        geometry_summary,
-        QUALIFICATION_ENDPOINTS,
-    )
+    recorder = BoundedHttpRecorder(original_post, geometry_summary, QUALIFICATION_ENDPOINTS)
     httpx.post = recorder.post
-    # The raster helper normally constructs the same service class again.  Reuse
-    # this already-authenticated real instance process-locally so the bounded run
-    # does not spend an unnecessary second OAuth request.
     original_service_factory = ndvi_raster.get_satellite_service
     ndvi_raster.get_satellite_service = lambda: service
     logging.getLogger("services.satellite").setLevel(logging.CRITICAL)
@@ -887,9 +1204,9 @@ def run_live(
     quality_passed = False
     quality_reason_class = "not_executed"
     provenance_passed = False
-    raster_passed = False
-    raster_bytes_count = 0
+    raster_validation: dict[str, Any] | None = None
     raster_error_class: str | None = None
+    raster_rejection_reason: str | None = None
     retry_count = 0
     try:
         for attempt in range(MAX_RETRYABLE_RETRIES + 1):
@@ -901,7 +1218,6 @@ def run_live(
             )
             oauth_entry = recorder.latest("oauth")
             stats_entry = recorder.latest("statistical")
-            oauth_succeeded_now = bool(service._access_token)
             response_meta = (
                 recorder.statistical_response_metadata[-1]
                 if recorder.statistical_response_metadata
@@ -912,6 +1228,7 @@ def run_live(
                 and response_meta["jsonParseable"]
                 and response_meta["contractShapeValid"]
             )
+            oauth_succeeded_now = bool(service._access_token)
             terminal_entry = stats_entry or oauth_entry
             if (
                 not oauth_succeeded_now
@@ -928,10 +1245,10 @@ def run_live(
             ):
                 stats_entry["providerClassification"] = "invalid_response"
             if stats_result is not None:
-                mark_retry_decision(terminal_entry, "stop_application_parse_succeeded")
                 if stats_entry:
                     stats_entry["providerClassification"] = "sentinel_2_observation"
                     stats_entry["parsedObservationCount"] = 1
+                mark_retry_decision(terminal_entry, "stop_application_parse_succeeded")
                 break
             if retryable_entry(terminal_entry) and attempt < MAX_RETRYABLE_RETRIES:
                 if recorder.counts["oauth"] >= MAX_OAUTH_REQUESTS and not oauth_succeeded_now:
@@ -952,66 +1269,63 @@ def run_live(
 
         if stats_result is not None:
             require_payload_provenance(stats_result)
-            provenance_passed = stats_result.get("satellite") == REAL_SATELLITE_SOURCE
+            provenance_passed = (
+                stats_result.get("satellite") == REAL_SATELLITE_SOURCE
+                and stats_result.get("source") == REAL_SATELLITE_SOURCE
+            )
             quality_passed, _quality_reason = validate_ndvi_quality(
                 stats_result.get("mean_ndvi"),
                 cloud_cover_pct=stats_result.get("cloud_cover_pct"),
                 min_ndvi=stats_result.get("min_ndvi"),
                 max_ndvi=stats_result.get("max_ndvi"),
-                field_name="program_r1_isolated_qualification_geometry",
+                field_name="task_211_isolated_qualification_geometry",
             )
-            quality_reason_class = "accepted" if quality_passed else "rejected_by_current_thresholds"
+            quality_reason_class = "accepted" if quality_passed else "rejected_by_existing_thresholds"
 
         if stats_result is not None and quality_passed and provenance_passed:
-            try:
-                observation_date = date.fromisoformat(str(stats_result["captured_date"]))
-                if not date_from <= observation_date <= date_to:
-                    raise RequestContractError("parsed observation date is outside request window")
-                for attempt in range(MAX_RETRYABLE_RETRIES + 1):
-                    try:
-                        image = ndvi_raster.request_process_png(
-                            QUALIFICATION_GEOMETRY,
-                            observation_date,
-                            MAX_RASTER_SIZE,
-                        )
-                        raster_bytes_count = len(image)
-                        raster_passed = ndvi_raster.validate_png(image)
-                        del image
-                        entry = recorder.latest("raster")
-                        if entry:
-                            entry["providerClassification"] = (
-                                "sentinel_2_png" if raster_passed else "invalid_response"
-                            )
-                            entry["retryDecision"] = "stop_valid_png" if raster_passed else "stop_invalid_png"
+            recorder.bind_selected_observation(stats_result)
+            for attempt in range(MAX_RETRYABLE_RETRIES + 1):
+                try:
+                    validated = ndvi_raster.request_process_png_for_interval(
+                        QUALIFICATION_GEOMETRY,
+                        stats_result["interval_from_utc"],
+                        stats_result["interval_to_utc"],
+                        MAX_RASTER_SIZE,
+                    )
+                    raster_validation = validated.validation.as_sanitized_dict()
+                    del validated
+                    process_entry = recorder.latest("process")
+                    if process_entry:
+                        process_entry["providerClassification"] = "sentinel_2_visible_png"
+                        process_entry["retryDecision"] = "stop_decoded_visible_png"
+                    if recorder.raster_response_metadata:
+                        recorder.raster_response_metadata[-1].update(raster_validation)
+                    break
+                except BaseException as error:
+                    raster_error_class = type(error).__name__
+                    process_entry = recorder.latest("process")
+                    if isinstance(error, ndvi_raster.RasterUpstreamInvalid):
+                        raster_rejection_reason = error.reason_code
+                        if process_entry:
+                            process_entry["providerClassification"] = "invalid_raster_content"
+                            process_entry["retryDecision"] = "stop_internal_raster_content_failure"
+                        if recorder.raster_response_metadata:
+                            recorder.raster_response_metadata[-1].update({
+                                "contentValid": False,
+                                "rejectionReasonClass": error.reason_code,
+                                "rawRasterPersisted": False,
+                                "pixelArrayPersisted": False,
+                            })
                         break
-                    except BaseException as error:
-                        raster_error_class = type(error).__name__
-                        entry = recorder.latest("raster")
-                        if isinstance(error, ndvi_raster.RasterUpstreamInvalid) and entry:
-                            entry["providerClassification"] = "invalid_response"
-                        if retryable_entry(entry) and attempt < MAX_RETRYABLE_RETRIES:
-                            mark_retry_decision(entry, "retry_once")
-                            retry_count += 1
-                            continue
-                        mark_retry_decision(entry, "stop_no_retry")
-                        break
-            except (KeyError, TypeError, ValueError, RequestContractError) as error:
-                raster_error_class = type(error).__name__
+                    if retryable_entry(process_entry) and attempt < MAX_RETRYABLE_RETRIES:
+                        mark_retry_decision(process_entry, "retry_once")
+                        retry_count += 1
+                        continue
+                    mark_retry_decision(process_entry, "stop_no_retry")
+                    break
 
         stats_entry = recorder.latest("statistical")
-        raster_entry = recorder.latest("raster")
-        raster_provider_contract = provider_metadata("ndvi")
-        provider_chain_reconciled = (
-            service.provider == QUALIFICATION_PROVIDER
-            and recorder.provider_endpoints == QUALIFICATION_ENDPOINTS
-            and raster_provider_contract.get("sentinel_provider") == QUALIFICATION_PROVIDER
-            and all(
-                entry.get("providerPreset") == QUALIFICATION_PROVIDER
-                for entry in recorder.ledger
-            )
-        )
-        if not provider_chain_reconciled:
-            recorder.contract_failure = True
+        process_entry = recorder.latest("process")
         response_meta = (
             recorder.statistical_response_metadata[-1]
             if recorder.statistical_response_metadata
@@ -1020,36 +1334,63 @@ def run_live(
                 "contractShapeValid": False,
                 "intervalCount": 0,
                 "usableIntervalCount": 0,
-                "latestUsableIntervalFrom": None,
-                "latestUsableIntervalTo": None,
+                "invalidIntervalCount": 0,
+                "selectedIntervalFromUtc": None,
+                "selectedIntervalToUtc": None,
+                "intervalListSummary": [],
+                "rawProviderBodyIncluded": False,
             }
         )
-        marker, sentinel_status, exit_code = classify_program_outcome(
+        reconciliation = _reconciliation_facts(
+            stats_result,
+            stats_entry,
+            process_entry,
+            raster_validation,
+        )
+        outcome = classify_program_outcome(
             contract_failure=recorder.contract_failure,
             oauth_succeeded=oauth_succeeded,
             statistical_entry=stats_entry or recorder.latest("oauth"),
             statistical_parseable=stats_parseable,
-            usable_observation=stats_result is not None and provenance_passed,
+            usable_observation=stats_result is not None,
+            provenance_passed=provenance_passed,
             quality_passed=quality_passed,
-            raster_entry=raster_entry,
-            raster_passed=raster_passed,
+            process_entry=process_entry,
+            raster_content_valid=bool(raster_validation and raster_validation.get("contentValid")),
+            reconciliation_passed=bool(reconciliation["passed"]),
+            mocks_used=False,
         )
         gate4_marker = (
-            "PASS_GATE4_LIVE_SENTINEL_WITH_WIALON_DEFERRED"
-            if marker == "PASS_PROGRAM_R1_FULL_MERGE_READINESS"
-            else marker
+            "PASS_GATE4_LIVE_SENTINEL_REAL_RASTER"
+            if outcome.status == "PASS"
+            else outcome.task_marker
         )
-        parsed_observations = 1 if stats_result is not None else 0
         captured_date = stats_result.get("captured_date") if stats_result else None
-        valid_pixels_available = bool(
-            stats_result is not None and stats_result.get("valid_pixels_pct") is not None
+        selected_from = stats_result.get("interval_from_utc") if stats_result else None
+        selected_to = stats_result.get("interval_to_utc") if stats_result else None
+        process_from = process_entry.get("intervalFromUtc") if process_entry else None
+        process_to = process_entry.get("intervalToUtc") if process_entry else None
+        process_response_meta = (
+            recorder.raster_response_metadata[-1]
+            if recorder.raster_response_metadata
+            else {
+                "contentType": None,
+                "responseSha256": None,
+                "byteCount": 0,
+                "nonEmptyBytes": False,
+                "contentValid": False,
+                "rawRasterPersisted": False,
+                "pixelArrayPersisted": False,
+            }
         )
+
         qualification = {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "program": PROGRAM,
-            "recordedAt": datetime.now(timezone.utc).isoformat(),
-            "head": expected_head,
+            "recordedAtUtc": datetime.now(timezone.utc).isoformat(),
+            "headAtQualification": expected_head,
             "startingHead": starting_head,
+            "baseline": baseline,
             "provider": QUALIFICATION_PROVIDER,
             "satelliteDataSource": "Sentinel-2 L2A",
             "providerEndpointClass": QUALIFICATION_ENDPOINTS.endpoint_class,
@@ -1057,17 +1398,17 @@ def run_live(
             "credentialBoundary": credential_checks,
             "geometry": geometry_summary.as_dict(),
             "dateWindow": {
-                "from": date_from.isoformat(),
-                "to": date_to.isoformat(),
-                "calendarDays": (date_to - date_from).days + 1,
-                "selection": "runtime_utc_yesterday_back_14_calendar_days",
+                "fromDateInclusive": date_from.isoformat(),
+                "toDateInclusive": date_to.isoformat(),
+                "calendarDays": MAX_DATE_WINDOW_DAYS,
+                "selection": "runtime_utc_yesterday_back_at_most_14_calendar_days",
             },
             "hardBounds": {
                 "maximumDateWindowDays": MAX_DATE_WINDOW_DAYS,
                 "maximumFieldGeometries": MAX_FIELD_GEOMETRIES,
                 "maximumIndicesPerStatisticalRequest": MAX_INDEX_CODES,
                 "maximumStatisticalRequests": MAX_STATISTICAL_REQUESTS,
-                "maximumRasterRequests": MAX_RASTER_REQUESTS,
+                "maximumProcessRequests": MAX_PROCESS_REQUESTS,
                 "maximumOauthRequests": MAX_OAUTH_REQUESTS,
                 "maximumRasterWidthAndHeight": MAX_RASTER_SIZE,
                 "maximumRetryableRetriesPerOperation": MAX_RETRYABLE_RETRIES,
@@ -1079,120 +1420,120 @@ def run_live(
                 "statisticalService": "services.satellite.SentinelHubService.get_ndvi_stats",
                 "statisticalParser": "services.satellite.SentinelHubService._parse_stats_response",
                 "qualityValidator": "services.satellite.validate_ndvi_quality",
-                "rasterPayload": "services.ndvi_raster.build_process_payload",
-                "rasterRequestAndValidation": "services.ndvi_raster.request_process_png",
-                "rasterProviderContract": raster_provider_contract,
-                "rasterCacheLayerBypassedForReadOnlyQualification": True,
+                "processPayload": "services.ndvi_raster.build_process_payload_for_interval",
+                "processRequestAndValidation": "services.ndvi_raster.request_process_png_for_interval",
+                "decodedContentValidator": "services.ndvi_raster.validate_raster_content",
+                "cacheBypassed": True,
             },
             "oauth": {
+                "httpStatus": oauth_entry.get("httpStatus") if oauth_entry else None,
                 "clientCredentialsExchangeSucceeded": oauth_succeeded,
                 "tokenValueIncluded": False,
                 "authorizationHeaderIncluded": False,
             },
             "statistical": {
-                "provider": service.provider if stats_entry else None,
-                "indexCode": "ndvi",
+                "httpStatus": stats_entry.get("httpStatus") if stats_entry else None,
+                "provider": stats_result.get("provider") if stats_result else None,
+                "indexCode": stats_result.get("index_code") if stats_result else NDVI_INDEX_CODE,
+                "dataset": stats_result.get("dataset") if stats_result else SENTINEL_DATASET,
+                "crs": SENTINEL_CRS,
                 "geometryFingerprint": geometry_summary.fingerprint if stats_entry else None,
                 "requestSucceeded": bool(stats_entry and stats_entry.get("httpStatus") == 200),
                 "applicationResultParseable": stats_parseable and stats_result is not None,
                 "providerIntervalCount": response_meta["intervalCount"],
                 "providerUsableIntervalCount": response_meta["usableIntervalCount"],
-                "parsedObservationCount": parsed_observations,
-                "capturedDate": captured_date,
-                "capturedDateSemantics": (
-                    "current application parser truncates the latest non-empty aggregation interval 'to' value to YYYY-MM-DD"
+                "providerInvalidIntervalCount": response_meta["invalidIntervalCount"],
+                "intervalListSummary": response_meta["intervalListSummary"],
+                "parsedObservationCount": 1 if stats_result is not None else 0,
+                "selectedIntervalFromUtc": selected_from,
+                "selectedIntervalToUtc": selected_to,
+                "canonicalDate": captured_date,
+                "canonicalDateSemantics": (
+                    stats_result.get("captured_date_semantics")
+                    if stats_result
+                    else CANONICAL_DATE_SEMANTICS
                 ),
-                "latestUsableIntervalFrom": response_meta["latestUsableIntervalFrom"],
-                "latestUsableIntervalTo": response_meta["latestUsableIntervalTo"],
-                "cloudCoverFieldAvailable": bool(
-                    stats_result is not None and stats_result.get("cloud_cover_pct") is not None
+                "aggregationIntervalSemantics": (
+                    stats_result.get("aggregation_interval_semantics")
+                    if stats_result
+                    else "half_open_utc_aggregation_bucket_[from,to)"
                 ),
-                "cloudCoverUnavailableReason": (
-                    None
-                    if stats_result is not None and stats_result.get("cloud_cover_pct") is not None
-                    else "current NDVI Statistical API parser does not return per-observation cloud cover"
-                ),
-                "validPixelsFieldAvailable": valid_pixels_available,
-                "validPixelsPct": stats_result.get("valid_pixels_pct") if valid_pixels_available else None,
-                "qualityValidationExecuted": stats_result is not None,
+                "exactAcquisitionTimestampAvailable": False,
+                "sampleCount": stats_result.get("sample_count") if stats_result else None,
+                "noDataCount": stats_result.get("no_data_count") if stats_result else None,
+                "validPixelCount": stats_result.get("valid_pixel_count") if stats_result else None,
+                "validPixelsPct": stats_result.get("valid_pixels_pct") if stats_result else None,
                 "qualityValidationPassed": quality_passed,
                 "qualityOutcomeClass": quality_reason_class,
                 "thresholdsChanged": False,
                 "realProvenanceValidated": provenance_passed,
+                "maskContractId": NDVI_MASK_CONTRACT_ID,
+                "evalscriptSha256": hashlib.sha256(NDVI_EVALSCRIPT.encode("utf-8")).hexdigest(),
+                "rawProviderBodyIncluded": False,
             },
-            "raster": {
-                "attempted": raster_entry is not None,
-                "applicationPathAvailable": True,
-                "requestSucceeded": raster_passed,
-                "indexCode": "ndvi",
-                "size": MAX_RASTER_SIZE,
-                "requestedDate": captured_date if raster_entry else None,
-                "requestedDateUsesApplicationCapturedDate": bool(raster_entry and captured_date),
-                "actualAcquisitionTimestampAvailableInCurrentPngContract": False,
-                "actualDateContract": (
-                    "official Process API request is constrained to the one-day application captured-date window; PNG response exposes no acquisition timestamp"
+            "process": {
+                "httpStatus": process_entry.get("httpStatus") if process_entry else None,
+                "attempted": process_entry is not None,
+                "provider": QUALIFICATION_PROVIDER if process_entry else None,
+                "indexCode": NDVI_INDEX_CODE,
+                "dataset": SENTINEL_DATASET,
+                "crs": SENTINEL_CRS,
+                "geometryFingerprint": geometry_summary.fingerprint if process_entry else None,
+                "requestedIntervalFromUtc": process_from,
+                "requestedIntervalToUtc": process_to,
+                "exactAcquisitionTimestampAvailableInPngContract": False,
+                "maskContractId": NDVI_MASK_CONTRACT_ID,
+                "maxCloudCoverage": SENTINEL_MAX_CLOUD_COVERAGE,
+                "harmonizeValues": True,
+                "rasterSize": MAX_RASTER_SIZE,
+                "response": process_response_meta,
+                "decodedContentValid": bool(
+                    raster_validation and raster_validation.get("contentValid")
                 ),
-                "geometryFingerprint": geometry_summary.fingerprint if raster_entry else None,
-                "provider": service.provider if raster_entry else None,
-                "contentTypeValid": raster_passed,
-                "nonEmptyBytes": raster_bytes_count > 0,
-                "byteCount": raster_bytes_count,
-                "pixelArrayPersisted": False,
-                "rawImagePersisted": False,
                 "errorClass": raster_error_class,
+                "rejectionReasonClass": raster_rejection_reason,
             },
-            "reconciliation": {
-                "sameIndex": bool(raster_entry and stats_result is not None),
-                "sameGeometryFingerprint": bool(raster_entry and stats_result is not None),
-                "sameProvider": bool(
-                    raster_entry
-                    and stats_result is not None
-                    and provider_chain_reconciled
-                ),
-                "compatibleRequestedDateSemantics": bool(raster_entry and captured_date),
-                "providerChainPresetConsistent": provider_chain_reconciled,
-                "passed": bool(
-                    raster_entry
-                    and stats_result is not None
-                    and provider_chain_reconciled
-                    and captured_date
-                ),
-                "exactNumericalRasterColorEqualityClaimed": False,
-            },
+            "reconciliation": reconciliation,
             "mocksUsed": False,
             "databaseAccessAttempted": False,
             "redisAccessAttempted": False,
             "productionWrites": 0,
             "wialonExternalCalls": 0,
-            "status": sentinel_status,
-            "marker": marker,
+            "taskStatus": outcome.status,
+            "taskMarker": outcome.task_marker,
+            "programMarker": outcome.program_marker,
         }
         request_ledger = {
-            "schemaVersion": 1,
-            "head": expected_head,
+            "schemaVersion": 2,
+            "headAtQualification": expected_head,
             "providerPreset": QUALIFICATION_PROVIDER,
             "requests": recorder.ledger,
             "counts": dict(recorder.counts),
             "rawProviderBodiesIncluded": False,
+            "rawRasterIncluded": False,
             "oauthTokensIncluded": False,
             "authorizationHeadersIncluded": False,
             "productionWrites": 0,
         }
         security_review = {
-            "schemaVersion": 1,
-            "head": expected_head,
+            "schemaVersion": 2,
+            "headAtQualification": expected_head,
             "credentialBoundary": credential_checks,
             "officialCdseEndpointsOnly": all(
                 entry.get("providerPreset") == QUALIFICATION_PROVIDER
                 and entry["endpointClass"].startswith("official_cdse_sentinel_hub_")
                 for entry in recorder.ledger
             ),
-            "providerChainPresetConsistent": provider_chain_reconciled,
+            "providerChainPresetConsistent": all(
+                entry.get("providerPreset") == QUALIFICATION_PROVIDER
+                for entry in recorder.ledger
+            ),
             "credentialValuesIncluded": False,
             "oauthTokensIncluded": False,
             "authorizationHeadersIncluded": False,
             "rawProviderBodiesIncluded": False,
             "rawRasterIncluded": False,
+            "pixelArraysIncluded": False,
             "databaseUrlsIncluded": False,
             "redisUrlsIncluded": False,
             "privateKeysIncluded": False,
@@ -1203,34 +1544,36 @@ def run_live(
             "sanitization": "PASS",
         }
         gate4 = {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "gate": "GATE4",
-            "head": expected_head,
-            "status": "PASS" if sentinel_status == "PASS" else sentinel_status,
+            "headAtQualification": expected_head,
+            "status": "PASS" if outcome.status == "PASS" else outcome.status,
             "marker": gate4_marker,
-            "sentinelLive": sentinel_status,
-            "wialonScope": "DEFERRED_TO_NEXT_PILOT",
-            "wialonFeatureFlag": "DISABLED",
+            "taskMarker": outcome.task_marker,
+            "programMarker": outcome.program_marker,
+            "realSentinelRasterContent": bool(
+                raster_validation and raster_validation.get("contentValid")
+            ),
+            "intervalReconciliation": bool(reconciliation["exactIntervalBounds"]),
+            "mocksUsed": False,
             "wialonExternalCalls": 0,
             "productionWrites": 0,
-            "inheritedWialonEvidenceHashValidated": True,
-            "productSurfacesInvalidated": False,
         }
         forbidden_values = [
             settings.sentinel_hub_client_id,
             settings.sentinel_hub_client_secret,
             service._access_token or "",
         ]
-        serialized_bundle = canonical_json(
-            {
+        assert_sanitized(
+            canonical_json({
                 "qualification": qualification,
                 "requestLedger": request_ledger,
                 "securityReview": security_review,
                 "gate4": gate4,
-            }
+            }),
+            forbidden_values,
         )
-        assert_sanitized(serialized_bundle, forbidden_values)
-        return qualification, request_ledger, security_review, gate4, exit_code
+        return qualification, request_ledger, security_review, gate4, outcome.exit_code
     finally:
         httpx.post = original_post
         ndvi_raster.get_satellite_service = original_service_factory
@@ -1241,57 +1584,68 @@ def run_live(
 def safe_failure_artifacts(
     *,
     expected_head: str,
-    marker: str,
+    task_marker: str,
+    program_marker: str,
     status: str,
     error_class: str,
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     qualification = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "program": PROGRAM,
-        "head": expected_head,
+        "headAtQualification": expected_head,
         "provider": QUALIFICATION_PROVIDER,
         "providerEndpointClass": QUALIFICATION_ENDPOINTS.endpoint_class,
         "providerIsMock": False,
-        "status": status,
-        "marker": marker,
+        "taskStatus": status,
+        "taskMarker": task_marker,
+        "programMarker": program_marker,
         "errorClass": error_class,
         "credentialValuesIncluded": False,
         "oauthTokensIncluded": False,
         "authorizationHeadersIncluded": False,
         "rawProviderBodiesIncluded": False,
+        "rawRasterIncluded": False,
+        "mocksUsed": False,
+        "databaseAccessAttempted": False,
+        "redisAccessAttempted": False,
+        "wialonExternalCalls": 0,
         "productionWrites": 0,
     }
     ledger = {
-        "schemaVersion": 1,
-        "head": expected_head,
+        "schemaVersion": 2,
+        "headAtQualification": expected_head,
         "providerPreset": QUALIFICATION_PROVIDER,
         "requests": [],
-        "counts": {"oauth": 0, "statistical": 0, "raster": 0},
+        "counts": {"oauth": 0, "statistical": 0, "process": 0},
         "rawProviderBodiesIncluded": False,
+        "rawRasterIncluded": False,
         "oauthTokensIncluded": False,
         "authorizationHeadersIncluded": False,
         "productionWrites": 0,
     }
     security = {
-        "schemaVersion": 1,
-        "head": expected_head,
+        "schemaVersion": 2,
+        "headAtQualification": expected_head,
         "status": status,
         "errorClass": error_class,
         "credentialValuesIncluded": False,
         "oauthTokensIncluded": False,
         "authorizationHeadersIncluded": False,
         "rawProviderBodiesIncluded": False,
+        "rawRasterIncluded": False,
         "productionWrites": 0,
     }
     gate4 = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "gate": "GATE4",
-        "head": expected_head,
+        "headAtQualification": expected_head,
         "status": status,
-        "marker": marker,
-        "sentinelLive": status,
-        "wialonScope": "DEFERRED_TO_NEXT_PILOT",
-        "wialonFeatureFlag": "DISABLED",
+        "marker": task_marker,
+        "taskMarker": task_marker,
+        "programMarker": program_marker,
+        "realSentinelRasterContent": False,
+        "intervalReconciliation": False,
+        "mocksUsed": False,
         "wialonExternalCalls": 0,
         "productionWrites": 0,
     }
@@ -1318,7 +1672,7 @@ def main() -> int:
     try:
         evidence_root = validate_evidence_root(Path(args.evidence_root))
     except BaseException:
-        print("BLOCKED_PROGRAM_R1_CDSE_SENTINEL_BASELINE")
+        print("BLOCKED_TASK_211_BASELINE")
         return EXIT_BASELINE
 
     try:
@@ -1330,26 +1684,20 @@ def main() -> int:
             runtime_env=Path(args.runtime_env),
         )
         qualification, ledger, security, gate4, exit_code = artifacts
-    except BaselineError as error:
+    except (BaselineError, CredentialBoundaryError) as error:
         qualification, ledger, security, gate4 = safe_failure_artifacts(
             expected_head=args.expected_head,
-            marker="BLOCKED_PROGRAM_R1_CDSE_SENTINEL_BASELINE",
+            task_marker="BLOCKED_TASK_211_BASELINE",
+            program_marker="BLOCKED_PROGRAM_R1_BASELINE",
             status="BLOCKED",
             error_class=type(error).__name__,
         )
         exit_code = EXIT_BASELINE
-    except CredentialBoundaryError as error:
-        qualification, ledger, security, gate4 = safe_failure_artifacts(
-            expected_head=args.expected_head,
-            marker="BLOCKED_PROGRAM_R1_CDSE_SENTINEL_BASELINE",
-            status="BLOCKED",
-            error_class=type(error).__name__,
-        )
-        exit_code = EXIT_CREDENTIAL_BOUNDARY
     except BaseException as error:
         qualification, ledger, security, gate4 = safe_failure_artifacts(
             expected_head=args.expected_head,
-            marker="FAIL_PROGRAM_R1_INTERNAL_SENTINEL_BLOCKER",
+            task_marker="FAIL_TASK_211_INTERNAL_SENTINEL_BLOCKER",
+            program_marker="FAIL_PROGRAM_R1_INTERNAL_SENTINEL_BLOCKER",
             status="FAIL",
             error_class=type(error).__name__,
         )
@@ -1357,9 +1705,9 @@ def main() -> int:
 
     write_gate4_artifacts(evidence_root, qualification, ledger, security, gate4)
     counts = ledger.get("counts", {})
-    print(qualification["marker"])
+    print(qualification["taskMarker"])
     print(f"SENTINEL_STATISTICAL_REQUESTS={counts.get('statistical', 0)}")
-    print(f"SENTINEL_RASTER_REQUESTS={counts.get('raster', 0)}")
+    print(f"SENTINEL_PROCESS_REQUESTS={counts.get('process', 0)}")
     print(f"OAUTH_REQUESTS={counts.get('oauth', 0)}")
     print(f"OBSERVATIONS_PARSED={qualification.get('statistical', {}).get('parsedObservationCount', 0)}")
     print("PRODUCTION_WRITES=0")

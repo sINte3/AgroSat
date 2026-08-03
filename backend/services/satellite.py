@@ -7,7 +7,8 @@
 """
 
 import logging
-from datetime import date, timedelta
+from dataclasses import dataclass
+from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from typing import Optional
 import json
 
@@ -115,15 +116,103 @@ def validate_ndvi_quality(mean_ndvi, cloud_cover_pct=None, min_ndvi=None, max_nd
     return True, "ok"
 
 
-# ─── Sentinel Hub Evalscripts ─────────────────────────────────────────────────
+# ─── Sentinel Hub temporal and evalscript contracts ───────────────────────────
 
-# NDVI с маскировкой облаков по Scene Classification Layer (SCL)
+SENTINEL_DATASET = "sentinel-2-l2a"
+SENTINEL_CRS = "http://www.opengis.net/def/crs/EPSG/0/4326"
+SENTINEL_MAX_CLOUD_COVERAGE = 80
+NDVI_INDEX_CODE = "ndvi"
+NDVI_INVALID_SCL_CLASSES = (0, 1, 3, 8, 9, 10, 11)
+NDVI_DENOMINATOR_EPSILON = "0.000001"
+NDVI_MASK_CONTRACT_ID = "s2l2a-datamask-scl-0-1-3-8-9-10-11-v1"
+STATISTICAL_INTERVAL_SEMANTICS = "half_open_utc_aggregation_bucket_[from,to)"
+CANONICAL_DATE_SEMANTICS = "aggregation_interval_start_utc_date_not_acquisition_date"
+
+
+def parse_provider_utc_timestamp(value: object) -> datetime:
+    """Parse a provider timestamp and require an explicit UTC offset."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("Provider interval timestamp is missing")
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        raise ValueError("Provider interval timestamp is invalid") from None
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise ValueError("Provider interval timestamp must be timezone-aware UTC")
+    return parsed.astimezone(timezone.utc)
+
+
+def format_utc_timestamp(value: datetime) -> str:
+    """Return a canonical ISO-8601 UTC timestamp with a ``Z`` suffix."""
+    if value.tzinfo is None or value.utcoffset() != timedelta(0):
+        raise ValueError("Timestamp must be timezone-aware UTC")
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+@dataclass(frozen=True, slots=True)
+class SentinelObservationInterval:
+    """Truthful in-memory Statistical API observation-bucket contract."""
+
+    interval_from_utc: datetime
+    interval_to_utc: datetime
+    provider: str
+    source: str
+    dataset: str
+    index_code: str
+    aggregation_interval: str
+
+    def __post_init__(self) -> None:
+        if (
+            self.interval_from_utc.tzinfo is None
+            or self.interval_from_utc.utcoffset() != timedelta(0)
+            or self.interval_to_utc.tzinfo is None
+            or self.interval_to_utc.utcoffset() != timedelta(0)
+        ):
+            raise ValueError("Observation interval bounds must be timezone-aware UTC")
+        if self.interval_to_utc <= self.interval_from_utc:
+            raise ValueError("Observation interval end must be after its start")
+
+    @property
+    def canonical_date(self) -> date:
+        return self.interval_from_utc.date()
+
+    @property
+    def is_daily(self) -> bool:
+        return self.interval_to_utc - self.interval_from_utc == timedelta(days=1)
+
+    def as_result_metadata(self) -> dict[str, object]:
+        return {
+            "captured_date": self.canonical_date.isoformat(),
+            "captured_date_semantics": CANONICAL_DATE_SEMANTICS,
+            "interval_from_utc": format_utc_timestamp(self.interval_from_utc),
+            "interval_to_utc": format_utc_timestamp(self.interval_to_utc),
+            "aggregation_interval": self.aggregation_interval,
+            "aggregation_interval_semantics": STATISTICAL_INTERVAL_SEMANTICS,
+            "interval_is_daily": self.is_daily,
+            "provider": self.provider,
+            "source": self.source,
+            "dataset": self.dataset,
+            "index_code": self.index_code,
+            "acquisition_timestamp_available": False,
+        }
+
+
+def _utc_midnight(day: date) -> datetime:
+    return datetime.combine(day, datetime_time.min, tzinfo=timezone.utc)
+
+
+_NDVI_INVALID_SCL_JS = json.dumps(list(NDVI_INVALID_SCL_CLASSES), separators=(",", ":"))
+
+# NDVI with one shared provider data-mask and SCL contract for statistics/raster.
 NDVI_EVALSCRIPT = """
 //VERSION=3
 
 function setup() {
   return {
-    input: [{ bands: ["B04", "B08", "SCL"] }],
+    input: [{ bands: ["B04", "B08", "SCL", "dataMask"] }],
     output: [
       { id: "ndvi", bands: 1, sampleType: "FLOAT32" },
       { id: "dataMask", bands: 1 }
@@ -132,15 +221,16 @@ function setup() {
 }
 
 function evaluatePixel(sample) {
-  // SCL маска: исключаем облака (8,9,10), снег (11), дефектные пиксели (1)
-  let isValid = ![1, 3, 8, 9, 10, 11].includes(sample.SCL);
-  let ndvi = (sample.B08 - sample.B04) / (sample.B08 + sample.B04 + 0.0001);
+  let isValid = sample.dataMask === 1 && !__INVALID_SCL__.includes(sample.SCL);
+  let ndvi = (sample.B08 - sample.B04) / (sample.B08 + sample.B04 + __EPSILON__);
   return {
     ndvi: [ndvi],
     dataMask: [isValid ? 1 : 0]
   };
 }
-"""
+""".replace("__INVALID_SCL__", _NDVI_INVALID_SCL_JS).replace(
+    "__EPSILON__", NDVI_DENOMINATOR_EPSILON
+)
 
 
 class SentinelHubService:
@@ -227,8 +317,11 @@ class SentinelHubService:
             date_to: Конец периода (включительно)
 
         Returns:
-            dict с ключами: mean, min, max, std, p10, p90, valid_pct, date
+            dict with statistics plus explicit half-open UTC interval metadata.
         """
+        if not isinstance(date_from, date) or not isinstance(date_to, date) or date_to < date_from:
+            logger.error("Invalid Sentinel Statistical API application date window")
+            return None
         try:
             token = self._get_access_token()
         except Exception as error:
@@ -238,21 +331,23 @@ class SentinelHubService:
         # Преобразуем WKT в GeoJSON
         geom = wkt.loads(geometry_wkt)
         geojson_geom = mapping(geom)
+        request_from_utc = format_utc_timestamp(_utc_midnight(date_from))
+        request_to_utc = format_utc_timestamp(_utc_midnight(date_to + timedelta(days=1)))
 
         payload = {
             "input": {
                 "bounds": {
                     "geometry": geojson_geom,
-                    "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"}
+                    "properties": {"crs": SENTINEL_CRS}
                 },
                 "data": [{
-                    "type": "sentinel-2-l2a",
+                    "type": SENTINEL_DATASET,
                     "dataFilter": {
                         "timeRange": {
-                            "from": f"{date_from.isoformat()}T00:00:00Z",
-                            "to": f"{date_to.isoformat()}T23:59:59Z"
+                            "from": request_from_utc,
+                            "to": request_to_utc,
                         },
-                        "maxCloudCoverage": 80  # исключаем снимки >80% облаков
+                        "maxCloudCoverage": SENTINEL_MAX_CLOUD_COVERAGE,
                     },
                     "processing": {
                         "harmonizeValues": True
@@ -261,8 +356,8 @@ class SentinelHubService:
             },
             "aggregation": {
                 "timeRange": {
-                    "from": f"{date_from.isoformat()}T00:00:00Z",
-                    "to": f"{date_to.isoformat()}T23:59:59Z"
+                    "from": request_from_utc,
+                    "to": request_to_utc,
                 },
                 "aggregationInterval": {"of": aggregation_interval},
                 "evalscript": NDVI_EVALSCRIPT,
@@ -290,7 +385,10 @@ class SentinelHubService:
             response.raise_for_status()
             data = response.json()
 
-            return self._parse_stats_response(data)
+            return self._parse_stats_response(
+                data,
+                aggregation_interval=aggregation_interval,
+            )
 
         except httpx.HTTPStatusError as error:
             logger.error(safe_provider_error_summary(error))
@@ -299,38 +397,82 @@ class SentinelHubService:
             logger.error(safe_provider_error_summary(error))
             return None
 
-    def _parse_stats_response(self, response_data: dict) -> Optional[dict]:
-        """Парсим ответ Statistical API и возвращаем наиболее свежий снимок."""
+    def _parse_stats_response(
+        self,
+        response_data: dict,
+        *,
+        aggregation_interval: str = "P1D",
+    ) -> Optional[dict]:
+        """Return the latest usable Statistical aggregation interval by UTC time."""
         try:
             intervals = response_data.get("data", [])
-            if not intervals:
+            if not isinstance(intervals, list) or not intervals:
                 logger.warning("Sentinel Hub вернул пустой ответ (возможно, нет снимков за период)")
                 return None
 
-            # Берём последний интервал с данными
-            valid_intervals = [
-                i for i in intervals
-                if i.get("outputs", {}).get("ndvi", {}).get("bands", {}).get("B0", {}).get("stats", {}).get("sampleCount", 0) > 0
-            ]
+            usable: list[
+                tuple[SentinelObservationInterval, dict, int, int]
+            ] = []
+            for interval in intervals:
+                if not isinstance(interval, dict):
+                    continue
+                raw_bounds = interval.get("interval")
+                if not isinstance(raw_bounds, dict):
+                    continue
+                try:
+                    observation_interval = SentinelObservationInterval(
+                        interval_from_utc=parse_provider_utc_timestamp(raw_bounds.get("from")),
+                        interval_to_utc=parse_provider_utc_timestamp(raw_bounds.get("to")),
+                        provider=self.provider,
+                        source=REAL_SATELLITE_SOURCE,
+                        dataset=SENTINEL_DATASET,
+                        index_code=NDVI_INDEX_CODE,
+                        aggregation_interval=aggregation_interval,
+                    )
+                except (TypeError, ValueError):
+                    continue
+                stats = (
+                    interval.get("outputs", {})
+                    .get(NDVI_INDEX_CODE, {})
+                    .get("bands", {})
+                    .get("B0", {})
+                    .get("stats", {})
+                )
+                if not isinstance(stats, dict):
+                    continue
+                try:
+                    sample_count = int(stats.get("sampleCount", 0))
+                    no_data_count = int(stats.get("noDataCount", 0))
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if (
+                    sample_count <= 0
+                    or no_data_count < 0
+                    or no_data_count > sample_count
+                    or sample_count - no_data_count <= 0
+                ):
+                    continue
+                usable.append(
+                    (observation_interval, stats, sample_count, no_data_count)
+                )
 
-            if not valid_intervals:
+            if not usable:
                 return None
 
-            latest = valid_intervals[-1]
-            interval_date = latest["interval"]["to"][:10]
-
-            stats = latest["outputs"]["ndvi"]["bands"]["B0"]["stats"]
-
-            # valid_pct = непустые пиксели / все пиксели
-            sample_count = stats.get("sampleCount", 0)
-            no_data_count = stats.get("noDataCount", 0)
-            total = sample_count + no_data_count
-            valid_pct = (sample_count / total * 100) if total > 0 else 0
+            observation_interval, stats, sample_count, no_data_count = max(
+                usable,
+                key=lambda candidate: (
+                    candidate[0].interval_from_utc,
+                    candidate[0].interval_to_utc,
+                ),
+            )
+            valid_pixel_count = sample_count - no_data_count
+            valid_pct = valid_pixel_count / sample_count * 100
 
             percentiles = stats.get("percentiles", {})
 
             return {
-                "captured_date": interval_date,
+                **observation_interval.as_result_metadata(),
                 "mean_ndvi": round(safe_float(stats.get("mean", 0)), 4),
                 "min_ndvi": round(safe_float(stats.get("min", 0)), 4),
                 "max_ndvi": round(safe_float(stats.get("max", 0)), 4),
@@ -338,10 +480,14 @@ class SentinelHubService:
                 "p10_ndvi": round(safe_float(percentiles.get("10.0", 0)), 4),
                 "p90_ndvi": round(safe_float(percentiles.get("90.0", 0)), 4),
                 "valid_pixels_pct": round(valid_pct, 1),
+                "sample_count": sample_count,
+                "no_data_count": no_data_count,
+                "valid_pixel_count": valid_pixel_count,
+                "mask_contract_id": NDVI_MASK_CONTRACT_ID,
                 "satellite": REAL_SATELLITE_SOURCE,
             }
 
-        except (KeyError, IndexError, TypeError) as error:
+        except (KeyError, IndexError, TypeError, ValueError) as error:
             logger.error(safe_provider_error_summary(error))
             return None
 
