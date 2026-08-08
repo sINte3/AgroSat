@@ -1,8 +1,8 @@
 param(
-    [string]$ProgramWorktree = "C:\AgroSat_worktrees\task_209_global_program",
+    [string]$ProgramWorktree = "C:\AgroSat_worktrees\program_r2_staging_release",
     [string]$SourceCheckout = "C:\AgroSat",
-    [string]$SourceBaseline = "dfb57c7ff89c0af10f7907b81965487481c5b3e7",
-    [string]$ProgramBranch = "task/task209-agrosat-global-program",
+    [string]$SourceBaseline = "deb351d8814e271819c654b808d56cab611df732",
+    [string]$ProgramBranch = "program/program-r2-staging-release",
     [string]$OutputPath = "",
     [switch]$WriteManifest
 )
@@ -24,9 +24,9 @@ function Invoke-SafeGit {
 
 if (
     [System.IO.Path]::GetFullPath($ProgramWorktree) -ne
-    "C:\AgroSat_worktrees\task_209_global_program"
+    "C:\AgroSat_worktrees\program_r2_staging_release"
 ) {
-    throw "Program worktree does not match the TASK_209 contract."
+    throw "Program worktree does not match the PROGRAM R2 contract."
 }
 if ([System.IO.Path]::GetFullPath($SourceCheckout) -ne "C:\AgroSat") {
     throw "Source checkout does not match the TASK_209 contract."
@@ -133,20 +133,20 @@ if (-not $sourceMainUnchanged) {
     throw "Source main preservation check failed."
 }
 if ($branch -ne $ProgramBranch) {
-    throw "Program branch does not match the TASK_209 contract."
+    throw "Program branch does not match the PROGRAM R2 contract."
 }
 
 if ($WriteManifest) {
     if (-not [System.IO.Path]::IsPathRooted($OutputPath)) {
         throw "Manifest output path must be absolute."
     }
-    $root = "C:\AgroSat_backups\task209_global_program\"
+    $root = "C:\AgroSat_backups\PROGRAM_R2_STAGING_RELEASE\"
     $resolvedOutput = [System.IO.Path]::GetFullPath($OutputPath)
     if (-not $resolvedOutput.StartsWith(
         $root,
         [System.StringComparison]::OrdinalIgnoreCase
     )) {
-        throw "Manifest output path is outside the TASK_209 backup root."
+        throw "Manifest output path is outside the PROGRAM R2 evidence root."
     }
     $parent = Split-Path -Parent $resolvedOutput
     New-Item -ItemType Directory -Path $parent -Force | Out-Null

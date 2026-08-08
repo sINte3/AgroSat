@@ -48,9 +48,9 @@ def test_manifest_preview_proves_source_and_program_integrity():
     result = powershell("New-ReleaseManifest.ps1")
     report = json.loads(result.stdout)
     assert report["source_baseline"] == (
-        "dfb57c7ff89c0af10f7907b81965487481c5b3e7"
+        "deb351d8814e271819c654b808d56cab611df732"
     )
-    assert report["program_branch"] == "task/task209-agrosat-global-program"
+    assert report["program_branch"] == "program/program-r2-staging-release"
     assert report["source_main_unchanged"] is True
     assert report["origin_aligned"] is True
     assert report["production_deployed"] is False
