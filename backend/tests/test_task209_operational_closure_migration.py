@@ -30,6 +30,7 @@ def test_upgrade_creates_only_the_five_closure_tables():
     module = load()
     created = []
     with (
+        patch.object(module.op, "alter_column") as alter_column,
         patch.object(module.op, "create_unique_constraint"),
         patch.object(
             module.op,
@@ -39,6 +40,8 @@ def test_upgrade_creates_only_the_five_closure_tables():
         patch.object(module.op, "create_index"),
     ):
         module.upgrade()
+    assert alter_column.call_args.args == ("alembic_version", "version_num")
+    assert alter_column.call_args.kwargs["type_"].length == 64
     assert created == [
         "inspection_results",
         "inspection_evidence",
@@ -102,6 +105,7 @@ def test_downgrade_drops_children_before_parents():
     module = load()
     dropped = []
     with (
+        patch.object(module.op, "alter_column") as alter_column,
         patch.object(module.op, "drop_index"),
         patch.object(
             module.op,
@@ -111,6 +115,8 @@ def test_downgrade_drops_children_before_parents():
         patch.object(module.op, "drop_constraint"),
     ):
         module.downgrade()
+    assert alter_column.call_args.args == ("alembic_version", "version_num")
+    assert alter_column.call_args.kwargs["type_"].length == 32
     assert dropped == [
         "operational_audit_events",
         "action_verification_requests",
