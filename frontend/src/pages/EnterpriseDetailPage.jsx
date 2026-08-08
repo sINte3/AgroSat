@@ -546,7 +546,7 @@ export default function EnterpriseDetailPage({ enterpriseId, onBack }) {
   // ─── Скачать PDF отчёт (серверная генерация) ──────────────────────────────
   const handleDownloadPDF = useCallback(() => {
     window.open(
-      `http://localhost:8000/api/reports/enterprise/${enterpriseId}/pdf`,
+      `/api/reports/enterprise/${enterpriseId}/pdf`,
       '_blank'
     );
   }, [enterpriseId]);
