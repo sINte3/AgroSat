@@ -17,6 +17,9 @@ down_revision: Union[str, Sequence[str], None] = "0005_field_inspections"
 branch_labels = None
 depends_on = None
 
+ALEMBIC_VERSION_LENGTH = 64
+LEGACY_ALEMBIC_VERSION_LENGTH = 32
+
 CAUSE_CODES = (
     "irrigation",
     "pest",
@@ -54,7 +57,29 @@ def quoted(values: tuple[str, ...]) -> str:
     return ", ".join(f"'{value}'" for value in values)
 
 
+def _expand_alembic_version_capacity() -> None:
+    op.alter_column(
+        "alembic_version",
+        "version_num",
+        existing_type=sa.String(length=LEGACY_ALEMBIC_VERSION_LENGTH),
+        type_=sa.String(length=ALEMBIC_VERSION_LENGTH),
+        existing_nullable=False,
+    )
+
+
+def _restore_alembic_version_capacity() -> None:
+    op.alter_column(
+        "alembic_version",
+        "version_num",
+        existing_type=sa.String(length=ALEMBIC_VERSION_LENGTH),
+        type_=sa.String(length=LEGACY_ALEMBIC_VERSION_LENGTH),
+        existing_nullable=False,
+    )
+
+
 def upgrade() -> None:
+    _expand_alembic_version_capacity()
+
     op.create_unique_constraint(
         "uq_field_inspections_id_enterprise_id",
         "field_inspections",
@@ -791,3 +816,5 @@ def downgrade() -> None:
         "field_inspections",
         type_="unique",
     )
+
+    _restore_alembic_version_capacity()

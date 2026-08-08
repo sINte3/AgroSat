@@ -12,6 +12,7 @@ BACKEND = Path(__file__).resolve().parents[1]
 VERSIONS = BACKEND / "alembic" / "versions"
 BASELINE = VERSIONS / "0001_baseline_existing_schema_baseline_existing_supabase_schema.py"
 REPAIR = VERSIONS / "0004_repair_core_constraints.py"
+OPERATIONAL_CLOSURE = VERSIONS / "0006_operational_closure.py"
 IMMUTABLE_HASHES = {
     "0002_create_satellite_index_records.py": "82a17307b48100aba1c52b4ca22a66cbe007e22b4c029ff4efe3879d855ca08a",
     "0003_add_ndvi_unique_constraint.py": "45082a8806f4e75f8d8668457a28e4aca5fc7e2510da60fd365ed6392da32108",
@@ -33,6 +34,26 @@ def load(path: Path):
 
 
 class MigrationSchemaContractTests(unittest.TestCase):
+    def test_operational_closure_expands_alembic_revision_capacity(self):
+        module = load(OPERATIONAL_CLOSURE)
+        with patch.object(module.op, "alter_column") as alter:
+            module._expand_alembic_version_capacity()
+
+        self.assertEqual(("alembic_version", "version_num"), alter.call_args.args)
+        self.assertEqual(module.ALEMBIC_VERSION_LENGTH, alter.call_args.kwargs["type_"].length)
+        revisions = [load(path).revision for path in VERSIONS.glob("*.py")]
+        self.assertLessEqual(max(map(len, revisions)), module.ALEMBIC_VERSION_LENGTH)
+
+    def test_operational_closure_downgrade_restores_legacy_capacity(self):
+        module = load(OPERATIONAL_CLOSURE)
+        with patch.object(module.op, "alter_column") as alter:
+            module._restore_alembic_version_capacity()
+
+        self.assertEqual(
+            module.LEGACY_ALEMBIC_VERSION_LENGTH,
+            alter.call_args.kwargs["type_"].length,
+        )
+
     def test_baseline_upgrade_is_not_empty(self):
         tree = ast.parse(BASELINE.read_text(encoding="utf-8"))
         upgrade = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "upgrade")
