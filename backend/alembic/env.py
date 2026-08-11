@@ -12,10 +12,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 from config import settings
 from database import Base
-from models.enterprise import Enterprise
-from models.crop import CropType
-from models.field import Field, CropSeason
-from models.monitoring import NDVIRecord, Alert, ScoutingNote, User, SatelliteIndexRecord
+import models.registry  # noqa: F401  # registers every accepted table in Base.metadata
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

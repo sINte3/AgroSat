@@ -34,6 +34,22 @@ def load(path: Path):
 
 
 class MigrationSchemaContractTests(unittest.TestCase):
+    def test_program_r3_registry_contains_all_post_baseline_tables(self):
+        from database import Base
+        import models.registry  # noqa: F401
+
+        expected = {
+            "field_inspections", "inspection_results", "inspection_evidence",
+            "corrective_actions", "action_verification_requests", "operational_audit_events",
+            "pixel_anomaly_runs", "pixel_anomalies", "pixel_anomaly_inspections",
+            "irrigation_events", "yield_map_imports", "yield_map_points",
+            "productivity_zone_runs", "productivity_zones", "variable_rate_recommendations",
+            "variable_rate_recommendation_events", "enterprise_memberships",
+            "enterprise_commercial_profiles", "tenant_provider_credentials",
+            "tenant_lifecycle_requests", "tenant_commercial_audit_events",
+        }
+        self.assertTrue(expected.issubset(Base.metadata.tables))
+
     def test_operational_closure_expands_alembic_revision_capacity(self):
         module = load(OPERATIONAL_CLOSURE)
         with patch.object(module.op, "alter_column") as alter:

@@ -1,0 +1,4 @@
+# Development and qualification-only dependencies. Production installs use
+# requirements.txt and intentionally do not include the test runner.
+-r requirements.txt
+pytest==8.4.2
