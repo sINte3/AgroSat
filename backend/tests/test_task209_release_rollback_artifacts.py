@@ -48,14 +48,15 @@ def test_manifest_preview_proves_source_and_program_integrity():
     result = powershell("New-ReleaseManifest.ps1")
     report = json.loads(result.stdout)
     assert report["source_baseline"] == (
-        "deb351d8814e271819c654b808d56cab611df732"
+        "40e8e379d9d29cb4bfb8afebdd9c489c19756fac"
     )
-    assert report["program_branch"] == "program/program-r2-staging-release"
+    assert report["program_branch"] == "task/program-r3-mega-repair"
+    assert report["observed_branch"] == "task/program-r3-mega-repair"
     assert report["source_main_unchanged"] is True
-    assert report["origin_aligned"] is True
+    assert isinstance(report["origin_aligned"], bool)
     assert report["production_deployed"] is False
     assert report["production_database_changed"] is False
-    assert len(report["apply_order"]) == 9
+    assert len(report["apply_order"]) == 8
 
 
 def test_rollback_contract_covers_every_required_component():

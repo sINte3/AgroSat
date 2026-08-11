@@ -1,8 +1,8 @@
 param(
-    [string]$ProgramWorktree = "C:\AgroSat_worktrees\program_r2_staging_release",
+    [string]$ProgramWorktree = "C:\AgroSat_worktrees\program-r3-mega-repair",
     [string]$SourceCheckout = "C:\AgroSat",
-    [string]$SourceBaseline = "deb351d8814e271819c654b808d56cab611df732",
-    [string]$ProgramBranch = "program/program-r2-staging-release",
+    [string]$SourceBaseline = "40e8e379d9d29cb4bfb8afebdd9c489c19756fac",
+    [string]$ProgramBranch = "task/program-r3-mega-repair",
     [string]$OutputPath = "",
     [switch]$WriteManifest
 )
@@ -22,14 +22,21 @@ function Invoke-SafeGit {
     return $output
 }
 
+function Get-OptionalGitRef {
+    param([Parameter(Mandatory = $true)][string]$Repository, [Parameter(Mandatory = $true)][string]$Ref)
+    $output = @(& git -C $Repository rev-parse --verify --quiet $Ref 2>$null)
+    if ($LASTEXITCODE -ne 0) { return $null }
+    return [string]($output | Select-Object -First 1)
+}
+
 if (
     [System.IO.Path]::GetFullPath($ProgramWorktree) -ne
-    "C:\AgroSat_worktrees\program_r2_staging_release"
+    "C:\AgroSat_worktrees\program-r3-mega-repair"
 ) {
-    throw "Program worktree does not match the PROGRAM R2 contract."
+    throw "Program worktree does not match the PROGRAM R3 contract."
 }
 if ([System.IO.Path]::GetFullPath($SourceCheckout) -ne "C:\AgroSat") {
-    throw "Source checkout does not match the TASK_209 contract."
+    throw "Source checkout does not match the TASK_211 contract."
 }
 if ($SourceBaseline -notmatch "^[a-f0-9]{40}$") {
     throw "Source baseline is not a full Git SHA."
@@ -45,14 +52,10 @@ $head = [string](
         "rev-parse", "HEAD"
     )) | Select-Object -First 1
 )
-$originHead = [string](
-    @(Invoke-SafeGit -Repository $ProgramWorktree -Arguments @(
-        "rev-parse", "origin/$ProgramBranch"
-    )) | Select-Object -First 1
-)
-$programStatus = @(
+$originHead = Get-OptionalGitRef -Repository $ProgramWorktree -Ref "origin/$ProgramBranch"
+[array]$programStatus = @(
     Invoke-SafeGit -Repository $ProgramWorktree -Arguments @(
-        "status", "--porcelain"
+        "status", "--porcelain=v2", "--untracked-files=no"
     )
 )
 $sourceBranch = [string](
@@ -70,17 +73,17 @@ $sourceOriginHead = [string](
         "rev-parse", "origin/main"
     )) | Select-Object -First 1
 )
-$sourceStatus = @(
+[array]$sourceStatus = @(
     Invoke-SafeGit -Repository $SourceCheckout -Arguments @(
-        "status", "--porcelain"
+        "status", "--porcelain=v2", "--untracked-files=no"
     )
 )
-$changedFiles = @(
-    Invoke-SafeGit -Repository $ProgramWorktree -Arguments @(
+[array]$changedFiles = @(
+    (Invoke-SafeGit -Repository $ProgramWorktree -Arguments @(
         "diff", "--name-only", "$SourceBaseline..$head"
-    )
-) | Where-Object { $_ }
-$changedMigrations = @(
+    )) | Where-Object { $_ }
+)
+[array]$changedMigrations = @(
     $changedFiles | Where-Object {
         $_.StartsWith(
             "backend/alembic/versions/",
@@ -101,14 +104,15 @@ $sourceMainUnchanged = (
     $sourceStatus.Count -eq 0
 )
 $manifest = [ordered]@{
-    schema_version = 1
+    schema_version = 2
     generated_at = (Get-Date).ToUniversalTime().ToString("o")
     source_baseline = $SourceBaseline
-    program_branch = $branch
+    program_branch = $ProgramBranch
+    observed_branch = $branch
     program_head = $head
     origin_program_head = $originHead
     program_worktree_clean = ($programStatus.Count -eq 0)
-    origin_aligned = ($head -eq $originHead)
+    origin_aligned = ($null -ne $originHead -and $head -eq $originHead)
     source_main_unchanged = $sourceMainUnchanged
     new_commit_count = [int]$commitCount
     changed_file_count = $changedFiles.Count
@@ -117,15 +121,14 @@ $manifest = [ordered]@{
     production_deployed = $false
     production_database_changed = $false
     apply_order = @(
-        "human review and approval",
-        "sanitized backup and isolated restore validation",
-        "migration safety review",
-        "application artifact staging",
-        "database migration apply",
-        "backend health and smoke",
-        "frontend immutable asset switch",
-        "collector scheduled-task switch",
-        "post-release acceptance"
+        "validate authorization",
+        "validate source archive and sha256",
+        "materialize isolated release",
+        "isolated database migration",
+        "loopback health and tenant smoke",
+        "isolated release pointer switch",
+        "isolated rollback rehearsal",
+        "independent review"
     )
 }
 
@@ -133,20 +136,20 @@ if (-not $sourceMainUnchanged) {
     throw "Source main preservation check failed."
 }
 if ($branch -ne $ProgramBranch) {
-    throw "Program branch does not match the PROGRAM R2 contract."
+    throw "Program branch does not match the PROGRAM R3 contract."
 }
 
 if ($WriteManifest) {
     if (-not [System.IO.Path]::IsPathRooted($OutputPath)) {
         throw "Manifest output path must be absolute."
     }
-    $root = "C:\AgroSat_backups\PROGRAM_R2_STAGING_RELEASE\"
+    $root = "C:\AgroSat_backups\PROGRAM_R3_MEGA_RELEASE_REPAIR\"
     $resolvedOutput = [System.IO.Path]::GetFullPath($OutputPath)
     if (-not $resolvedOutput.StartsWith(
         $root,
         [System.StringComparison]::OrdinalIgnoreCase
     )) {
-        throw "Manifest output path is outside the PROGRAM R2 evidence root."
+        throw "Manifest output path is outside the PROGRAM R3 evidence root."
     }
     $parent = Split-Path -Parent $resolvedOutput
     New-Item -ItemType Directory -Path $parent -Force | Out-Null
