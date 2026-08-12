@@ -1,8 +1,12 @@
+ [CmdletBinding()]
 param(
     [string]$ProgramWorktree = "C:\AgroSat_worktrees\program-r3-mega-repair",
     [string]$SourceCheckout = "C:\AgroSat",
     [string]$SourceBaseline = "40e8e379d9d29cb4bfb8afebdd9c489c19756fac",
     [string]$ProgramBranch = "task/program-r3-mega-repair",
+    [Parameter(Mandatory = $true)][ValidatePattern('^[a-f0-9]{40}$')][string]$ReleaseCandidate,
+    [string]$SourceArchive = "",
+    [string]$SourceArchiveSha256 = "",
     [string]$OutputPath = "",
     [switch]$WriteManifest
 )
@@ -22,10 +26,10 @@ function Invoke-SafeGit {
     return $output
 }
 
-function Get-OptionalGitRef {
+function Get-RequiredGitRef {
     param([Parameter(Mandatory = $true)][string]$Repository, [Parameter(Mandatory = $true)][string]$Ref)
-    $output = @(& git -C $Repository rev-parse --verify --quiet $Ref 2>$null)
-    if ($LASTEXITCODE -ne 0) { return $null }
+    $output = @(& git -C $Repository rev-parse --verify $Ref 2>$null)
+    if ($LASTEXITCODE -ne 0) { throw "GIT_REFERENCE_MISSING:$Ref" }
     return [string]($output | Select-Object -First 1)
 }
 
@@ -41,6 +45,8 @@ if ([System.IO.Path]::GetFullPath($SourceCheckout) -ne "C:\AgroSat") {
 if ($SourceBaseline -notmatch "^[a-f0-9]{40}$") {
     throw "Source baseline is not a full Git SHA."
 }
+if (($SourceArchive -and -not $SourceArchiveSha256) -or (-not $SourceArchive -and $SourceArchiveSha256)) { throw "ARCHIVE_IDENTITY_INCOMPLETE" }
+if ($SourceArchiveSha256 -and $SourceArchiveSha256 -notmatch "^[a-fA-F0-9]{64}$") { throw "SOURCE_ARCHIVE_HASH_INVALID" }
 
 $branch = [string](
     @(Invoke-SafeGit -Repository $ProgramWorktree -Arguments @(
@@ -52,10 +58,11 @@ $head = [string](
         "rev-parse", "HEAD"
     )) | Select-Object -First 1
 )
-$originHead = Get-OptionalGitRef -Repository $ProgramWorktree -Ref "origin/$ProgramBranch"
+$candidateObject = Get-RequiredGitRef -Repository $ProgramWorktree -Ref "$ReleaseCandidate^{commit}"
+$originHead = Get-RequiredGitRef -Repository $ProgramWorktree -Ref "origin/$ProgramBranch"
 [array]$programStatus = @(
     Invoke-SafeGit -Repository $ProgramWorktree -Arguments @(
-        "status", "--porcelain=v2", "--untracked-files=no"
+        "status", "--porcelain=v2", "--untracked-files=all"
     )
 )
 $sourceBranch = [string](
@@ -75,12 +82,12 @@ $sourceOriginHead = [string](
 )
 [array]$sourceStatus = @(
     Invoke-SafeGit -Repository $SourceCheckout -Arguments @(
-        "status", "--porcelain=v2", "--untracked-files=no"
+        "status", "--porcelain=v2", "--untracked-files=all"
     )
 )
 [array]$changedFiles = @(
     (Invoke-SafeGit -Repository $ProgramWorktree -Arguments @(
-        "diff", "--name-only", "$SourceBaseline..$head"
+        "diff", "--name-only", "$SourceBaseline..$ReleaseCandidate"
     )) | Where-Object { $_ }
 )
 [array]$changedMigrations = @(
@@ -93,7 +100,7 @@ $sourceOriginHead = [string](
 )
 $commitCount = [string](
     @(Invoke-SafeGit -Repository $ProgramWorktree -Arguments @(
-        "rev-list", "--count", "$SourceBaseline..$head"
+        "rev-list", "--count", "$SourceBaseline..$ReleaseCandidate"
     )) | Select-Object -First 1
 )
 
@@ -103,17 +110,30 @@ $sourceMainUnchanged = (
     $sourceOriginHead -eq $SourceBaseline -and
     $sourceStatus.Count -eq 0
 )
+if ($branch -cne $ProgramBranch) { throw "PROGRAM_BRANCH_MISMATCH" }
+if ($head -cne $ReleaseCandidate -or $candidateObject -cne $ReleaseCandidate) { throw "RELEASE_CANDIDATE_MUST_EQUAL_CURRENT_HEAD" }
+if ($originHead -cne $ReleaseCandidate) { throw "ORIGIN_BRANCH_NOT_ALIGNED" }
+if ($programStatus.Count -ne 0) { throw "PROGRAM_WORKTREE_NOT_CLEAN" }
+if (-not $sourceMainUnchanged) { throw "SOURCE_MAIN_PRESERVATION_FAILED" }
+$archiveHash = $null
+if ($SourceArchive) {
+    if (-not (Test-Path -LiteralPath $SourceArchive -PathType Leaf)) { throw "SOURCE_ARCHIVE_MISSING" }
+    $archiveHash = (Get-FileHash -LiteralPath $SourceArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($archiveHash -cne $SourceArchiveSha256.ToLowerInvariant()) { throw "SOURCE_ARCHIVE_HASH_MISMATCH" }
+}
 $manifest = [ordered]@{
-    schema_version = 2
+    schema_version = 3
     generated_at = (Get-Date).ToUniversalTime().ToString("o")
     source_baseline = $SourceBaseline
     program_branch = $ProgramBranch
     observed_branch = $branch
+    release_candidate = $ReleaseCandidate
     program_head = $head
     origin_program_head = $originHead
-    program_worktree_clean = ($programStatus.Count -eq 0)
-    origin_aligned = ($null -ne $originHead -and $head -eq $originHead)
-    source_main_unchanged = $sourceMainUnchanged
+    program_worktree_clean = $true
+    origin_aligned = $true
+    source_main_unchanged = $true
+    source_archive_sha256 = $archiveHash
     new_commit_count = [int]$commitCount
     changed_file_count = $changedFiles.Count
     changed_files = $changedFiles
@@ -121,22 +141,15 @@ $manifest = [ordered]@{
     production_deployed = $false
     production_database_changed = $false
     apply_order = @(
-        "validate authorization",
-        "validate source archive and sha256",
-        "materialize isolated release",
-        "isolated database migration",
-        "loopback health and tenant smoke",
-        "isolated release pointer switch",
-        "isolated rollback rehearsal",
-        "independent review"
+        "validate explicit release candidate and branch alignment",
+        "validate Git-native source archive SHA-256 and release manifest",
+        "materialize immutable candidate under authorized rehearsal root",
+        "apply migrations only to isolated agrosat_r3_fix database",
+        "launch loopback-only health and tenant/security smoke",
+        "switch isolated current-release pointer",
+        "validate backup and restore isolated database",
+        "restore isolated current-release pointer and rerun health/security smoke"
     )
-}
-
-if (-not $sourceMainUnchanged) {
-    throw "Source main preservation check failed."
-}
-if ($branch -ne $ProgramBranch) {
-    throw "Program branch does not match the PROGRAM R3 contract."
 }
 
 if ($WriteManifest) {

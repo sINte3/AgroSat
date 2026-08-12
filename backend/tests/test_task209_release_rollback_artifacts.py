@@ -45,18 +45,61 @@ def test_release_powershell_artifacts_parse():
 
 
 def test_manifest_preview_proves_source_and_program_integrity():
-    result = powershell("New-ReleaseManifest.ps1")
+    candidate = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    result = powershell("New-ReleaseManifest.ps1", "-ReleaseCandidate", candidate)
     report = json.loads(result.stdout)
     assert report["source_baseline"] == (
         "40e8e379d9d29cb4bfb8afebdd9c489c19756fac"
     )
     assert report["program_branch"] == "task/program-r3-mega-repair"
     assert report["observed_branch"] == "task/program-r3-mega-repair"
+    assert report["release_candidate"] == candidate
+    assert report["program_head"] == candidate
+    assert report["origin_program_head"] == candidate
     assert report["source_main_unchanged"] is True
-    assert isinstance(report["origin_aligned"], bool)
+    assert report["origin_aligned"] is True
     assert report["production_deployed"] is False
     assert report["production_database_changed"] is False
     assert len(report["apply_order"]) == 8
+
+
+def test_release_scripts_require_explicit_candidate_and_full_untracked_cleanliness():
+    manifest = (OPS / "New-ReleaseManifest.ps1").read_text(encoding="utf-8")
+    preflight = (OPS / "Test-AgroSatProductionPreflight.ps1").read_text(
+        encoding="utf-8"
+    )
+    health = (OPS / "Test-AgroSatReleaseHealth.ps1").read_text(encoding="utf-8")
+    release = (OPS / "Invoke-AgroSatRelease.ps1").read_text(encoding="utf-8")
+    rollback = (OPS / "Invoke-AgroSatRollback.ps1").read_text(encoding="utf-8")
+
+    assert "--untracked-files=all" in manifest
+    assert "--untracked-files=no" not in manifest
+    for script in (manifest, preflight, health, release, rollback):
+        assert "ReleaseCandidate" in script
+    for script in (preflight, health, release, rollback):
+        assert "40e8e379d9d29cb4bfb8afebdd9c489c19756fac" not in script
+
+
+def test_release_and_rollback_contracts_require_real_isolated_pointer_mutation():
+    release = (OPS / "Invoke-AgroSatRelease.ps1").read_text(encoding="utf-8")
+    rollback = (OPS / "Invoke-AgroSatRollback.ps1").read_text(encoding="utf-8")
+    assert "current-release.json" in release
+    assert "previous-release.json" in release
+    assert "isolated_release_materialized_database_migrated_and_pointer_switched" in release
+    assert "DatabaseMigrationScript" in release
+    assert "current-release.json" in rollback
+    assert "previous-release.json" in rollback
+    assert "isolated_database_restored_and_release_pointer_restored" in rollback
+    assert "DatabaseRestoreScript" in rollback
+    assert "database_restore_executed = (-not $WhatIfPreference)" in rollback
+    assert "mutation_performed = (-not $WhatIfPreference)" in rollback
+    assert "mutation_performed=$false" not in rollback
 
 
 def test_rollback_contract_covers_every_required_component():

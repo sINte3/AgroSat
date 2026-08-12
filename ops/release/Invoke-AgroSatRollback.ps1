@@ -1,18 +1,51 @@
-[CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='High')]
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param(
-    [ValidateSet('Rehearsal','Production')][string]$Mode = 'Rehearsal',
+    [ValidateSet('Rehearsal', 'Production')][string]$Mode = 'Rehearsal',
     [string]$AuthorizationPath = '',
-    [Parameter(Mandatory)][string]$RehearsalRoot,
-    [Parameter(Mandatory)][string]$RehearsalDatabase,
-    [Parameter(Mandatory)][string]$ValidatedBackup,
-    [Parameter(Mandatory)][string]$ValidatedBackupSha256
+    [Parameter(Mandatory = $true)][ValidatePattern('^[a-f0-9]{40}$')][string]$ReleaseCandidate,
+    [Parameter(Mandatory = $true)][string]$RehearsalRoot,
+    [Parameter(Mandatory = $true)][string]$RehearsalDatabase,
+    [Parameter(Mandatory = $true)][string]$ValidatedBackup,
+    [Parameter(Mandatory = $true)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$ValidatedBackupSha256,
+    [Parameter(Mandatory = $true)][string]$BackupIdentityPath,
+    [Parameter(Mandatory = $true)][string]$ManifestPath,
+    [Parameter(Mandatory = $true)][string]$DatabaseRestoreScript
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+function Read-RequiredJson {
+    param([string]$Path, [string]$MissingCode)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw $MissingCode }
+    return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+}
+
 $preflight = Join-Path $PSScriptRoot 'Test-AgroSatProductionPreflight.ps1'
-& $preflight -Mode $Mode -AuthorizationPath $AuthorizationPath -RehearsalRoot $RehearsalRoot -RehearsalDatabase $RehearsalDatabase | Out-Null
+& $preflight -Mode $Mode -AuthorizationPath $AuthorizationPath -ReleaseCandidate $ReleaseCandidate -RehearsalRoot $RehearsalRoot -RehearsalDatabase $RehearsalDatabase | Out-Null
 if ($Mode -eq 'Production') { throw 'PRODUCTION_ROLLBACK_FAIL_CLOSED' }
 if (-not (Test-Path -LiteralPath $ValidatedBackup -PathType Leaf)) { throw 'REHEARSAL_BACKUP_MISSING' }
-if ((Get-FileHash -LiteralPath $ValidatedBackup -Algorithm SHA256).Hash.ToLowerInvariant() -cne $ValidatedBackupSha256.ToLowerInvariant()) { throw 'REHEARSAL_BACKUP_HASH_MISMATCH' }
-[ordered]@{ status='PASS'; mode='Rehearsal'; operation='isolated_rollback_validated'; release_target='40e8e379d9d29cb4bfb8afebdd9c489c19756fac'; rehearsal_database=$RehearsalDatabase; mutation_performed=$false } | ConvertTo-Json
+$actualBackupHash = (Get-FileHash -LiteralPath $ValidatedBackup -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($actualBackupHash -cne $ValidatedBackupSha256.ToLowerInvariant()) { throw 'REHEARSAL_BACKUP_HASH_MISMATCH' }
+$backupIdentity = Read-RequiredJson -Path $BackupIdentityPath -MissingCode 'REHEARSAL_BACKUP_IDENTITY_MISSING'
+$manifest = Read-RequiredJson -Path $ManifestPath -MissingCode 'RELEASE_MANIFEST_MISSING'
+if ($backupIdentity.backup_sha256 -cne $actualBackupHash -or $backupIdentity.rehearsal_database -cne $RehearsalDatabase) { throw 'REHEARSAL_BACKUP_IDENTITY_MISMATCH' }
+if ($manifest.release_candidate -cne $ReleaseCandidate) { throw 'RELEASE_MANIFEST_CANDIDATE_MISMATCH' }
+
+$root = [IO.Path]::GetFullPath($RehearsalRoot)
+$pointerPath = Join-Path $root 'current-release.json'
+$previousPointerPath = Join-Path $root 'previous-release.json'
+$restoreScript = [IO.Path]::GetFullPath($DatabaseRestoreScript)
+if (-not $restoreScript.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'DATABASE_RESTORE_SCRIPT_OUTSIDE_REHEARSAL_ROOT' }
+if (-not (Test-Path -LiteralPath $restoreScript -PathType Leaf)) { throw 'DATABASE_RESTORE_SCRIPT_MISSING' }
+if (-not (Test-Path -LiteralPath $pointerPath -PathType Leaf)) { throw 'ISOLATED_RELEASE_POINTER_MISSING' }
+if (-not (Test-Path -LiteralPath $previousPointerPath -PathType Leaf)) { throw 'ISOLATED_PREVIOUS_RELEASE_POINTER_MISSING' }
+$priorPointer = Read-RequiredJson -Path $previousPointerPath -MissingCode 'ISOLATED_PREVIOUS_RELEASE_POINTER_MISSING'
+if ($priorPointer.release_candidate -notmatch '^[a-f0-9]{40}$') { throw 'ISOLATED_PREVIOUS_RELEASE_POINTER_INVALID' }
+if (-not (Test-Path -LiteralPath $priorPointer.release_directory -PathType Container)) { throw 'ISOLATED_PREVIOUS_RELEASE_MISSING' }
+if ($PSCmdlet.ShouldProcess($pointerPath, 'restore isolated current-release pointer from validated prior pointer')) {
+    & $restoreScript -RehearsalDatabase $RehearsalDatabase -ValidatedBackup $ValidatedBackup -ReleaseCandidate $ReleaseCandidate
+    if ($LASTEXITCODE -ne 0) { throw 'ISOLATED_DATABASE_RESTORE_FAILED' }
+    Copy-Item -LiteralPath $previousPointerPath -Destination $pointerPath -Force -ErrorAction Stop
+}
+[ordered]@{ status = 'PASS'; mode = 'Rehearsal'; operation = 'isolated_database_restored_and_release_pointer_restored'; release_candidate = $ReleaseCandidate; restored_release_candidate = $priorPointer.release_candidate; rehearsal_database = $RehearsalDatabase; backup_sha256 = $actualBackupHash; database_restore_required = $true; database_restore_executed = (-not $WhatIfPreference); current_pointer = $pointerPath; mutation_performed = (-not $WhatIfPreference); production_or_staging_mutated = $false } | ConvertTo-Json
