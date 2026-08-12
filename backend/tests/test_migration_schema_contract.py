@@ -50,6 +50,14 @@ class MigrationSchemaContractTests(unittest.TestCase):
         }
         self.assertTrue(expected.issubset(Base.metadata.tables))
 
+    def test_metadata_operation_recorder_fails_closed_for_unknown_alteration(self):
+        from models.program_r3_schema import _MetadataOperations
+
+        with self.assertRaisesRegex(
+            RuntimeError, "Unsupported migration metadata alteration"
+        ):
+            _MetadataOperations().alter_column("unknown_table", "unknown_column")
+
     def test_operational_closure_expands_alembic_revision_capacity(self):
         module = load(OPERATIONAL_CLOSURE)
         with patch.object(module.op, "alter_column") as alter:

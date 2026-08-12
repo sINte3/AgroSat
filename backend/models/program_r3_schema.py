@@ -96,9 +96,38 @@ class _MetadataOperations:
         if column.name not in table.c:
             table.append_column(column)
 
-    def alter_column(self, *_: Any, **__: Any) -> None:
-        # Core-model columns already represent the accepted pre-0006 alterations.
-        return None
+    def alter_column(
+        self,
+        table_name: str,
+        column_name: str,
+        *,
+        type_: Any | None = None,
+        nullable: bool | None = None,
+        server_default: Any | None = None,
+        **_: Any,
+    ) -> None:
+        """Apply representable column changes; never silently discard DDL.
+
+        ``alembic_version`` is Alembic's own bookkeeping table, deliberately
+        absent from application ``Base.metadata``.  The sole accepted
+        alteration of that table is recorded but cannot be represented here.
+        Every application-table alteration must target a registered column and
+        is applied to metadata or fails closed during import.
+        """
+        if table_name == "alembic_version" and column_name == "version_num":
+            return
+        table = Base.metadata.tables.get(table_name)
+        if table is None or column_name not in table.c:
+            raise RuntimeError(
+                f"Unsupported migration metadata alteration: {table_name}.{column_name}"
+            )
+        column = table.c[column_name]
+        if type_ is not None:
+            column.type = type_
+        if nullable is not None:
+            column.nullable = nullable
+        if server_default is not None:
+            column.server_default = sa.DefaultClause(server_default)
 
 
 def _load_migration(path: Path) -> ModuleType:
@@ -114,6 +143,19 @@ def register_program_r3_schema() -> None:
     """Populate metadata once from the accepted, forward-only migrations."""
     if getattr(Base.metadata, "_program_r3_schema_registered", False):
         return
+    # Keep this module safe to import directly by qualification tools.  The
+    # accepted migrations alter and reference the original core tables, so the
+    # corresponding declarative models must be registered before replay.
+    from models.crop import CropType  # noqa: F401
+    from models.enterprise import Enterprise  # noqa: F401
+    from models.field import CropSeason, Field  # noqa: F401
+    from models.monitoring import (  # noqa: F401
+        Alert,
+        NDVIRecord,
+        SatelliteIndexRecord,
+        ScoutingNote,
+        User,
+    )
     operations = _MetadataOperations()
     for filename in MIGRATION_FILES:
         module = _load_migration(VERSIONS / filename)
