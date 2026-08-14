@@ -50,13 +50,43 @@ class MigrationSchemaContractTests(unittest.TestCase):
         }
         self.assertTrue(expected.issubset(Base.metadata.tables))
 
-    def test_metadata_operation_recorder_fails_closed_for_unknown_alteration(self):
-        from models.program_r3_schema import _MetadataOperations
+    def test_program_r3_metadata_import_is_static_and_side_effect_free(self):
+        import subprocess
+        import sys
 
-        with self.assertRaisesRegex(
-            RuntimeError, "Unsupported migration metadata alteration"
-        ):
-            _MetadataOperations().alter_column("unknown_table", "unknown_column")
+        script = """
+import builtins
+from sqlalchemy.engine import Engine
+from sqlalchemy.schema import MetaData, Table
+
+
+def forbidden(*args, **kwargs):
+    raise AssertionError("model metadata import attempted a database or DDL operation")
+
+
+real_import = builtins.__import__
+def guarded_import(name, *args, **kwargs):
+    if name == "alembic" or name.startswith("alembic."):
+        raise AssertionError("model metadata import attempted to import Alembic")
+    if name.startswith("_metadata_"):
+        raise AssertionError("model metadata import attempted migration execution")
+    return real_import(name, *args, **kwargs)
+
+
+Engine.connect = forbidden
+MetaData.create_all = forbidden
+Table.create = forbidden
+builtins.__import__ = guarded_import
+import models.program_r3_schema
+"""
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=BACKEND,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
 
     def test_operational_closure_expands_alembic_revision_capacity(self):
         module = load(OPERATIONAL_CLOSURE)
