@@ -189,6 +189,9 @@ def test_release_and_rollback_contracts_require_real_isolated_pointer_mutation()
     assert "database_restore_executed = (-not $WhatIfPreference)" in rollback
     assert "mutation_performed = (-not $WhatIfPreference)" in rollback
     assert "mutation_performed=$false" not in rollback
+    assert "ISOLATED_POST_SWITCH_HEALTH_FAILED_ROLLED_BACK" in release
+    assert "ExpectedPreviousArchiveSha256" in rollback
+    assert "ISOLATED_PREVIOUS_RELEASE_HASH_MISMATCH" in rollback
 
 
 def test_rollback_contract_covers_every_required_component():

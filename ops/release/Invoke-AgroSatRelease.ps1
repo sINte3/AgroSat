@@ -8,7 +8,9 @@ param(
     [Parameter(Mandatory = $true)][string]$SourceArchive,
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$SourceArchiveSha256,
     [Parameter(Mandatory = $true)][string]$ManifestPath,
-    [Parameter(Mandatory = $true)][string]$DatabaseMigrationScript
+    [Parameter(Mandatory = $true)][string]$DatabaseMigrationScript,
+    [string]$HealthCheckScript = '',
+    [string]$HealthBaseUrl = ''
 )
 
 Set-StrictMode -Version Latest
@@ -30,6 +32,7 @@ function Read-ValidatedManifest {
 $preflight = Join-Path $PSScriptRoot 'Test-AgroSatProductionPreflight.ps1'
 & $preflight -Mode $Mode -AuthorizationPath $AuthorizationPath -ReleaseCandidate $ReleaseCandidate -RehearsalRoot $RehearsalRoot -RehearsalDatabase $RehearsalDatabase | Out-Null
 if ($Mode -eq 'Production') { throw 'PRODUCTION_RELEASE_FAIL_CLOSED' }
+if (($HealthCheckScript -and -not $HealthBaseUrl) -or (-not $HealthCheckScript -and $HealthBaseUrl)) { throw 'HEALTH_CHECK_IDENTITY_INCOMPLETE' }
 if (-not (Test-Path -LiteralPath $SourceArchive -PathType Leaf)) { throw 'SOURCE_ARCHIVE_MISSING' }
 $actualArchiveHash = (Get-FileHash -LiteralPath $SourceArchive -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($actualArchiveHash -cne $SourceArchiveSha256.ToLowerInvariant()) { throw 'SOURCE_ARCHIVE_HASH_MISMATCH' }
@@ -52,5 +55,13 @@ if ($PSCmdlet.ShouldProcess($releaseDirectory, 'materialize immutable isolated r
     if (Test-Path -LiteralPath $pointerPath -PathType Leaf) { Copy-Item -LiteralPath $pointerPath -Destination $previousPointerPath -Force -ErrorAction Stop }
     [ordered]@{ release_candidate = $ReleaseCandidate; release_directory = $releaseDirectory; archive_sha256 = $actualArchiveHash; switched_at_utc = (Get-Date).ToUniversalTime().ToString('o') } |
         ConvertTo-Json | Set-Content -LiteralPath $pointerPath -Encoding utf8
+    if ($HealthCheckScript) {
+        $healthScript = [IO.Path]::GetFullPath($HealthCheckScript)
+        if (-not $healthScript.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $healthScript -PathType Leaf)) { throw 'HEALTH_CHECK_SCRIPT_OUTSIDE_REHEARSAL_ROOT' }
+        try { & $healthScript -BaseUrl $HealthBaseUrl -ReleaseCandidate $ReleaseCandidate | Out-Null } catch {
+            if (Test-Path -LiteralPath $previousPointerPath -PathType Leaf) { Copy-Item -LiteralPath $previousPointerPath -Destination $pointerPath -Force -ErrorAction Stop } else { Remove-Item -LiteralPath $pointerPath -Force -ErrorAction Stop }
+            throw 'ISOLATED_POST_SWITCH_HEALTH_FAILED_ROLLED_BACK'
+        }
+    }
 }
 [ordered]@{ status = 'PASS'; mode = 'Rehearsal'; operation = 'isolated_release_materialized_database_migrated_and_pointer_switched'; release_candidate = $ReleaseCandidate; release_directory = $releaseDirectory; current_pointer = $pointerPath; archive_sha256 = $actualArchiveHash; isolated_database_migration_executed = (-not $WhatIfPreference); mutation_performed = (-not $WhatIfPreference); production_or_staging_mutated = $false } | ConvertTo-Json

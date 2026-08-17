@@ -9,7 +9,8 @@ param(
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$ValidatedBackupSha256,
     [Parameter(Mandatory = $true)][string]$BackupIdentityPath,
     [Parameter(Mandatory = $true)][string]$ManifestPath,
-    [Parameter(Mandatory = $true)][string]$DatabaseRestoreScript
+    [Parameter(Mandatory = $true)][string]$DatabaseRestoreScript,
+    [Parameter(Mandatory = $true)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$ExpectedPreviousArchiveSha256
 )
 
 Set-StrictMode -Version Latest
@@ -43,6 +44,7 @@ if (-not (Test-Path -LiteralPath $previousPointerPath -PathType Leaf)) { throw '
 $priorPointer = Read-RequiredJson -Path $previousPointerPath -MissingCode 'ISOLATED_PREVIOUS_RELEASE_POINTER_MISSING'
 if ($priorPointer.release_candidate -notmatch '^[a-f0-9]{40}$') { throw 'ISOLATED_PREVIOUS_RELEASE_POINTER_INVALID' }
 if (-not (Test-Path -LiteralPath $priorPointer.release_directory -PathType Container)) { throw 'ISOLATED_PREVIOUS_RELEASE_MISSING' }
+if ($null -eq $priorPointer.PSObject.Properties['archive_sha256'] -or $priorPointer.archive_sha256 -cne $ExpectedPreviousArchiveSha256) { throw 'ISOLATED_PREVIOUS_RELEASE_HASH_MISMATCH' }
 if ($PSCmdlet.ShouldProcess($pointerPath, 'restore isolated current-release pointer from validated prior pointer')) {
     & $restoreScript -RehearsalDatabase $RehearsalDatabase -ValidatedBackup $ValidatedBackup -ReleaseCandidate $ReleaseCandidate
     if ($LASTEXITCODE -ne 0) { throw 'ISOLATED_DATABASE_RESTORE_FAILED' }
