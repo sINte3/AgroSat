@@ -10,7 +10,11 @@ param(
     [Parameter(Mandatory = $true)][string]$ManifestPath,
     [Parameter(Mandatory = $true)][string]$DatabaseMigrationScript,
     [string]$HealthCheckScript = '',
-    [string]$HealthBaseUrl = ''
+    [string]$HealthBaseUrl = '',
+    [string]$ValidatedBackup = '',
+    [string]$ValidatedBackupSha256 = '',
+    [string]$BackupIdentityPath = '',
+    [string]$DatabaseRestoreScript = ''
 )
 
 Set-StrictMode -Version Latest
@@ -33,6 +37,7 @@ $preflight = Join-Path $PSScriptRoot 'Test-AgroSatProductionPreflight.ps1'
 & $preflight -Mode $Mode -AuthorizationPath $AuthorizationPath -ReleaseCandidate $ReleaseCandidate -RehearsalRoot $RehearsalRoot -RehearsalDatabase $RehearsalDatabase | Out-Null
 if ($Mode -eq 'Production') { throw 'PRODUCTION_RELEASE_FAIL_CLOSED' }
 if (($HealthCheckScript -and -not $HealthBaseUrl) -or (-not $HealthCheckScript -and $HealthBaseUrl)) { throw 'HEALTH_CHECK_IDENTITY_INCOMPLETE' }
+if ($HealthCheckScript -and ((-not $ValidatedBackup) -or (-not $ValidatedBackupSha256) -or (-not $BackupIdentityPath) -or (-not $DatabaseRestoreScript))) { throw 'HEALTH_FAILURE_RECOVERY_IDENTITY_INCOMPLETE' }
 if (-not (Test-Path -LiteralPath $SourceArchive -PathType Leaf)) { throw 'SOURCE_ARCHIVE_MISSING' }
 $actualArchiveHash = (Get-FileHash -LiteralPath $SourceArchive -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($actualArchiveHash -cne $SourceArchiveSha256.ToLowerInvariant()) { throw 'SOURCE_ARCHIVE_HASH_MISMATCH' }
@@ -51,14 +56,33 @@ if ($PSCmdlet.ShouldProcess($releaseDirectory, 'materialize immutable isolated r
     & $archiveValidator -ArchivePath $SourceArchive -ExpectedSha256 $actualArchiveHash -ReleaseCandidate $ReleaseCandidate -DestinationPath $releaseDirectory | Out-Null
     if (-not (Test-Path -LiteralPath $releaseDirectory -PathType Container)) { throw 'IMMUTABLE_RELEASE_MATERIALIZATION_FAILED' }
     & $migrationScript -RehearsalDatabase $RehearsalDatabase -ReleaseDirectory $releaseDirectory -ReleaseCandidate $ReleaseCandidate
-    if ($LASTEXITCODE -ne 0) { throw 'ISOLATED_DATABASE_MIGRATION_FAILED' }
+    if (-not $?) { throw 'ISOLATED_DATABASE_MIGRATION_FAILED' }
     if (Test-Path -LiteralPath $pointerPath -PathType Leaf) { Copy-Item -LiteralPath $pointerPath -Destination $previousPointerPath -Force -ErrorAction Stop }
     [ordered]@{ release_candidate = $ReleaseCandidate; release_directory = $releaseDirectory; archive_sha256 = $actualArchiveHash; switched_at_utc = (Get-Date).ToUniversalTime().ToString('o') } |
         ConvertTo-Json | Set-Content -LiteralPath $pointerPath -Encoding utf8
     if ($HealthCheckScript) {
         $healthScript = [IO.Path]::GetFullPath($HealthCheckScript)
         if (-not $healthScript.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $healthScript -PathType Leaf)) { throw 'HEALTH_CHECK_SCRIPT_OUTSIDE_REHEARSAL_ROOT' }
-        try { & $healthScript -BaseUrl $HealthBaseUrl -ReleaseCandidate $ReleaseCandidate | Out-Null } catch {
+        try {
+            & $healthScript -BaseUrl $HealthBaseUrl -ReleaseCandidate $ReleaseCandidate | Out-Null
+            if (-not $?) { throw 'ISOLATED_POST_SWITCH_HEALTH_CHECK_FAILED' }
+        } catch {
+            if (-not (Test-Path -LiteralPath $ValidatedBackup -PathType Leaf)) { throw 'HEALTH_FAILURE_BACKUP_MISSING' }
+            $backupHash = (Get-FileHash -LiteralPath $ValidatedBackup -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($backupHash -cne $ValidatedBackupSha256.ToLowerInvariant()) { throw 'HEALTH_FAILURE_BACKUP_HASH_MISMATCH' }
+            if (-not (Test-Path -LiteralPath $BackupIdentityPath -PathType Leaf)) { throw 'HEALTH_FAILURE_BACKUP_IDENTITY_MISSING' }
+            try { $backupIdentity = Get-Content -LiteralPath $BackupIdentityPath -Raw | ConvertFrom-Json } catch { throw 'HEALTH_FAILURE_BACKUP_IDENTITY_MALFORMED' }
+            foreach ($field in @('backup_sha256', 'rehearsal_database')) {
+                if ($null -eq $backupIdentity.PSObject.Properties[$field]) { throw "HEALTH_FAILURE_BACKUP_IDENTITY_FIELD_MISSING:$field" }
+            }
+            if ([string]$backupIdentity.backup_sha256 -notmatch '^[a-fA-F0-9]{64}$' -or ([string]$backupIdentity.backup_sha256).ToLowerInvariant() -cne $backupHash) { throw 'HEALTH_FAILURE_BACKUP_IDENTITY_SHA_MISMATCH' }
+            if ([string]$backupIdentity.rehearsal_database -cne $RehearsalDatabase) { throw 'HEALTH_FAILURE_BACKUP_IDENTITY_DATABASE_MISMATCH' }
+            $restoreScript = [IO.Path]::GetFullPath($DatabaseRestoreScript)
+            if (-not $restoreScript.StartsWith($root + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $restoreScript -PathType Leaf)) { throw 'HEALTH_FAILURE_RESTORE_SCRIPT_OUTSIDE_REHEARSAL_ROOT' }
+            try {
+                & $restoreScript -RehearsalDatabase $RehearsalDatabase -ValidatedBackup $ValidatedBackup -ReleaseCandidate $ReleaseCandidate
+                if (-not $?) { throw 'DUMMY_OR_NATIVE_RESTORE_FAILURE' }
+            } catch { throw 'HEALTH_FAILURE_DATABASE_RESTORE_FAILED_MANUAL_RECOVERY_REQUIRED' }
             if (Test-Path -LiteralPath $previousPointerPath -PathType Leaf) { Copy-Item -LiteralPath $previousPointerPath -Destination $pointerPath -Force -ErrorAction Stop } else { Remove-Item -LiteralPath $pointerPath -Force -ErrorAction Stop }
             throw 'ISOLATED_POST_SWITCH_HEALTH_FAILED_ROLLED_BACK'
         }

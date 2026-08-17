@@ -31,7 +31,7 @@ try {
     $names = @($archive.Entries | ForEach-Object FullName)
     if (@($names | Group-Object | Where-Object Count -gt 1).Count -ne 0) { throw 'RELEASE_ARCHIVE_DUPLICATE_PATH' }
     foreach ($name in $names) {
-        if (-not (Test-SafeArchiveEntryName -Name $name.TrimEnd('/'))) { throw "RELEASE_ARCHIVE_UNSAFE_PATH:$name" }
+        if (-not (Test-SafeArchiveEntryName -Name $name.TrimEnd([char[]]@('/')))) { throw "RELEASE_ARCHIVE_UNSAFE_PATH:$name" }
     }
     $manifestEntry = $archive.Entries | Where-Object FullName -eq 'release-manifest.json' | Select-Object -First 1
     if ($null -eq $manifestEntry) { throw 'RELEASE_ARCHIVE_MANIFEST_MISSING' }
