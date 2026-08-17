@@ -44,6 +44,95 @@ def test_release_powershell_artifacts_parse():
         )
 
 
+def test_release_archive_validator_covers_safe_immutable_archive_contract(tmp_path):
+    import hashlib
+    import zipfile
+
+    candidate = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    manifest = {
+        "schema_version": 1,
+        "git_sha": candidate,
+        "branch": "task/program-r3-mega-repair",
+        "accepted_source_baseline": "40e8e379d9d29cb4bfb8afebdd9c489c19756fac",
+        "created_utc": "2026-08-17T00:00:00Z",
+    }
+    archive = tmp_path / "archive with spaces.zip"
+    with zipfile.ZipFile(archive, "w") as package:
+        package.writestr("release-manifest.json", json.dumps(manifest))
+        package.writestr("app/readme.txt", "safe")
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    destination = tmp_path / "extract with spaces"
+    result = powershell(
+        "Test-AgroSatReleaseArchive.ps1",
+        "-ArchivePath",
+        str(archive),
+        "-ExpectedSha256",
+        digest,
+        "-ReleaseCandidate",
+        candidate,
+        "-DestinationPath",
+        str(destination),
+    )
+    report = json.loads(result.stdout)
+    assert report["status"] == "PASS"
+    assert (destination / "app" / "readme.txt").read_text() == "safe"
+
+
+def test_release_archive_validator_fails_closed_for_identity_and_unsafe_path(tmp_path):
+    import hashlib
+    import zipfile
+
+    candidate = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    archive = tmp_path / "unsafe.zip"
+    manifest = {
+        "schema_version": 1,
+        "git_sha": candidate,
+        "branch": "task/program-r3-mega-repair",
+        "accepted_source_baseline": "40e8e379d9d29cb4bfb8afebdd9c489c19756fac",
+        "created_utc": "2026-08-17T00:00:00Z",
+    }
+    with zipfile.ZipFile(archive, "w") as package:
+        package.writestr("release-manifest.json", json.dumps(manifest))
+        package.writestr("../escape.txt", "blocked")
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    result = powershell(
+        "Test-AgroSatReleaseArchive.ps1",
+        "-ArchivePath",
+        str(archive),
+        "-ExpectedSha256",
+        digest,
+        "-ReleaseCandidate",
+        candidate,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "RELEASE_ARCHIVE_UNSAFE_PATH" in result.stderr
+    result = powershell(
+        "Test-AgroSatReleaseArchive.ps1",
+        "-ArchivePath",
+        str(archive),
+        "-ExpectedSha256",
+        "0" * 64,
+        "-ReleaseCandidate",
+        candidate,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "RELEASE_ARCHIVE_HASH_MISMATCH" in result.stderr
+
+
 def test_manifest_preview_proves_source_and_program_integrity():
     candidate = subprocess.run(
         ["git", "rev-parse", "HEAD"],

@@ -44,8 +44,8 @@ if (-not $migrationScript.StartsWith($root + [IO.Path]::DirectorySeparatorChar, 
 if (-not (Test-Path -LiteralPath $migrationScript -PathType Leaf)) { throw 'DATABASE_MIGRATION_SCRIPT_MISSING' }
 if (Test-Path -LiteralPath $releaseDirectory) { throw 'IMMUTABLE_RELEASE_ALREADY_EXISTS' }
 if ($PSCmdlet.ShouldProcess($releaseDirectory, 'materialize immutable isolated release and switch isolated pointer')) {
-    New-Item -ItemType Directory -Path $releaseDirectory -ErrorAction Stop | Out-Null
-    Expand-Archive -LiteralPath $SourceArchive -DestinationPath $releaseDirectory -ErrorAction Stop
+    $archiveValidator = Join-Path $PSScriptRoot 'Test-AgroSatReleaseArchive.ps1'
+    & $archiveValidator -ArchivePath $SourceArchive -ExpectedSha256 $actualArchiveHash -ReleaseCandidate $ReleaseCandidate -DestinationPath $releaseDirectory | Out-Null
     if (-not (Test-Path -LiteralPath $releaseDirectory -PathType Container)) { throw 'IMMUTABLE_RELEASE_MATERIALIZATION_FAILED' }
     & $migrationScript -RehearsalDatabase $RehearsalDatabase -ReleaseDirectory $releaseDirectory -ReleaseCandidate $ReleaseCandidate
     if ($LASTEXITCODE -ne 0) { throw 'ISOLATED_DATABASE_MIGRATION_FAILED' }
