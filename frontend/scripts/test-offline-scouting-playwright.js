@@ -183,7 +183,7 @@ async (page) => {
     await section.getByLabel('Долгота').last().fill('64.42');
     await section.getByLabel('Создать действие на себя после результата').check();
     await section.getByLabel('Описание').fill('Проверить оросительную линию и восстановить подачу воды.');
-    await section.getByLabel('Срок').fill('2026-08-03');
+    await section.getByLabel('Срок').fill('2099-08-03');
     await section.getByRole('button', { name: 'В очередь' }).click();
     await section.getByText('ожидают ручной синхронизации').waitFor();
     return section;
