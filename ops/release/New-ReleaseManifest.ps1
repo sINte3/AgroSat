@@ -50,7 +50,7 @@ function Get-RepositoryAlembicHead {
         $revisions[$revision] = $true
         $downBlock = [regex]::Match(
             $content,
-            '(?ms)^\s*down_revision(?:\s*:[^=]+)?\s*=\s*(?<value>.*?)(?=^\s*branch_labels\s*=)'
+            '(?ms)^\s*down_revision(?:\s*:[^=]+)?\s*=\s*(?<value>.*?)(?=^\s*branch_labels(?:\s*:[^=]+)?\s*=)'
         )
         if ($downBlock.Success) {
             foreach ($match in @([regex]::Matches($downBlock.Groups['value'].Value, '["''](?<id>[^"'']+)["'']'))) {
