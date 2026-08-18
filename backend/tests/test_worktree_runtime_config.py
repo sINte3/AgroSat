@@ -172,11 +172,13 @@ class LauncherContractTests(unittest.TestCase):
             cwd=ROOT,
             capture_output=True,
             text=True,
-            check=True,
         )
-        added = "\n".join(
-            line[1:] for line in result.stdout.splitlines() if line.startswith("+") and not line.startswith("+++")
-        )
+        if result.returncode == 0:
+            added = "\n".join(
+                line[1:] for line in result.stdout.splitlines() if line.startswith("+") and not line.startswith("+++")
+            )
+        else:
+            added = self.source + "\n" + CONFIG.read_text(encoding="utf-8-sig")
         schemes = ("postgres" + "ql://", "postgres://")
         self.assertFalse(any(scheme in added.lower() for scheme in schemes))
         self.assertNotRegex(added, re.compile(r"secret_key\s*=\s*['\"][^'\"]+", re.IGNORECASE))

@@ -33,16 +33,23 @@ echo Source checkout root: "%ROOT%"
 where git.exe >nul 2>nul || goto :git_error
 if not exist "%BACKEND_DIR%\main.py" goto :checkout_error
 if not exist "%FRONTEND_DIR%\package.json" goto :checkout_error
+set "IDENTITY_MODE=git"
 call :git_common "%LAUNCHER_ROOT%" LAUNCHER_COMMON
 call :git_common "%ROOT%" SOURCE_COMMON
-if not defined LAUNCHER_COMMON goto :identity_error
-if not defined SOURCE_COMMON goto :identity_error
-if /I not "%SOURCE_COMMON%"=="%LAUNCHER_COMMON%" goto :identity_error
+if not defined LAUNCHER_COMMON (
+    call :verify_archive_identity "%ROOT%"
+    if errorlevel 1 goto :identity_error
+    set "IDENTITY_MODE=archive-manifest"
+) else (
+    if not defined SOURCE_COMMON goto :identity_error
+    if /I not "%SOURCE_COMMON%"=="%LAUNCHER_COMMON%" goto :identity_error
+)
 
 set "PRIMARY_ROOT=C:\AgroSat"
 call :git_common "%PRIMARY_ROOT%" PRIMARY_COMMON
 if not defined PRIMARY_COMMON goto :identity_error
-if /I not "%PRIMARY_COMMON%"=="%LAUNCHER_COMMON%" goto :identity_error
+if /I "%IDENTITY_MODE%"=="git" if /I not "%PRIMARY_COMMON%"=="%LAUNCHER_COMMON%" goto :identity_error
+echo Verified source identity: %IDENTITY_MODE%
 echo Verified dependency root: "%PRIMARY_ROOT%"
 
 set "RUNTIME_CONFIG_MODE=local"
@@ -114,6 +121,15 @@ exit /b 0
 set "%~2="
 for /f "usebackq delims=" %%G in (`git -C "%~1" rev-parse --path-format^=absolute --git-common-dir 2^>nul`) do for %%H in ("%%G") do set "%~2=%%~fH"
 exit /b 0
+
+:verify_archive_identity
+if /I not "%~f1"=="%LAUNCHER_ROOT%" exit /b 1
+set "ARCHIVE_MANIFEST_PATH=%~f1\release-manifest.json"
+if not exist "%ARCHIVE_MANIFEST_PATH%" exit /b 1
+powershell -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; $m=Get-Content -LiteralPath $env:ARCHIVE_MANIFEST_PATH -Raw|ConvertFrom-Json; foreach($f in @('schema_version','git_sha','branch','accepted_source_baseline','created_utc')){if($null -eq $m.PSObject.Properties[$f]){exit 1}}; if([string]$m.git_sha -notmatch '^[a-f0-9]{40}$' -or [string]$m.branch -cne 'task/program-r3-mega-repair' -or [string]$m.accepted_source_baseline -cne '40e8e379d9d29cb4bfb8afebdd9c489c19756fac'){exit 1}" >nul 2>nul
+set "ARCHIVE_IDENTITY_RESULT=%ERRORLEVEL%"
+set "ARCHIVE_MANIFEST_PATH="
+exit /b %ARCHIVE_IDENTITY_RESULT%
 
 :require_free_port
 powershell -NoProfile -Command "$c=Get-NetTCPConnection -LocalPort %~1 -State Listen -ErrorAction SilentlyContinue; if(-not $c){exit 0}; $c|ForEach-Object{$p=Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue; Write-Host ('[ERROR] Port %~1 is occupied by PID {0} ({1}).' -f $_.OwningProcess,$p.ProcessName)}; exit 1"

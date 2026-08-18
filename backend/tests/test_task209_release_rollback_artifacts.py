@@ -1,6 +1,7 @@
 """Read-only release manifest and rollback drill contracts."""
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -8,6 +9,33 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 OPS = ROOT / "ops" / "release"
+
+
+def release_candidate():
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        return result.stdout.strip()
+    manifest = json.loads((ROOT / "release-manifest.json").read_text(encoding="utf-8-sig"))
+    return manifest["git_sha"]
+
+
+def archive_sidecar_manifest():
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        return None
+    path = os.environ.get("TASK212_CANDIDATE_MANIFEST_PATH")
+    assert path, "archive-only qualification requires the explicit candidate sidecar manifest"
+    return json.loads(Path(path).read_text(encoding="utf-8-sig"))
 
 
 def powershell(script: str, *arguments: str, check: bool = True):
@@ -48,13 +76,7 @@ def test_release_archive_validator_covers_safe_immutable_archive_contract(tmp_pa
     import hashlib
     import zipfile
 
-    candidate = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    candidate = release_candidate()
     manifest = {
         "schema_version": 1,
         "git_sha": candidate,
@@ -88,13 +110,7 @@ def test_release_archive_validator_fails_closed_for_identity_and_unsafe_path(tmp
     import hashlib
     import zipfile
 
-    candidate = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    candidate = release_candidate()
     archive = tmp_path / "unsafe.zip"
     manifest = {
         "schema_version": 1,
@@ -134,15 +150,11 @@ def test_release_archive_validator_fails_closed_for_identity_and_unsafe_path(tmp
 
 
 def test_manifest_preview_proves_source_and_program_integrity():
-    candidate = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    result = powershell("New-ReleaseManifest.ps1", "-ReleaseCandidate", candidate)
-    report = json.loads(result.stdout)
+    candidate = release_candidate()
+    report = archive_sidecar_manifest()
+    if report is None:
+        result = powershell("New-ReleaseManifest.ps1", "-ReleaseCandidate", candidate)
+        report = json.loads(result.stdout)
     assert report["source_baseline"] == (
         "40e8e379d9d29cb4bfb8afebdd9c489c19756fac"
     )
@@ -178,13 +190,20 @@ def test_manifest_preview_proves_source_and_program_integrity():
 def test_manifest_binds_candidate_archive_filename_and_normalized_sha256(tmp_path):
     import hashlib
 
-    candidate = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    candidate = release_candidate()
+    report = archive_sidecar_manifest()
+    if report is not None:
+        archive_path = Path(os.environ["TASK212_CANDIDATE_ARCHIVE_PATH"])
+        digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+        assert os.environ["TASK212_CANDIDATE_ARCHIVE_SHA256"].lower() == digest
+        assert report["source_archive_filename"] == archive_path.name
+        assert report["source_archive_sha256"] == digest
+        assert report["candidate_archive"] == {
+            "filename": archive_path.name,
+            "sha256": digest,
+        }
+        assert report["release_candidate"] == candidate
+        return
     archive = tmp_path / "candidate archive with spaces.zip"
     archive.write_bytes(b"immutable candidate archive fixture")
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
