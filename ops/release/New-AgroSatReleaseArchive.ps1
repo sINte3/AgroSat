@@ -18,7 +18,7 @@ if ((& git -C $worktree rev-parse origin/task/program-r3-mega-repair).Trim() -cn
 if (@(& git -C $worktree status --porcelain=v1 --untracked-files=all).Count -ne 0) { throw 'RELEASE_ARCHIVE_WORKTREE_NOT_CLEAN' }
 
 $tracked = @(& git -C $worktree ls-tree -r --name-only $ReleaseCandidate)
-if (($tracked | Where-Object { $_ -match '(^|/)(\.git|\.env($|\.)|node_modules|venv|\.venv|\.pytest_cache|coverage|htmlcov)(/|$)' }).Count -ne 0) { throw 'RELEASE_ARCHIVE_EXCLUDED_CONTENT_TRACKED' }
+if (@($tracked | Where-Object { $_ -match '(^|/)(\.git|\.env($|\.)|node_modules|venv|\.venv|\.pytest_cache|coverage|htmlcov)(/|$)' }).Count -ne 0) { throw 'RELEASE_ARCHIVE_EXCLUDED_CONTENT_TRACKED' }
 New-Item -ItemType Directory -Path $output -Force | Out-Null
 $timestamp = (Get-Date).ToUniversalTime().ToString('yyyyMMdd_HHmmss')
 $archivePath = Join-Path $output "AgroSat_PROGRAM_R3_RC_$($ReleaseCandidate.Substring(0, 12))_$timestamp.zip"
