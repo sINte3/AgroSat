@@ -155,7 +155,55 @@ def test_manifest_preview_proves_source_and_program_integrity():
     assert report["origin_aligned"] is True
     assert report["production_deployed"] is False
     assert report["production_database_changed"] is False
+    assert report["alembic_head"] == "0012_commercial_tenant_boundary"
+    assert report["alembic_head_count"] == 1
+    assert report["required_runtime_versions"] == {
+        "python": "3.11+",
+        "node": "18+",
+        "backend_image": "python:3.11-slim",
+        "npm_lockfile_version": 3,
+        "sources": ["README.md", "backend/Dockerfile", "frontend/package-lock.json"],
+    }
+    assert report["first_pilot_feature_state"] == {
+        "sentinel": "ENABLED",
+        "wialon": "DISABLED",
+        "telegram": "DISABLED",
+        "mock_mode": "DISABLED_FAIL_CLOSED",
+        "web_embedded_scheduler": "DISABLED",
+        "collectors": "SEPARATE_CLI_ONLY",
+    }
     assert len(report["apply_order"]) == 8
+
+
+def test_manifest_binds_candidate_archive_filename_and_normalized_sha256(tmp_path):
+    import hashlib
+
+    candidate = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    archive = tmp_path / "candidate archive with spaces.zip"
+    archive.write_bytes(b"immutable candidate archive fixture")
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    result = powershell(
+        "New-ReleaseManifest.ps1",
+        "-ReleaseCandidate",
+        candidate,
+        "-SourceArchive",
+        str(archive),
+        "-SourceArchiveSha256",
+        digest.upper(),
+    )
+    report = json.loads(result.stdout)
+    assert report["source_archive_filename"] == archive.name
+    assert report["source_archive_sha256"] == digest
+    assert report["candidate_archive"] == {
+        "filename": archive.name,
+        "sha256": digest,
+    }
 
 
 def test_release_scripts_require_explicit_candidate_and_full_untracked_cleanliness():
