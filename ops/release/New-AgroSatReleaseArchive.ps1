@@ -34,6 +34,7 @@ try {
     $inventoryPath = Join-Path $tempRoot 'release-inventory.txt'
     $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $manifestPath -Encoding utf8
     ($tracked + @('release-manifest.json', 'release-inventory.txt') | Sort-Object) | Set-Content -LiteralPath $inventoryPath -Encoding utf8
+    Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = [IO.Compression.ZipFile]::Open($archivePath, [IO.Compression.ZipArchiveMode]::Update)
     try { [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $manifestPath, 'release-manifest.json') | Out-Null; [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $inventoryPath, 'release-inventory.txt') | Out-Null } finally { $zip.Dispose() }
