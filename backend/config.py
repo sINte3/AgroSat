@@ -72,6 +72,13 @@ class Settings(BaseSettings):
     sentinel_hub_client_id: str = ""
     sentinel_hub_client_secret: str = ""
 
+    # Pixel NDVI artifact cache. Empty keeps the feature fail-closed until an
+    # operator supplies an absolute task/release-owned runtime directory.
+    pixel_ndvi_cache_directory: str = ""
+    pixel_ndvi_cache_max_entries: int = 250
+    pixel_ndvi_cache_max_bytes: int = 1_073_741_824
+    pixel_ndvi_cache_max_age_days: int = 30
+
     @field_validator("sentinel_hub_provider", mode="before")
     @classmethod
     def validate_sentinel_hub_provider(cls, value: object) -> str:

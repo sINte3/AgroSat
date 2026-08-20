@@ -291,12 +291,28 @@ class SentinelHubService:
 
     def get_process_png(self, payload: dict):
         """Request a Process API PNG using the existing OAuth token path."""
+        return self.get_process_response(payload, accept="image/png")
+
+    def get_process_response(self, payload: dict, *, accept: str):
+        """Request one bounded Process API representation from the allowlist."""
         token = self._get_access_token()
         timeout = httpx.Timeout(connect=10.0, read=45.0, write=10.0, pool=10.0)
         return httpx.post(
             self._provider_endpoints.process_url,
             json=payload,
-            headers={"Authorization": f"Bearer {token}", "Accept": "image/png"},
+            headers={"Authorization": f"Bearer {token}", "Accept": accept},
+            timeout=timeout,
+            follow_redirects=False,
+        )
+
+    def get_catalog_response(self, payload: dict):
+        """Request one bounded STAC search from the immutable provider allowlist."""
+        token = self._get_access_token()
+        timeout = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
+        return httpx.post(
+            self._provider_endpoints.catalog_url,
+            json=payload,
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/geo+json"},
             timeout=timeout,
             follow_redirects=False,
         )

@@ -31,6 +31,7 @@ PLANET = {
     ),
     "statistical": "https://services.sentinel-hub.com/api/v1/statistics",
     "process": "https://services.sentinel-hub.com/api/v1/process",
+    "catalog": "https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search",
 }
 CDSE = {
     "token": (
@@ -39,6 +40,7 @@ CDSE = {
     ),
     "statistical": "https://sh.dataspace.copernicus.eu/statistics/v1",
     "process": "https://sh.dataspace.copernicus.eu/process/v1",
+    "catalog": "https://sh.dataspace.copernicus.eu/catalog/v1/search",
 }
 
 
@@ -88,6 +90,7 @@ def test_planet_preset_resolves_exact_existing_endpoints():
     assert endpoints.token_url == PLANET["token"]
     assert endpoints.statistical_url == PLANET["statistical"]
     assert endpoints.process_url == PLANET["process"]
+    assert endpoints.catalog_url == PLANET["catalog"]
 
 
 def test_cdse_preset_resolves_exact_official_endpoints():
@@ -96,6 +99,7 @@ def test_cdse_preset_resolves_exact_official_endpoints():
     assert endpoints.token_url == CDSE["token"]
     assert endpoints.statistical_url == CDSE["statistical"]
     assert endpoints.process_url == CDSE["process"]
+    assert endpoints.catalog_url == CDSE["catalog"]
     assert set(provider_endpoint_matrix()) == {"planet", "cdse"}
 
 

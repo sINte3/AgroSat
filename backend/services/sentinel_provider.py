@@ -22,6 +22,7 @@ class SentinelProviderEndpoints:
     token_url: str
     statistical_url: str
     process_url: str
+    catalog_url: str
     endpoint_class: str
 
     def sanitized_metadata(self) -> dict[str, str]:
@@ -41,6 +42,7 @@ _PROVIDER_ENDPOINTS: Final[Mapping[str, SentinelProviderEndpoints]] = MappingPro
             ),
             statistical_url="https://services.sentinel-hub.com/api/v1/statistics",
             process_url="https://services.sentinel-hub.com/api/v1/process",
+            catalog_url="https://services.sentinel-hub.com/api/v1/catalog/1.0.0/search",
             endpoint_class="official_planet_sentinel_hub_https",
         ),
         CDSE_PROVIDER: SentinelProviderEndpoints(
@@ -51,6 +53,7 @@ _PROVIDER_ENDPOINTS: Final[Mapping[str, SentinelProviderEndpoints]] = MappingPro
             ),
             statistical_url="https://sh.dataspace.copernicus.eu/statistics/v1",
             process_url="https://sh.dataspace.copernicus.eu/process/v1",
+            catalog_url="https://sh.dataspace.copernicus.eu/catalog/v1/search",
             endpoint_class="official_cdse_sentinel_hub_https",
         ),
     }
@@ -81,6 +84,7 @@ def provider_endpoint_matrix() -> dict[str, dict[str, str]]:
             "token": endpoints.token_url,
             "statistical": endpoints.statistical_url,
             "process": endpoints.process_url,
+            "catalog": endpoints.catalog_url,
             "endpointClass": endpoints.endpoint_class,
         }
         for name, endpoints in _PROVIDER_ENDPOINTS.items()
