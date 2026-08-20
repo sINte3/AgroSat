@@ -31,7 +31,8 @@
     "test:variable-rate": "node scripts/test-variable-rate-recommendations.mjs",
     "test:commercial-tenant": "node scripts/test-commercial-tenant.mjs",
     "test:commercial-tenant-browser": "node scripts/test-commercial-tenant-browser.mjs",
-    "test:production-api-origin": "node scripts/test-production-api-origin.mjs"
+    "test:production-api-origin": "node scripts/test-production-api-origin.mjs",
+    "test:pixel-ndvi-workspace": "node scripts/test-pixel-ndvi-workspace.mjs"
   },
   "dependencies": {
     "@mapbox/mapbox-gl-draw": "1.5.0",
