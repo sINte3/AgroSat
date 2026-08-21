@@ -6,10 +6,13 @@ FastAPI backend — главная точка входа.
 """
 
 import logging
+import math
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -66,6 +69,23 @@ app.add_middleware(
 )
 app.add_middleware(MetricsMiddleware)
 
+
+def _json_safe_validation(value):
+    if isinstance(value, float) and not math.isfinite(value):
+        return "non_finite_number"
+    if isinstance(value, dict):
+        return {str(key): _json_safe_validation(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_validation(item) for item in value]
+    return value
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_response(_request: Request, exc: RequestValidationError):
+    """Preserve FastAPI's 422 envelope without serializing NaN or Infinity."""
+    errors = _json_safe_validation(jsonable_encoder(exc.errors()))
+    return JSONResponse(status_code=422, content={"detail": errors})
+
 # ─── Роутеры ─────────────────────────────────────────────────────────────────
 
 from api.fields import router as fields_router
@@ -104,6 +124,7 @@ from api.variable_rate_recommendations import (
     router as variable_rate_recommendations_router,
 )
 from api.commercial_tenant import router as commercial_tenant_router
+from api.anomaly_inspections import router as anomaly_inspections_router
 
 app.include_router(auth_router)
 app.include_router(enterprises_router)
@@ -137,6 +158,7 @@ app.include_router(yield_map_imports_router)
 app.include_router(productivity_zones_router)
 app.include_router(variable_rate_recommendations_router)
 app.include_router(commercial_tenant_router)
+app.include_router(anomaly_inspections_router)
 
 
 # ─── Базовые эндпоинты ───────────────────────────────────────────────────────

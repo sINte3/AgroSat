@@ -26,6 +26,7 @@ from services.pixel_ndvi import (
     NO_DATA_LEGEND,
     SCHEMA_VERSION as PIXEL_SCHEMA_VERSION,
     get_artifact as get_pixel_artifact,
+    geometry_hash,
     list_scene_rows,
     resolve_scene_row,
     sample_artifact,
@@ -253,6 +254,7 @@ def get_pixel_ndvi_workspace(
     return PixelNDVIWorkspace(
         schema_version=PIXEL_SCHEMA_VERSION,
         field_id=field_id,
+        geometry_hash=geometry_hash(row.geometry),
         scene=scene_response(row),
         bounds=metadata["bounds"],
         corners=metadata["corners"],

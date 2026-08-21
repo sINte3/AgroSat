@@ -79,6 +79,10 @@ class Settings(BaseSettings):
     pixel_ndvi_cache_max_bytes: int = 1_073_741_824
     pixel_ndvi_cache_max_age_days: int = 30
 
+    # Private inspection media. Empty keeps byte storage fail-closed until an
+    # operator supplies an absolute runtime-owned directory outside the repo.
+    inspection_media_directory: str = ""
+
     @field_validator("sentinel_hub_provider", mode="before")
     @classmethod
     def validate_sentinel_hub_provider(cls, value: object) -> str:

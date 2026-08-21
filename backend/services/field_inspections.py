@@ -112,7 +112,7 @@ def _reload(db, inspection_id, actor):
     params = {"id": inspection_id, "today": datetime.now(TASHKENT).date()}
     if tenant:
         params["eid"] = actor.enterprise_id
-    row = _one(db.execute(text(ITEM_SELECT + " WHERE i.id=:id" + tenant), params))
+    row = _one(db.execute(text(ITEM_SELECT + " WHERE i.id=:id AND i.source_kind='legacy'" + tenant), params))
     if not row:
         raise HTTPException(404, "Inspection not found")
     return _item(row)
@@ -125,7 +125,7 @@ def _idempotency_row(db, actor, key):
         params["eid"] = actor.enterprise_id
     return _one(db.execute(text(
         "SELECT id, request_fingerprint FROM field_inspections "
-        "WHERE client_request_id=:key" + tenant
+        "WHERE client_request_id=:key AND source_kind='legacy'" + tenant
     ), params))
 
 
@@ -135,7 +135,7 @@ def _active_row(db, actor, field_id):
     if tenant:
         params["eid"] = actor.enterprise_id
     return _one(db.execute(text(
-        "SELECT id FROM field_inspections WHERE field_id=:fid "
+        "SELECT id FROM field_inspections WHERE field_id=:fid AND source_kind='legacy' "
         "AND status IN ('pending','in_progress')" + tenant
     ), params))
 
@@ -186,10 +186,18 @@ def create(db, user, payload, key):
         values.update({"eid": field["enterprise_id"], "uid": actor.user_id, "assigned": assigned,
                        "key": key, "fp": request_fingerprint})
         result = db.execute(text("""INSERT INTO field_inspections
-          (field_id,enterprise_id,created_by_id,assigned_to_id,client_request_id,request_fingerprint,source,source_priority,source_attention_score,source_observation_date,source_reason_codes,title,instructions,due_date)
-          VALUES (:field_id,:eid,:uid,:assigned,:key,:fp,:source,:source_priority,:source_attention_score,:source_observation_date,CAST(:reason_json AS jsonb),:title,:instructions,:due_date) RETURNING id"""), {
+          (field_id,enterprise_id,created_by_id,updated_by_id,assigned_to_id,client_request_id,
+           request_fingerprint,source,source_priority,source_attention_score,source_observation_date,
+           source_reason_codes,title,instructions,due_date,source_kind,source_reason,priority,due_at)
+          VALUES (:field_id,:eid,:uid,:uid,:assigned,:key,:fp,:source,:source_priority,
+           :source_attention_score,:source_observation_date,CAST(:reason_json AS jsonb),:title,
+           :instructions,:due_date,'legacy',COALESCE(:instructions,:title),:priority,
+           CASE WHEN :due_date IS NULL THEN NULL ELSE
+             (CAST(:due_date AS date) + time '23:59') AT TIME ZONE 'Asia/Tashkent' END) RETURNING id"""), {
               **values, "source": payload.source.value,
               "source_priority": payload.source_priority.value if payload.source_priority else None,
+              "priority": ({"medium": "normal", "critical": "urgent"}.get(payload.source_priority.value, payload.source_priority.value)
+                           if payload.source_priority else "normal"),
               "reason_json": json.dumps(payload.source_reason_codes),
           })
         inserted = _one(result)
@@ -207,7 +215,7 @@ def create(db, user, payload, key):
 
 
 def _list_items(db, actor, filters):
-    conditions = []
+    conditions = ["i.source_kind='legacy'"]
     params = {"today": datetime.now(TASHKENT).date(), "lim": filters["limit"], "off": filters["offset"]}
     enterprise_id = filters.get("enterprise_id")
     if actor.role in TENANT_ROLES:
@@ -279,7 +287,7 @@ def get(db, user, inspection_id):
 
 
 def _classify(db, actor, inspection_id, version, ownership=None):
-    clauses = ["id=:id"]
+    clauses = ["id=:id", "source_kind='legacy'"]
     params = {"id": inspection_id, "uid": actor.user_id}
     if actor.role in TENANT_ROLES:
         clauses.append("enterprise_id=:eid")
@@ -310,7 +318,7 @@ def update(db, user, inspection_id, payload):
             data["eid"] = actor.enterprise_id
         if "assigned_to_id" in payload.model_fields_set:
             base = _one(db.execute(text(
-                "SELECT enterprise_id FROM field_inspections WHERE id=:id" + tenant
+                "SELECT enterprise_id FROM field_inspections WHERE id=:id AND source_kind='legacy'" + tenant
             ), data))
             if not base:
                 raise HTTPException(404, "Inspection not found")
@@ -323,7 +331,7 @@ def update(db, user, inspection_id, payload):
         result = db.execute(text(
             "UPDATE field_inspections SET " + ", ".join(fields) +
             ", version=version+1, updated_at=now() WHERE id=:id AND version=:ver "
-            "AND status IN ('pending','in_progress')" + tenant + owner + " RETURNING id"
+            "AND source_kind='legacy' AND status IN ('pending','in_progress')" + tenant + owner + " RETURNING id"
         ), data)
         row = _one(result)
         if not row:
@@ -361,7 +369,7 @@ def transition(db, user, inspection_id, payload, action):
             params["eid"] = actor.enterprise_id
         row = _one(db.execute(text(
             f"UPDATE field_inspections SET status='{target}', {extra}, version=version+1, updated_at=now() "
-            f"WHERE id=:id AND version=:ver AND {state}{tenant}{ownership} RETURNING id"
+            f"WHERE id=:id AND version=:ver AND source_kind='legacy' AND {state}{tenant}{ownership} RETURNING id"
         ), params))
         if not row:
             classification = "created" if action == "cancel" else "assigned"

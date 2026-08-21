@@ -58,6 +58,7 @@ class PixelNDVISummary(BaseModel):
 class PixelNDVIWorkspace(BaseModel):
     schema_version: Literal["program_r3_pixel_ndvi_v1"]
     field_id: int
+    geometry_hash: str
     scene: PixelNDVIScene
     bounds: list[float]
     corners: list[list[float]]

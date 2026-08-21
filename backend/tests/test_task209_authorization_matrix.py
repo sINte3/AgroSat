@@ -130,6 +130,23 @@ MATRIX = (
     contract("POST", "/api/operational-actions/{action_id}/verification-requests", MANAGEMENT_ROLES, "action_object", write=True, cross_tenant=404, unknown_object=404),
     contract("POST", "/api/verification-requests/{verification_id}/resolve", MANAGEMENT_ROLES, "verification_object", write=True, cross_tenant=404, unknown_object=404),
     contract("GET", "/api/field-inspections/{inspection_id}/closure", tenant_scope="inspection_object", cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/anomaly-inspections", MANAGEMENT_ROLES, "field_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("GET", "/api/anomaly-inspections/queue", tenant_scope="enterprise_filter", cross_tenant=404),
+    contract("GET", "/api/anomaly-inspections/assignees", MANAGEMENT_ROLES, "enterprise_filter", cross_tenant=404),
+    contract("GET", "/api/anomaly-inspections/fields/{field_id}/timeline", tenant_scope="field_object", cross_tenant=404, unknown_object=404),
+    contract("GET", "/api/anomaly-inspections/{inspection_id}", tenant_scope="inspection_object", cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/anomaly-inspections/{inspection_id}/assignment", MANAGEMENT_ROLES, "inspection_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/anomaly-inspections/{inspection_id}/start", frozenset({"agronomist"}), "inspection_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("PUT", "/api/anomaly-inspections/{inspection_id}/finding", frozenset({"agronomist"}), "inspection_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/anomaly-inspections/{inspection_id}/submit", frozenset({"agronomist"}), "inspection_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/anomaly-inspections/{inspection_id}/review", MANAGEMENT_ROLES, "inspection_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/anomaly-inspections/{inspection_id}/cancel", MANAGEMENT_ROLES, "inspection_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/anomaly-inspections/{inspection_id}/photos", frozenset({"agronomist"}), "inspection_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("GET", "/api/anomaly-inspections/{inspection_id}/photos/{photo_id}", tenant_scope="inspection_object", cross_tenant=404, unknown_object=404),
+    contract("DELETE", "/api/anomaly-inspections/{inspection_id}/photos/{photo_id}", MUTATING_ROLES, "inspection_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/anomaly-inspections/{inspection_id}/actions", MANAGEMENT_ROLES, "inspection_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/anomaly-inspections/actions/{action_id}/transition", MUTATING_ROLES, "action_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/anomaly-inspections/actions/{action_id}/verify", MANAGEMENT_ROLES, "action_object", write=True, cross_tenant=404, unknown_object=404),
     contract("GET", "/api/executive/overview", MANAGEMENT_ROLES, tenant_scope="enterprise_filter", cross_tenant=403),
     contract("GET", "/api/executive/accountability", MANAGEMENT_ROLES, tenant_scope="enterprise_filter", cross_tenant=403),
     contract("GET", "/api/executive/export.xlsx", MANAGEMENT_ROLES, tenant_scope="enterprise_filter", cross_tenant=403),
@@ -176,7 +193,7 @@ def openapi_operations():
 
 def test_matrix_covers_every_openapi_operation_exactly():
     expected = {(item.method, item.path) for item in MATRIX}
-    assert len(expected) == len(MATRIX) == 103
+    assert len(expected) == len(MATRIX) == 120
     assert expected == set(openapi_operations())
 
 

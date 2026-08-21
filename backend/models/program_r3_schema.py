@@ -158,4 +158,233 @@ def register_program_r3_schema() -> None:
     _index('tenant_commercial_audit_events', 'ix_tenant_commercial_audit_events_enterprise_created', ['enterprise_id', sa.text('created_at DESC'), 'id'])
     Base.metadata._program_r3_schema_registered = True
 
+def _append_column(table_name: str, column: sa.Column) -> None:
+    table = Base.metadata.tables[table_name]
+    if column.name not in table.c:
+        table.append_column(column)
+
+
+def _remove_named(table_name: str, names: set[str]) -> None:
+    table = Base.metadata.tables[table_name]
+    for constraint in tuple(table.constraints):
+        if constraint.name in names:
+            table.constraints.remove(constraint)
+    for index in tuple(table.indexes):
+        if index.name in names:
+            table.indexes.remove(index)
+
+
+def register_task217_anomaly_workflow() -> None:
+    """Apply the accepted 0013 metadata extension to canonical tables."""
+    if getattr(Base.metadata, '_task217_anomaly_workflow_registered', False):
+        return
+    register_program_r3_schema()
+    inspection = Base.metadata.tables['field_inspections']
+    _remove_named('field_inspections', {
+        'uq_field_inspections_one_active_per_field', 'ck_field_inspections_status',
+        'ck_field_inspections_source', 'ck_field_inspections_source_priority',
+        'ck_field_inspections_terminal_timestamps',
+    })
+    for column in (
+        sa.Column('source_kind', sa.String(20), nullable=False),
+        sa.Column('source_alert_id', sa.Integer(), sa.ForeignKey('alerts.id', name='fk_field_inspections_source_alert', ondelete='RESTRICT'), nullable=True),
+        sa.Column('source_provider', sa.String(40), nullable=True),
+        sa.Column('source_item_id', sa.String(768), nullable=True),
+        sa.Column('source_acquired_at', sa.DateTime(timezone=True), nullable=True),
+        sa.Column('source_index_name', sa.String(20), nullable=True),
+        sa.Column('source_sampled_value', sa.Float(), nullable=True),
+        sa.Column('source_comparison_value', sa.Float(), nullable=True),
+        sa.Column('source_delta', sa.Float(), nullable=True),
+        sa.Column('source_geometry_hash', sa.String(64), nullable=True),
+        sa.Column('source_point', geoalchemy2.Geometry(geometry_type='POINT', srid=4326, spatial_index=False), nullable=True),
+        sa.Column('source_zone', geoalchemy2.Geometry(geometry_type='GEOMETRY', srid=4326, spatial_index=False), nullable=True),
+        sa.Column('source_reason', sa.Text(), nullable=False),
+        sa.Column('priority', sa.String(20), nullable=False, server_default='normal'),
+        sa.Column('due_at', sa.DateTime(timezone=True), nullable=True),
+        sa.Column('updated_by_id', sa.Integer(), sa.ForeignKey('users.id', name='fk_field_inspections_updated_by', ondelete='RESTRICT'), nullable=True),
+        sa.Column('reviewed_by_id', sa.Integer(), sa.ForeignKey('users.id', name='fk_field_inspections_reviewed_by', ondelete='RESTRICT'), nullable=True),
+        sa.Column('reviewed_at', sa.DateTime(timezone=True), nullable=True),
+        sa.Column('review_reason', sa.Text(), nullable=True),
+        sa.Column('reassignment_reason', sa.Text(), nullable=True),
+        sa.Column('submitted_at', sa.DateTime(timezone=True), nullable=True),
+        sa.Column('confirmed_at', sa.DateTime(timezone=True), nullable=True),
+        sa.Column('rejected_at', sa.DateTime(timezone=True), nullable=True),
+        sa.Column('follow_up_of_id', sa.Integer(), sa.ForeignKey('field_inspections.id', name='fk_field_inspections_follow_up', ondelete='RESTRICT'), nullable=True),
+        sa.Column('source_snapshot_locked', sa.Boolean(), nullable=False, server_default=sa.true()),
+    ):
+        _append_column('field_inspections', column)
+    inspection.append_constraint(sa.CheckConstraint(
+        "status IN ('pending','new','assigned','in_progress','submitted','completed','confirmed','rejected','cancelled')",
+        name='ck_field_inspections_status'))
+    inspection.append_constraint(sa.CheckConstraint(
+        "source_kind IN ('legacy','pixel_ndvi','alert','manual')", name='ck_field_inspections_source'))
+    inspection.append_constraint(sa.CheckConstraint(
+        "source_kind <> 'legacy' OR source IN ('attention_queue','manual','irrigation_context')",
+        name='ck_field_inspections_legacy_source'))
+    inspection.append_constraint(sa.CheckConstraint(
+        "priority IN ('low','normal','high','urgent')", name='ck_field_inspections_source_priority'))
+    inspection.append_constraint(sa.CheckConstraint(
+        '(source_sampled_value IS NULL OR source_sampled_value BETWEEN -1 AND 1) AND '
+        '(source_comparison_value IS NULL OR source_comparison_value BETWEEN -1 AND 1) AND '
+        '(source_delta IS NULL OR source_delta BETWEEN -2 AND 2)',
+        name='ck_field_inspections_source_values'))
+    inspection.append_constraint(sa.CheckConstraint(
+        'NOT (source_point IS NOT NULL AND source_zone IS NOT NULL) AND '
+        '(source_point IS NULL OR (NOT ST_IsEmpty(source_point) AND ST_IsValid(source_point))) AND '
+        '(source_zone IS NULL OR (NOT ST_IsEmpty(source_zone) AND ST_IsValid(source_zone)))',
+        name='ck_field_inspections_source_geometry'))
+    inspection.append_constraint(sa.CheckConstraint(
+        "source_kind <> 'pixel_ndvi' OR (source_provider IS NOT NULL AND source_item_id IS NOT NULL "
+        'AND source_acquired_at IS NOT NULL AND source_index_name IS NOT NULL '
+        'AND source_sampled_value IS NOT NULL AND source_geometry_hash IS NOT NULL '
+        'AND (source_point IS NOT NULL OR source_zone IS NOT NULL))',
+        name='ck_field_inspections_pixel_snapshot'))
+    inspection.append_constraint(sa.CheckConstraint(
+        "source_kind <> 'alert' OR source_alert_id IS NOT NULL",
+        name='ck_field_inspections_alert_snapshot'))
+    inspection.append_constraint(sa.CheckConstraint(
+        "source_kind = 'legacy' OR status = 'new' OR assigned_to_id IS NOT NULL",
+        name='ck_field_inspections_assignment_state'))
+    inspection.append_constraint(sa.CheckConstraint(
+        "source_kind = 'legacy' OR (status = 'confirmed' AND reviewed_by_id IS NOT NULL AND reviewed_at IS NOT NULL "
+        "AND confirmed_at IS NOT NULL AND rejected_at IS NULL) OR "
+        "(status = 'rejected' AND reviewed_by_id IS NOT NULL AND reviewed_at IS NOT NULL "
+        "AND review_reason IS NOT NULL AND rejected_at IS NOT NULL AND confirmed_at IS NULL) OR "
+        "(status NOT IN ('confirmed','rejected') AND confirmed_at IS NULL AND rejected_at IS NULL)",
+        name='ck_field_inspections_review_state'))
+    inspection.append_constraint(sa.CheckConstraint(
+        "source_kind = 'legacy' OR status NOT IN ('submitted','confirmed','rejected') OR submitted_at IS NOT NULL",
+        name='ck_field_inspections_submit_state'))
+    inspection.append_constraint(sa.CheckConstraint(
+        "(source_kind = 'legacy' AND ((status = 'completed' AND completed_at IS NOT NULL AND cancelled_at IS NULL) OR "
+        "(status = 'cancelled' AND cancelled_at IS NOT NULL AND completed_at IS NULL) OR "
+        "(status IN ('pending','in_progress') AND completed_at IS NULL AND cancelled_at IS NULL))) OR "
+        "(source_kind <> 'legacy' AND (status <> 'cancelled' OR "
+        "(cancelled_at IS NOT NULL AND cancellation_reason IS NOT NULL)))",
+        name='ck_field_inspections_cancel_state'))
+    _index('field_inspections', 'ix_field_inspections_queue',
+           ['enterprise_id', 'status', 'priority', 'due_at', sa.text('id DESC')])
+    _index('field_inspections', 'ix_field_inspections_source_point', ['source_point'], postgresql_using='gist')
+    _index('field_inspections', 'ix_field_inspections_source_zone', ['source_zone'], postgresql_using='gist')
+    _index('field_inspections', 'ix_field_inspections_alert', ['source_alert_id'], unique=True,
+           postgresql_where=sa.text('source_alert_id IS NOT NULL'))
+    _index('field_inspections', 'uq_field_inspections_one_active_legacy_per_field', ['field_id'], unique=True,
+           postgresql_where=sa.text("source_kind='legacy' AND status IN ('pending','in_progress')"))
+
+    result = Base.metadata.tables['inspection_results']
+    _remove_named('inspection_results', {'ck_inspection_results_cause_code', 'ck_inspection_results_other_details'})
+    for column in (
+        sa.Column('actual_inspected_at', sa.DateTime(timezone=True), nullable=True),
+        sa.Column('gps_accuracy_m', sa.Float(), nullable=True),
+        sa.Column('severity', sa.String(20), nullable=True),
+        sa.Column('affected_area_ha', sa.Float(), nullable=True),
+        sa.Column('affected_area_pct', sa.Float(), nullable=True),
+        sa.Column('observations', sa.Text(), nullable=True),
+        sa.Column('recommended_action', sa.Text(), nullable=True),
+        sa.Column('sync_state', sa.String(20), nullable=False, server_default='server'),
+    ):
+        _append_column('inspection_results', column)
+    result.append_constraint(sa.CheckConstraint(
+        "cause_code IN ('water_stress','irrigation_failure','pest','disease','nutrient_deficiency',"
+        "'weed_pressure','mechanical_damage','soil_salinity','weather_damage','false_positive','other','unconfirmed',"
+        "'irrigation','nutrient','weather','soil','mechanical','crop_stage','no_issue')",
+        name='ck_inspection_results_cause_code'))
+    result.append_constraint(sa.CheckConstraint(
+        "cause_code <> 'other' OR (cause_details IS NOT NULL AND btrim(cause_details) <> '')",
+        name='ck_inspection_results_other_details'))
+    result.append_constraint(sa.CheckConstraint(
+        "severity IS NULL OR severity IN ('none','low','moderate','high','critical')",
+        name='ck_inspection_results_severity'))
+    result.append_constraint(sa.CheckConstraint(
+        '(affected_area_ha IS NULL OR affected_area_ha BETWEEN 0 AND 1000000) AND '
+        '(affected_area_pct IS NULL OR affected_area_pct BETWEEN 0 AND 100) AND '
+        'NOT (affected_area_ha IS NOT NULL AND affected_area_pct IS NOT NULL)',
+        name='ck_inspection_results_affected_area'))
+    result.append_constraint(sa.CheckConstraint(
+        'gps_accuracy_m IS NULL OR gps_accuracy_m BETWEEN 0 AND 10000',
+        name='ck_inspection_results_gps_accuracy'))
+    result.append_constraint(sa.CheckConstraint(
+        "sync_state IN ('server','local_draft','pending_sync','conflict')",
+        name='ck_inspection_results_sync_state'))
+
+    evidence = Base.metadata.tables['inspection_evidence']
+    for column in (
+        sa.Column('storage_key', sa.String(255), nullable=True),
+        sa.Column('deleted_at', sa.DateTime(timezone=True), nullable=True),
+        sa.Column('deleted_by_id', sa.Integer(), sa.ForeignKey('users.id', name='fk_inspection_evidence_deleted_by', ondelete='RESTRICT'), nullable=True),
+        sa.Column('version', sa.Integer(), nullable=False, server_default='1'),
+    ):
+        _append_column('inspection_evidence', column)
+    evidence.append_constraint(sa.CheckConstraint(
+        '(deleted_at IS NULL AND deleted_by_id IS NULL) OR '
+        '(deleted_at IS NOT NULL AND deleted_by_id IS NOT NULL)',
+        name='ck_inspection_evidence_delete_state'))
+    evidence.append_constraint(sa.CheckConstraint(
+        "storage_key IS NULL OR storage_key ~ '^[0-9a-f]{2}/[0-9a-f-]{36}\\.(jpg|png|webp)$'",
+        name='ck_inspection_evidence_storage_key'))
+
+    action = Base.metadata.tables['corrective_actions']
+    _remove_named('corrective_actions', {'ck_corrective_actions_status', 'ck_corrective_actions_closure_state'})
+    for column in (
+        sa.Column('action_type', sa.String(50), nullable=True),
+        sa.Column('planned_start_at', sa.DateTime(timezone=True), nullable=True),
+        sa.Column('due_at', sa.DateTime(timezone=True), nullable=True),
+        sa.Column('started_at', sa.DateTime(timezone=True), nullable=True),
+        sa.Column('completion_note', sa.Text(), nullable=True),
+        sa.Column('completed_at', sa.DateTime(timezone=True), nullable=True),
+        sa.Column('cancelled_reason', sa.Text(), nullable=True),
+        sa.Column('cancelled_at', sa.DateTime(timezone=True), nullable=True),
+        sa.Column('verified_by_id', sa.Integer(), sa.ForeignKey('users.id', name='fk_corrective_actions_verified_by', ondelete='RESTRICT'), nullable=True),
+        sa.Column('verified_at', sa.DateTime(timezone=True), nullable=True),
+        sa.Column('verification_result', sa.String(30), nullable=True),
+        sa.Column('verification_notes', sa.Text(), nullable=True),
+        sa.Column('verification_index_name', sa.String(20), nullable=True),
+        sa.Column('verification_sample_value', sa.Float(), nullable=True),
+        sa.Column('follow_up_inspection_id', sa.Integer(), sa.ForeignKey('field_inspections.id', name='fk_corrective_actions_follow_up', ondelete='RESTRICT'), nullable=True),
+    ):
+        _append_column('corrective_actions', column)
+    action.append_constraint(sa.CheckConstraint(
+        "status IN ('planned','in_progress','completed','verified_effective','verified_ineffective','cancelled','open','blocked','closed')",
+        name='ck_corrective_actions_status'))
+    action.append_constraint(sa.CheckConstraint(
+        "action_type IS NOT NULL OR ((status = 'closed' AND closure_reason IS NOT NULL "
+        "AND btrim(closure_reason) <> '' AND closed_by_id IS NOT NULL AND closed_at IS NOT NULL) OR "
+        "(status <> 'closed' AND closure_reason IS NULL AND closed_by_id IS NULL AND closed_at IS NULL))",
+        name='ck_corrective_actions_legacy_closure_state'))
+    action.append_constraint(sa.CheckConstraint(
+        "action_type IS NULL OR status NOT IN ('completed','verified_effective','verified_ineffective') OR "
+        '(completion_note IS NOT NULL AND completed_at IS NOT NULL)',
+        name='ck_corrective_actions_completion_state'))
+    action.append_constraint(sa.CheckConstraint(
+        "action_type IS NULL OR status <> 'cancelled' OR (cancelled_reason IS NOT NULL AND cancelled_at IS NOT NULL)",
+        name='ck_corrective_actions_cancel_state'))
+    action.append_constraint(sa.CheckConstraint(
+        "action_type IS NULL OR (status = 'verified_effective' AND verification_result = 'effective' "
+        'AND verified_by_id IS NOT NULL AND verified_at IS NOT NULL) OR '
+        "(status = 'verified_ineffective' AND verification_result IN ('ineffective','another_cycle') "
+        'AND verified_by_id IS NOT NULL AND verified_at IS NOT NULL) OR '
+        "(status NOT IN ('verified_effective','verified_ineffective') AND verification_result IS NULL "
+        'AND verified_by_id IS NULL AND verified_at IS NULL)',
+        name='ck_corrective_actions_verification_state'))
+    action.append_constraint(sa.CheckConstraint(
+        'verification_sample_value IS NULL OR verification_sample_value BETWEEN -1 AND 1',
+        name='ck_corrective_actions_verification_value'))
+    _index('corrective_actions', 'ix_corrective_actions_verification_due',
+           ['enterprise_id', 'status', 'due_at', sa.text('id DESC')])
+
+    audit = Base.metadata.tables['operational_audit_events']
+    _remove_named('operational_audit_events', {'ck_operational_audit_event_type'})
+    audit.c.event_type.type = sa.String(80)
+    audit.append_constraint(sa.CheckConstraint(
+        "event_type IN ('inspection_result_recorded','evidence_attached','action_created','action_updated',"
+        "'action_closed','action_reopened','verification_requested','verification_resolved',"
+        "'inspection_created','inspection_assigned','inspection_reassigned','inspection_started',"
+        "'finding_saved','inspection_submitted','inspection_confirmed','inspection_rejected',"
+        "'inspection_cancelled','photo_uploaded','photo_deleted','action_started','action_completed',"
+        "'action_cancelled','action_verified_effective','action_verified_ineffective','follow_up_created')",
+        name='ck_operational_audit_event_type'))
+    Base.metadata._task217_anomaly_workflow_registered = True
+
+
 register_program_r3_schema()
+register_task217_anomaly_workflow()
