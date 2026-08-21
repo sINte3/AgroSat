@@ -9,6 +9,7 @@ const [api, hook, control, fieldMap] = await Promise.all([
   read('../src/components/Map/NDVIRasterControl.jsx'),
   read('../src/components/Map/FieldMap.jsx'),
 ]);
+const fieldsPage = await read('../src/pages/FieldsPage.jsx');
 
 assert.deepEqual(chooseInitialScenes([]), { sceneA: null, sceneB: null });
 assert.deepEqual(
@@ -47,6 +48,7 @@ assert.match(hook, /Promise\.all/);
 assert.match(hook, /controller\.abort\(\)/);
 assert.match(hook, /generationRef\.current/);
 assert.match(hook, /clipGenerationRef\.current/);
+assert.match(hook, /const generation = \+\+generationRef\.current;\s*\+\+clipGenerationRef\.current;/);
 assert.match(hook, /URL\.revokeObjectURL/);
 assert.match(hook, /removeLayer\(PIXEL_NDVI_LAYER_B\)/);
 assert.match(hook, /removeLayer\(PIXEL_NDVI_LAYER_A\)/);
@@ -54,6 +56,11 @@ assert.match(hook, /removeSource\(PIXEL_NDVI_SOURCE_B\)/);
 assert.match(hook, /removeSource\(PIXEL_NDVI_SOURCE_A\)/);
 assert.match(hook, /map\.on\('style\.load'/);
 assert.match(hook, /map\.off\('style\.load'/);
+assert.match(hook, /map\.on\('idle'/);
+assert.match(hook, /map\.off\('idle'/);
+assert.match(hook, /setInterval\(handleStyleReady, 250\)/);
+assert.match(hook, /clearInterval\(restoreInterval\)/);
+assert.doesNotMatch(hook, /!targetMap\.isStyleLoaded/);
 assert.match(hook, /map\.on\('click'/);
 assert.match(hook, /map\.off\('click'/);
 assert.doesNotMatch(hook, /setCenter|fitBounds|flyTo/);
@@ -83,5 +90,8 @@ assert.match(control, /focus-visible:ring-2/);
 assert.match(control, /max-sm:max-h-\[46vh\]/);
 assert.match(control, /min-h-11/);
 assert.match(fieldMap, /<NDVIRasterControl/);
+assert.match(fieldsPage, /max-sm:flex-col/);
+assert.match(fieldsPage, /max-sm:w-full/);
+assert.match(fieldsPage, /max-sm:h-\[38%\]/);
 
-console.log('PROGRAM R3 pixel NDVI frontend contract: PASS (47 assertions)');
+console.log('PROGRAM R3 pixel NDVI frontend contract: PASS (56 assertions)');

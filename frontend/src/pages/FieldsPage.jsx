@@ -195,7 +195,7 @@ export default function FieldsPage({ onFieldClick, onNavigate, enterpriseId }) {
   }
 
   return (
-    <div className="relative w-full h-full flex flex-row">
+    <div className="relative w-full h-full flex flex-row max-sm:flex-col">
       {/* ── Central map area (flex-1) ──────────────────────────── */}
       <div className="relative flex-1 min-w-0">
         <FieldMap
@@ -264,7 +264,7 @@ export default function FieldsPage({ onFieldClick, onNavigate, enterpriseId }) {
 
       {/* ── Right detail panel ─────────────────────────────────── */}
       {selectedFieldId && selectedField && (
-        <div className="w-96 flex-shrink-0 border-l border-gray-200 bg-white overflow-hidden flex flex-col shadow-xl">
+        <div className="w-96 flex-shrink-0 border-l border-gray-200 bg-white overflow-hidden flex flex-col shadow-xl max-sm:w-full max-sm:h-[38%] max-sm:border-l-0 max-sm:border-t">
           <FieldDetailPanel
             field={selectedField}
             onBack={handleCloseDetailPanel}

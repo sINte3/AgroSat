@@ -113,7 +113,7 @@ export default function usePixelNDVIWorkspace({
 
   const addMapArtifacts = useCallback((targetMap = map) => {
     const current = renderRef.current;
-    if (!targetMap || targetMap._removed || !targetMap.isStyleLoaded?.() || !current.urlA || !validWorkspace(current.workspaceA)) return;
+    if (!targetMap || targetMap._removed || !current.urlA || !validWorkspace(current.workspaceA)) return;
     removeMapArtifacts(targetMap);
     try {
       const beforeId = beforeFieldLabels(targetMap);
@@ -150,12 +150,29 @@ export default function usePixelNDVIWorkspace({
 
   useEffect(() => {
     if (!map) return undefined;
-    const handleStyleLoad = () => {
-      if (mountedRef.current && enabledRef.current) addMapArtifacts(map);
+    const handleStyleReady = () => {
+      if (!mountedRef.current || !enabledRef.current || map._removed) return;
+      const current = renderRef.current;
+      const requiresB = comparisonRef.current && current.clippedUrl && validWorkspace(current.workspaceB);
+      try {
+        const hasA = map.getLayer(PIXEL_NDVI_LAYER_A) && map.getSource(PIXEL_NDVI_SOURCE_A);
+        const hasB = !requiresB || (map.getLayer(PIXEL_NDVI_LAYER_B) && map.getSource(PIXEL_NDVI_SOURCE_B));
+        if (hasA && hasB) return;
+      } catch (_) {
+        // A style replacement may be between its teardown and ready events.
+      }
+      addMapArtifacts(map);
     };
-    map.on('style.load', handleStyleLoad);
-    return () => map.off('style.load', handleStyleLoad);
-  }, [addMapArtifacts, map]);
+    map.on('style.load', handleStyleReady);
+    map.on('idle', handleStyleReady);
+    const restoreInterval = enabled ? window.setInterval(handleStyleReady, 250) : null;
+    handleStyleReady();
+    return () => {
+      if (restoreInterval !== null) window.clearInterval(restoreInterval);
+      map.off('style.load', handleStyleReady);
+      map.off('idle', handleStyleReady);
+    };
+  }, [addMapArtifacts, enabled, map]);
 
   useEffect(() => {
     catalogControllerRef.current?.abort();
@@ -194,6 +211,7 @@ export default function usePixelNDVIWorkspace({
 
   useEffect(() => {
     const generation = ++generationRef.current;
+    ++clipGenerationRef.current;
     layerControllerRef.current?.abort();
     removeMapArtifacts(map);
     disposeRender();
