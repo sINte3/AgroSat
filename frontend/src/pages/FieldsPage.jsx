@@ -212,6 +212,7 @@ export default function FieldsPage({ onFieldClick, onNavigate, enterpriseId }) {
           coverageLoading={coverageLoading}
           selectedMapMode={selectedMapMode}
           onMapModeChange={setSelectedMapMode}
+          onNavigate={onNavigate}
         />
 
         {/* Draw controls overlay */}

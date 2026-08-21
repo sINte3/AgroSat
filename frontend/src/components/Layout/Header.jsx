@@ -20,7 +20,7 @@ export default function Header({ title, subtitle, currentView, alertCount, mobil
   }
 
   return (
-    <header className="absolute inset-x-0 top-0 z-20 pointer-events-none">
+    <header className="absolute inset-x-0 top-0 z-50 pointer-events-none">
       <div className="mx-3 mt-2 flex min-h-12 items-center justify-between rounded-xl border border-agro-border bg-white/95 px-4 py-2 shadow-sm backdrop-blur-sm pointer-events-auto">
         <div className="flex min-w-0 items-center gap-3">
           <button

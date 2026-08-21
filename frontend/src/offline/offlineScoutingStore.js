@@ -185,6 +185,43 @@ export function createOfflineDraft({ scope, inspection, result, evidence = [], a
   return safeRecord(draft);
 }
 
+export function createAnomalyWorkflowDraft({ scope, inspectionId, baseVersion, finding }) {
+  const id = positiveId(inspectionId);
+  const version = positiveId(baseVersion);
+  if (!scope || !id || !version || !finding || typeof finding !== 'object') {
+    throw new Error('inspection scope, version and finding are required');
+  }
+  const now = new Date().toISOString();
+  return safeRecord({
+    key: `${scope}:inspection:${id}`,
+    scope,
+    inspectionId: id,
+    baseVersion: version,
+    finding: { ...finding },
+    status: 'local_draft',
+    failure: null,
+    createdAt: now,
+    updatedAt: now,
+    schemaVersion: 2,
+  });
+}
+
+export async function markAnomalyDraftPending(draft) {
+  return saveOfflineDraft({
+    ...draft,
+    status: 'pending_sync',
+    failure: null,
+  });
+}
+
+export async function markAnomalyDraftConflict(draft) {
+  return saveOfflineDraft({
+    ...draft,
+    status: 'conflict',
+    failure: { category: 'conflict', occurredAt: new Date().toISOString() },
+  });
+}
+
 export async function saveOfflineDraft(draft) {
   if (!draft?.scope || !positiveId(draft?.inspectionId)) throw new Error('invalid offline draft');
   await put(DRAFTS, { ...draft, updatedAt: new Date().toISOString() });

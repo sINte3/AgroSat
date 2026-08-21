@@ -370,6 +370,7 @@ export default function FieldMap({
   coverageLoading,
   selectedMapMode,
   onMapModeChange,
+  onNavigate,
 }) {
   const [activeStyle, setActiveStyle] = useState('satellite');
   const [satellitePipelineStatus, setSatellitePipelineStatus] = useState('idle');
@@ -1144,6 +1145,7 @@ export default function FieldMap({
         map={mapInstance}
         fieldId={selectedFieldId}
         onMetadataChange={setRasterMetadata}
+        onNavigate={onNavigate}
       />
 
       {/* Style switcher */}

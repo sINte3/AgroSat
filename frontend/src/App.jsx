@@ -13,7 +13,7 @@ import EnterprisesPage from './pages/EnterprisesPage';
 import EnterpriseDetailPage from './pages/EnterpriseDetailPage';
 import ReportsPage from './pages/ReportsPage';
 import FieldAttentionPage from './pages/FieldAttentionPage';
-import FieldInspectionsPage from './pages/FieldInspectionsPage';
+import AnomalyInspectionsPage from './pages/AnomalyInspectionsPage';
 import LoginPage from './pages/LoginPage';
 import UnauthorizedPage from './pages/UnauthorizedPage';
 import { getCachedEnterprises } from './api/client';
@@ -253,12 +253,12 @@ function AppLayout() {
           />
         );
       case 'alerts':
-        return <AlertsPage onFieldClick={handleFieldClick} onFieldHighlight={handleFieldHighlight} />;
+        return <AlertsPage onFieldClick={handleFieldClick} onFieldHighlight={handleFieldHighlight} onNavigate={handleNavigate} />;
       case 'field-attention':
         return <FieldAttentionPage onNavigate={handleNavigate} enterprises={enterprises} />;
       case 'field-inspections':
       case 'field-inspection-detail':
-        return <FieldInspectionsPage onNavigate={handleNavigate} enterprises={enterprises} selectedInspectionId={selectedInspectionId} />;
+        return <AnomalyInspectionsPage onNavigate={handleNavigate} enterprises={enterprises} selectedInspectionId={selectedInspectionId} />;
       case 'enterprises':
         return <EnterprisesPage onNavigate={handleNavigate} />;
       case 'enterprise-detail':

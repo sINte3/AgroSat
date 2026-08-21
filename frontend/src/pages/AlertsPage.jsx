@@ -9,7 +9,7 @@ const FILTERS = [
   { key: 'info', label: 'ℹ️ Информационные' },
 ];
 
-export default function AlertsPage({ onFieldClick, onFieldHighlight }) {
+export default function AlertsPage({ onFieldClick, onFieldHighlight, onNavigate }) {
   const [alerts, setAlerts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -160,6 +160,7 @@ export default function AlertsPage({ onFieldClick, onFieldHighlight }) {
           onFieldClick={onFieldClick}
           onFieldHighlight={onFieldHighlight}
           onAlertAcknowledged={handleAlertAcknowledged}
+          onInspectionCreated={(inspection) => onNavigate?.('field-inspection-detail', inspection.id)}
         />
       </div>
     </div>

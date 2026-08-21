@@ -1,5 +1,7 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useCallback, useState, useEffect, useMemo } from 'react';
 import { getAlerts, acknowledgeAlert } from '../../api/client';
+import { useAuth } from '../../context/AuthContext';
+import InspectionSourceDialog from '../Inspections/InspectionSourceDialog';
 
 const SEVERITY_ORDER = { critical: 0, warning: 1, info: 2 };
 
@@ -92,6 +94,7 @@ function AlertCard({
   onAcknowledge,
   onFieldClick,
   onFieldHighlight,
+  onCreateInspection,
 }) {
   const severityKey = alert.severity || 'info';
 
@@ -233,6 +236,15 @@ function AlertCard({
               🗺 Открыть детальную карточку поля →
             </button>
           )}
+          {onCreateInspection && (
+            <button
+              type="button"
+              onClick={() => onCreateInspection(alert)}
+              className="min-h-11 w-full rounded-lg bg-green-700 px-3 py-2 text-sm font-bold text-white hover:bg-green-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-800 focus-visible:ring-offset-2"
+            >
+              Создать осмотр
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -251,13 +263,18 @@ export default function AlertsList({
   error: externalError = null,
   searchQuery = '',
   onAlertAcknowledged = null,
+  onInspectionCreated = null,
 }) {
+  const { user } = useAuth();
   const [internalAlerts, setInternalAlerts] = useState([]);
   const [internalLoading, setInternalLoading] = useState(true);
   const [internalError, setInternalError] = useState(null);
   const [expanded, setExpanded] = useState(new Set());
   const [acknowledgingIds, setAcknowledgingIds] = useState(new Set());
   const [ackError, setAckError] = useState(null);
+  const [inspectionAlert, setInspectionAlert] = useState(null);
+  const closeInspectionDialog = useCallback(() => setInspectionAlert(null), []);
+  const canCreateInspection = ['admin', 'manager'].includes(String(user?.role || '').toLowerCase());
 
   const useExternal = externalAlerts !== null;
 
@@ -404,8 +421,26 @@ export default function AlertsList({
           onAcknowledge={handleAcknowledge}
           onFieldClick={onFieldClick}
           onFieldHighlight={onFieldHighlight}
+          onCreateInspection={canCreateInspection ? setInspectionAlert : null}
         />
       ))}
+      {inspectionAlert && (
+        <InspectionSourceDialog
+          source={{
+            kind: 'alert',
+            field_id: inspectionAlert.field_id,
+            field_name: inspectionAlert.field_name,
+            alert_id: inspectionAlert.id,
+            reason: inspectionAlert.description || inspectionAlert.title || 'Проверить предупреждение на поле',
+            priority: inspectionAlert.severity === 'critical' ? 'urgent' : inspectionAlert.severity === 'warning' ? 'high' : 'normal',
+          }}
+          onClose={closeInspectionDialog}
+          onCreated={(inspection) => {
+            setInspectionAlert(null);
+            onInspectionCreated?.(inspection);
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -1,6 +1,8 @@
-import { Fragment, useEffect, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import usePixelNDVIWorkspace from '../../hooks/usePixelNDVIWorkspace';
 import { clampDivider } from '../../utils/pixelNdviState';
+import { useAuth } from '../../context/AuthContext';
+import InspectionSourceDialog from '../Inspections/InspectionSourceDialog';
 
 const SERVICE_ERRORS = new Set([502, 503, 504]);
 
@@ -157,15 +159,23 @@ function PixelSample({ sample }) {
   );
 }
 
-export default function NDVIRasterControl({ map, fieldId, onMetadataChange }) {
+export default function NDVIRasterControl({ map, fieldId, onMetadataChange, onNavigate }) {
+  const { user } = useAuth();
   const [enabled, setEnabled] = useState(false);
   const [opacity, setOpacity] = useState(0.76);
   const [comparisonEnabled, setComparisonEnabled] = useState(false);
   const [divider, setDivider] = useState(50);
+  const [inspectionSource, setInspectionSource] = useState(null);
   const workspace = usePixelNDVIWorkspace({
     map, fieldId, enabled, opacity, comparisonEnabled, divider,
   });
   const readyWorkspace = workspace.layer.workspaceA;
+  const canCreateInspection = ['admin', 'manager'].includes(String(user?.role || '').toLowerCase());
+  const closeInspectionDialog = useCallback(() => setInspectionSource(null), []);
+  const handleInspectionCreated = useCallback((inspection) => {
+    setInspectionSource(null);
+    if (inspection?.id) onNavigate?.('field-inspection-detail', inspection.id);
+  }, [onNavigate]);
 
   useEffect(() => {
     setComparisonEnabled(false);
@@ -255,12 +265,42 @@ export default function NDVIRasterControl({ map, fieldId, onMetadataChange }) {
                 )}
 
                 <PixelSample sample={workspace.sample} />
+                {canCreateInspection && workspace.sample.status === 'ready' && workspace.sample.value?.status === 'value' && (
+                  <button
+                    type="button"
+                    onClick={() => setInspectionSource({
+                      kind: 'pixel_ndvi',
+                      field_id: fieldId,
+                      provider: readyWorkspace.scene.provider,
+                      item_id: readyWorkspace.scene.scene_id,
+                      acquired_at: readyWorkspace.scene.acquired_at,
+                      index_name: 'ndvi',
+                      sampled_value: workspace.sample.value.ndvi,
+                      geometry_hash: readyWorkspace.geometry_hash,
+                      point: {
+                        longitude: workspace.sample.value.longitude,
+                        latitude: workspace.sample.value.latitude,
+                      },
+                      priority: workspace.sample.value.ndvi < 0.2 ? 'urgent' : workspace.sample.value.ndvi < 0.35 ? 'high' : 'normal',
+                    })}
+                    className="min-h-11 w-full rounded-lg bg-green-700 px-4 py-2.5 text-sm font-bold text-white hover:bg-green-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-800 focus-visible:ring-offset-2"
+                  >
+                    Создать осмотр
+                  </button>
+                )}
                 <Legend workspace={readyWorkspace} />
               </>
             )}
           </div>
         )}
       </section>
+      {inspectionSource && (
+        <InspectionSourceDialog
+          source={inspectionSource}
+          onClose={closeInspectionDialog}
+          onCreated={handleInspectionCreated}
+        />
+      )}
     </Fragment>
   );
 }
