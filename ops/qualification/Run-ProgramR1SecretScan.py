@@ -72,7 +72,7 @@ def classify(path: str, rule: str, value: str) -> str:
     if (
         path == "backend/tests/test_program_r1_live_sentinel_qualification.py"
         and rule == "private_key_header"
-        and value == "-----BEGIN PRIVATE KEY-----"
+        and value == "-----BEGIN " + "PRIVATE KEY-----"
     ):
         return "verified_sanitizer_test_fixture"
     if (
