@@ -16,6 +16,7 @@ import FieldAttentionPage from './pages/FieldAttentionPage';
 import AnomalyInspectionsPage from './pages/AnomalyInspectionsPage';
 import LoginPage from './pages/LoginPage';
 import UnauthorizedPage from './pages/UnauthorizedPage';
+import MonitoringPage from './pages/MonitoringPage';
 import { getCachedEnterprises } from './api/client';
 import { getRoleDefaultPath, isViewAllowedForRole } from './config/roleAccess';
 
@@ -25,6 +26,7 @@ const PATH_VIEW_MAP = {
   '/alerts': 'alerts',
   '/attention': 'field-attention',
   '/inspections': 'field-inspections',
+  '/monitoring': 'monitoring',
   '/enterprises': 'enterprises',
   '/reports': 'reports',
   '/login': 'login',
@@ -177,6 +179,8 @@ function AppLayout() {
         break;
       case 'field-inspections':
         setView('field-inspections'); setSelectedInspectionId(null); navigate('/inspections'); break;
+      case 'monitoring':
+        setView('monitoring'); navigate('/monitoring'); break;
       case 'field-inspection-detail': {
         const validInspectionId = parsePositiveId(id); if (!validInspectionId) break;
         setView('field-inspection-detail'); setSelectedInspectionId(validInspectionId); navigate(`/inspections/${validInspectionId}`); break;
@@ -221,6 +225,7 @@ function AppLayout() {
       case 'alerts':      return { title: 'Предупреждения' };
       case 'field-attention': return { title: 'Требуют внимания' };
       case 'field-inspections': return { title: 'Осмотры полей' };
+      case 'monitoring': return { title: 'Автономный мониторинг', subtitle: 'Свежесть, аномалии и решения оператора' };
       case 'field-inspection-detail': return { title: 'Осмотры полей', subtitle: selectedInspectionId ? `Осмотр #${selectedInspectionId}` : null };
       case 'reports':     return { title: 'Отчёты' };
       case 'enterprise-detail': return { title: 'Предприятие', subtitle: selectedEnterpriseId ? `#${selectedEnterpriseId}` : null };
@@ -259,6 +264,8 @@ function AppLayout() {
       case 'field-inspections':
       case 'field-inspection-detail':
         return <AnomalyInspectionsPage onNavigate={handleNavigate} enterprises={enterprises} selectedInspectionId={selectedInspectionId} />;
+      case 'monitoring':
+        return <MonitoringPage onNavigate={handleNavigate} enterprises={enterprises} />;
       case 'enterprises':
         return <EnterprisesPage onNavigate={handleNavigate} />;
       case 'enterprise-detail':

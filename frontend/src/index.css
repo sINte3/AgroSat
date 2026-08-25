@@ -33,8 +33,12 @@
     height: 44px !important;
   }
   .maplibregl-ctrl-group button:focus-visible {
-    outline: 2px solid #16a34a;
+    outline: 2px solid #15803d;
     outline-offset: 2px;
+  }
+  .maplibregl-ctrl-attrib a {
+    text-decoration: underline;
+    text-underline-offset: 2px;
   }
 }
 
@@ -46,7 +50,7 @@
     padding: 1rem;
   }
   .btn-primary {
-    background-color: #16a34a;
+    background-color: #15803d;
     color: #ffffff;
     font-weight: 600;
     padding: 0.5rem 1rem;
@@ -54,7 +58,7 @@
     transition: background-color 200ms;
   }
   .btn-primary:hover {
-    background-color: #15803d;
+    background-color: #166534;
   }
   .btn-primary:disabled {
     opacity: 0.5;
@@ -68,7 +72,7 @@
     transition: background-color 200ms, color 200ms;
   }
   .btn-secondary:hover {
-    background-color: #16a34a;
+    background-color: #15803d;
     color: #ffffff;
   }
   .input {
@@ -79,12 +83,12 @@
     color: #1a2e23;
   }
   .input::placeholder {
-    color: #6b8578;
+    color: #52675c;
   }
   .input:focus {
     outline: none;
-    border-color: #16a34a;
-    box-shadow: 0 0 0 1px #16a34a;
+    border-color: #15803d;
+    box-shadow: 0 0 0 1px #15803d;
   }
   .badge {
     @apply inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium;

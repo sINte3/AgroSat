@@ -8,6 +8,11 @@ const FULL_NAVIGATION_KEYS = Object.freeze([
   'reports',
 ]);
 
+const ADMIN_NAVIGATION_KEYS = Object.freeze([
+  'dashboard', 'fields', 'monitoring', 'field-attention',
+  'field-inspections', 'alerts', 'enterprises', 'reports',
+]);
+
 const AGRONOMIST_NAVIGATION_KEYS = Object.freeze([
   'field-inspections',
   'field-attention',
@@ -22,6 +27,8 @@ const FULL_VIEW_KEYS = new Set([
   'enterprise-detail',
 ]);
 
+const ADMIN_VIEW_KEYS = new Set([...FULL_VIEW_KEYS, 'monitoring']);
+
 const AGRONOMIST_VIEW_KEYS = new Set([
   'fields',
   'field-detail',
@@ -32,6 +39,7 @@ const AGRONOMIST_VIEW_KEYS = new Set([
 ]);
 
 const NAVIGATION_LABELS = Object.freeze({
+  monitoring: 'Мониторинг',
   dashboard: 'Сегодня',
   fields: 'Поля',
   'field-attention': 'Внимание',
@@ -48,14 +56,16 @@ export function getRoleDefaultPath(role) {
 }
 
 export function isViewAllowedForRole(role, view) {
+  if (role === 'admin') return ADMIN_VIEW_KEYS.has(view);
   if (role === 'agronomist') return AGRONOMIST_VIEW_KEYS.has(view);
-  if (role === 'admin' || role === 'manager' || role === 'viewer') return FULL_VIEW_KEYS.has(view);
+  if (role === 'manager' || role === 'viewer') return FULL_VIEW_KEYS.has(view);
   return false;
 }
 
 export function getNavigationKeysForRole(role) {
+  if (role === 'admin') return [...ADMIN_NAVIGATION_KEYS];
   if (role === 'agronomist') return [...AGRONOMIST_NAVIGATION_KEYS];
-  if (role === 'admin' || role === 'manager' || role === 'viewer') return [...FULL_NAVIGATION_KEYS];
+  if (role === 'manager' || role === 'viewer') return [...FULL_NAVIGATION_KEYS];
   return [];
 }
 

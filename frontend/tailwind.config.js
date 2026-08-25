@@ -11,8 +11,8 @@ export default {
           'border': '#e0e7e3',        // Borders — subtle green-gray
           'hover': '#e8eeea',         // Hover state
           'text': '#1a2e23',          // Primary text — dark green-black
-          'muted': '#6b8578',         // Secondary/muted text — medium green-gray
-          'accent': '#16a34a',        // Primary accent — green-600
+          'muted': '#52675c',         // Secondary text — WCAG AA on white
+          'accent': '#15803d',        // Primary accent — accessible green-700
           'accent-dim': '#bbf7d0',    // Dimmed accent — green-200
           // kept for backward compat
           bg: '#f8faf9',

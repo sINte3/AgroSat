@@ -34,6 +34,7 @@
     "test:production-api-origin": "node scripts/test-production-api-origin.mjs",
     "test:pixel-ndvi-workspace": "node scripts/test-pixel-ndvi-workspace.mjs",
     "test:anomaly-inspection": "node scripts/test-anomaly-inspection-workflow.mjs"
+    ,"test:autonomous-monitoring": "node scripts/test-autonomous-monitoring.mjs"
   },
   "dependencies": {
     "@mapbox/mapbox-gl-draw": "1.5.0",

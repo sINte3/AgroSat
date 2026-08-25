@@ -8,6 +8,7 @@ import {
 const NAV_ITEMS = [
   { key: 'dashboard', icon: DashboardIcon },
   { key: 'fields', icon: MapIcon },
+  { key: 'monitoring', icon: MonitoringIcon },
   { key: 'field-attention', icon: AttentionIcon },
   { key: 'field-inspections', icon: InspectionIcon },
   { key: 'alerts', icon: BellIcon },
@@ -156,6 +157,10 @@ function BellIcon({ className }) {
       <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9M13.73 21a2 2 0 01-3.46 0"/>
     </svg>
   );
+}
+
+function MonitoringIcon({ className }) {
+  return <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className={className}><path d="M4 17l4-5 4 3 5-8 3 2M4 21h16M6 5h12"/></svg>;
 }
 
 function AttentionIcon({ className }) {
