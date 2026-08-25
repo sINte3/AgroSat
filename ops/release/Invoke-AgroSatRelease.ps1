@@ -3,7 +3,7 @@ param(
     [ValidateSet('Rehearsal', 'Production')][string]$Mode = 'Rehearsal',
     [string]$AuthorizationPath = '',
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-f0-9]{40}$')][string]$ReleaseCandidate,
-    [string]$ExpectedBranch = 'task/program-r3-mega-repair',
+    [string]$ExpectedBranch = 'task/program-r3-macrostage-e-autonomous-monitoring',
     [Parameter(Mandatory = $true)][string]$RehearsalRoot,
     [Parameter(Mandatory = $true)][string]$RehearsalDatabase,
     [Parameter(Mandatory = $true)][string]$SourceArchive,

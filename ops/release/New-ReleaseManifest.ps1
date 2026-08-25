@@ -1,10 +1,10 @@
  [CmdletBinding()]
 param(
-    [string]$ProgramWorktree = "C:\AgroSat_worktrees\program-r3-mega-repair",
+    [string]$ProgramWorktree = "C:\AgroSat_worktrees\program-r3-macrostage-e-autonomous-monitoring",
     [string]$SourceCheckout = "C:\AgroSat",
-    [string]$SourceBaseline = "40e8e379d9d29cb4bfb8afebdd9c489c19756fac",
-    [string]$SourceCheckoutBaseline = "",
-    [string]$ProgramBranch = "task/program-r3-mega-repair",
+    [string]$SourceBaseline = "f2a12f92f58829d9dfc2ef642c805175d863b34f",
+    [string]$SourceCheckoutBaseline = "40e8e379d9d29cb4bfb8afebdd9c489c19756fac",
+    [string]$ProgramBranch = "task/program-r3-macrostage-e-autonomous-monitoring",
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-f0-9]{40}$')][string]$ReleaseCandidate,
     [string]$SourceArchive = "",
     [string]$SourceArchiveSha256 = "",
@@ -84,7 +84,8 @@ function Get-RepositoryRuntimeContract {
 
 $allowedProgramWorktrees = @(
     "C:\AgroSat_worktrees\program-r3-mega-repair",
-    "C:\AgroSat_worktrees\program-r3-macrostage-d-production-release"
+    "C:\AgroSat_worktrees\program-r3-macrostage-d-production-release",
+    "C:\AgroSat_worktrees\program-r3-macrostage-e-autonomous-monitoring"
 )
 if ([System.IO.Path]::GetFullPath($ProgramWorktree) -notin $allowedProgramWorktrees) {
     throw "Program worktree does not match the PROGRAM R3 contract."
@@ -234,7 +235,8 @@ if ($WriteManifest) {
     $allowedRoots = @(
         "C:\AgroSat_backups\PROGRAM_R3_FAST_TRACK_RELEASE_CANDIDATE\RUNS\",
         "C:\AgroSat_backups\PROGRAM_R3_MEGA_RELEASE_REPAIR\",
-        "C:\AgroSat_backups\PROGRAM_R3_MACROSTAGE_D_PRODUCTION_RELEASE\RUNS\"
+        "C:\AgroSat_backups\PROGRAM_R3_MACROSTAGE_D_PRODUCTION_RELEASE\RUNS\",
+        "C:\AgroSat_backups\PROGRAM_R3_MACROSTAGE_E_AUTONOMOUS_MONITORING\RUNS\"
     )
     $resolvedOutput = [System.IO.Path]::GetFullPath($OutputPath)
     if (@($allowedRoots | Where-Object {
