@@ -48,14 +48,14 @@ $action = New-ScheduledTaskAction `
     -Argument $actionArguments `
     -WorkingDirectory $configuration.working_directory
 
-$dailyTime = [TimeSpan]::Parse([string]$configuration.schedule.daily_at_local)
-$firstRun = (Get-Date).Date.Add($dailyTime)
-if ($firstRun -le (Get-Date)) {
-    $firstRun = $firstRun.AddDays(1)
-}
-$trigger = New-ScheduledTaskTrigger -Daily -At $firstRun
+$triggers = @($configuration.schedule.daily_at_local_times | ForEach-Object {
+    $dailyTime = [TimeSpan]::Parse([string]$_)
+    $firstRun = (Get-Date).Date.Add($dailyTime)
+    if ($firstRun -le (Get-Date)) { $firstRun = $firstRun.AddDays(1) }
+    New-ScheduledTaskTrigger -Daily -At $firstRun
+})
 $principal = New-ScheduledTaskPrincipal `
-    -UserId $configuration.execution_identity `
+    -UserId $configuration.execution_sid `
     -LogonType ServiceAccount `
     -RunLevel Highest
 $settings = New-ScheduledTaskSettingsSet `
@@ -75,7 +75,17 @@ if ($PSCmdlet.ShouldProcess($configuration.task_name, "Register Scheduled Task")
         -TaskName $task.TaskName `
         -Description $configuration.task_description `
         -Action $action `
-        -Trigger $trigger `
+        -Trigger $triggers `
         -Principal $principal `
         -Settings $settings | Out-Null
+    Disable-ScheduledTask -TaskPath $task.TaskPath -TaskName $task.TaskName | Out-Null
 }
+
+[pscustomobject]@{
+    action = "installed_disabled"
+    task_name = $configuration.task_name
+    state = "Disabled"
+    release_commit = $configuration.release_commit
+    trigger_count = $triggers.Count
+    principal_sid = $configuration.execution_sid
+} | ConvertTo-Json

@@ -14,6 +14,19 @@ $configuration = Get-Task209CollectorConfiguration `
     -ConfigurationPath $ConfigurationPath `
     -RequireResolved
 
+$manifestPath = Join-Path $configuration.working_directory "release-manifest.json"
+if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+    throw "Immutable release manifest is unavailable."
+}
+$manifestHash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($manifestHash -cne ([string]$configuration.release_manifest_sha256).ToLowerInvariant()) {
+    throw "Immutable release manifest hash mismatch."
+}
+$manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+if ([string]$manifest.git_sha -cne [string]$configuration.release_commit) {
+    throw "Immutable release manifest commit mismatch."
+}
+
 foreach ($directory in @(
     $configuration.collector.output_directory,
     $configuration.collector.state_directory,
@@ -55,8 +68,12 @@ $arguments = @(
 )
 
 $previousRuntimeFile = $env:AGROSAT_RUNTIME_ENV_FILE
+$previousReleaseCommit = $env:AGROSAT_RELEASE_COMMIT
+$previousAuditIdentity = $env:AGROSAT_COLLECTOR_AUDIT_IDENTITY
 try {
     $env:AGROSAT_RUNTIME_ENV_FILE = [string]$configuration.runtime_env_file
+    $env:AGROSAT_RELEASE_COMMIT = [string]$configuration.release_commit
+    $env:AGROSAT_COLLECTOR_AUDIT_IDENTITY = "AgroSat_PROGRAM_R3_SentinelCycle"
     Push-Location -LiteralPath $configuration.working_directory
     try {
         & $configuration.python_executable @arguments
@@ -68,4 +85,6 @@ try {
 }
 finally {
     $env:AGROSAT_RUNTIME_ENV_FILE = $previousRuntimeFile
+    $env:AGROSAT_RELEASE_COMMIT = $previousReleaseCommit
+    $env:AGROSAT_COLLECTOR_AUDIT_IDENTITY = $previousAuditIdentity
 }

@@ -17,7 +17,11 @@ function Get-Task209CollectorConfiguration {
     $requiredProperties = @(
         "task_name",
         "execution_identity",
+        "execution_sid",
         "expected_windows_timezone_id",
+        "release_commit",
+        "immutable_release_root",
+        "release_manifest_sha256",
         "working_directory",
         "python_executable",
         "runtime_env_file",
@@ -34,6 +38,18 @@ function Get-Task209CollectorConfiguration {
     if ($configuration.task_name -notmatch '^\\(?:[^\\]+\\)*[^\\]+$') {
         throw "task_name must use an absolute Task Scheduler path."
     }
+    if ($configuration.task_name -cne '\AgroSat_PROGRAM_R3_SentinelCycle') {
+        throw "TASK_219 supports only the canonical scheduler identity."
+    }
+    if ([string]$configuration.execution_sid -notmatch '^S-1-[0-9-]+$') {
+        throw "execution_sid must be an explicit Windows SID."
+    }
+    if ([string]$configuration.release_commit -notmatch '^[0-9a-f]{40}$') {
+        throw "release_commit must be an exact lowercase Git commit."
+    }
+    if ([string]$configuration.release_manifest_sha256 -notmatch '^[0-9a-f]{64}$') {
+        throw "release_manifest_sha256 must be SHA-256."
+    }
     if ($configuration.schedule.multiple_instances -ne "IgnoreNew") {
         throw "Only the IgnoreNew single-instance policy is supported."
     }
@@ -49,6 +65,15 @@ function Get-Task209CollectorConfiguration {
         "schedule.restart_interval_minutes" = @([int]$configuration.schedule.restart_interval_minutes, 1, 1440)
         "schedule.execution_time_limit_hours" = @([int]$configuration.schedule.execution_time_limit_hours, 1, 24)
     }
+    if (@($configuration.schedule.daily_at_local_times).Count -notin @(1, 2)) {
+        throw "daily_at_local_times must contain one or two bounded triggers."
+    }
+    foreach ($value in @($configuration.schedule.daily_at_local_times)) {
+        $parsed = [TimeSpan]::Zero
+        if (-not [TimeSpan]::TryParse([string]$value, [ref]$parsed) -or $parsed -lt [TimeSpan]::Zero -or $parsed -ge [TimeSpan]::FromDays(1)) {
+            throw "daily_at_local_times contains an invalid local time."
+        }
+    }
     foreach ($entry in $boundedIntegers.GetEnumerator()) {
         $value, $minimum, $maximum = $entry.Value
         if ($value -lt $minimum -or $value -gt $maximum) {
@@ -63,6 +88,7 @@ function Get-Task209CollectorConfiguration {
         }
         foreach ($pathProperty in @(
             "working_directory",
+            "immutable_release_root",
             "python_executable",
             "runtime_env_file",
             "runner_script"
@@ -73,6 +99,17 @@ function Get-Task209CollectorConfiguration {
             }
             if (-not (Test-Path -LiteralPath $path)) {
                 throw "$pathProperty does not exist."
+            }
+        }
+        $expectedRelease = Join-Path ([string]$configuration.immutable_release_root) ([string]$configuration.release_commit)
+        if ((Resolve-Path -LiteralPath $configuration.working_directory).Path -cne (Resolve-Path -LiteralPath $expectedRelease).Path) {
+            throw "working_directory must be the exact immutable release directory."
+        }
+        foreach ($directory in @($configuration.collector.output_directory,$configuration.collector.state_directory,$configuration.collector.lock_directory)) {
+            if (-not [IO.Path]::IsPathRooted([string]$directory)) { throw "Collector runtime directories must be absolute." }
+            $full = [IO.Path]::GetFullPath([string]$directory)
+            if ($full.StartsWith((Resolve-Path -LiteralPath $expectedRelease).Path + [IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) {
+                throw "Collector runtime directories must remain outside the immutable release."
             }
         }
         if ((Get-TimeZone).Id -ne $configuration.expected_windows_timezone_id) {
