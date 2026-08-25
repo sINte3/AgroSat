@@ -80,7 +80,7 @@ def dates(date_from: str | None, date_to: str | None, lookback: int, today: date
 
 def atomic_json(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}", suffix=".tmp", dir=path.parent)
+    descriptor, temporary = tempfile.mkstemp(prefix=".tmp-", suffix=".json", dir=path.parent)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             json.dump(sanitize(data), handle, ensure_ascii=False, sort_keys=True)

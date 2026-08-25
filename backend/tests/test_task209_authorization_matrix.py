@@ -179,6 +179,11 @@ MATRIX = (
     contract("GET", "/api/commercial/tenants/{enterprise_id}/lifecycle-requests", MANAGEMENT_ROLES, "enterprise_object", cross_tenant=404, unknown_object=404),
     contract("POST", "/api/commercial/tenants/{enterprise_id}/lifecycle-requests", MANAGEMENT_ROLES, "enterprise_object", write=True, cross_tenant=404, unknown_object=404),
     contract("POST", "/api/commercial/tenants/{enterprise_id}/lifecycle-requests/{request_id}/decision", GLOBAL_ROLES, "enterprise_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("GET", "/api/monitoring/status", GLOBAL_ROLES, tenant_scope="global_operations"),
+    contract("GET", "/api/monitoring/freshness", tenant_scope="enterprise_filter", cross_tenant=404),
+    contract("GET", "/api/monitoring/candidates", tenant_scope="enterprise_filter", cross_tenant=404),
+    contract("POST", "/api/monitoring/candidates/{candidate_id}/transition", GLOBAL_ROLES, "candidate_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/monitoring/candidates/{candidate_id}/inspection", GLOBAL_ROLES, "candidate_object", write=True, cross_tenant=404, unknown_object=404),
 )
 
 
@@ -193,7 +198,7 @@ def openapi_operations():
 
 def test_matrix_covers_every_openapi_operation_exactly():
     expected = {(item.method, item.path) for item in MATRIX}
-    assert len(expected) == len(MATRIX) == 120
+    assert len(expected) == len(MATRIX) == 125
     assert expected == set(openapi_operations())
 
 
@@ -232,6 +237,7 @@ def test_object_contracts_hide_cross_tenant_existence():
         "anomaly_object",
         "productivity_run_object",
         "variable_rate_object",
+        "candidate_object",
     }
     for item in MATRIX:
         if item.tenant_scope in object_scopes:

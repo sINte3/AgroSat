@@ -57,6 +57,28 @@ def sanitize(value: Any) -> Any:
     return sanitize_text(value) if isinstance(value, str) else value
 
 
+def provider_failure_category(outcome: dict[str, Any], child: dict[str, Any]) -> str | None:
+    """Return only a bounded operational class, never an upstream response body."""
+    searchable = " ".join(
+        [
+            str(outcome.get("stdout", "")),
+            str(outcome.get("stderr", "")),
+            *(str(item) for item in child.get("diagnostics", [])),
+        ]
+    ).lower()
+    markers = (
+        ("authentication", ("category=authentication", "invalid_client", "unauthorized", " 401", " 403")),
+        ("quota", ("category=quota", "rate limit", " 429")),
+        ("network", ("category=network", "category=provider_unavailable", "connection", "dns")),
+        ("timeout", ("category=timeout", "timeout", "timed out")),
+        ("cloud", ("cloud", "quality_blocked")),
+    )
+    for category, values in markers:
+        if any(value in searchable for value in values):
+            return category
+    return "provider_error" if child.get("error_count") else None
+
+
 def external(raw: str | None, label: str, required: bool = False) -> Path | None:
     if raw is None:
         if required:
@@ -133,7 +155,7 @@ def load_state(path: Path) -> dict[str, Any]:
 
 def atomic_json(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}", suffix=".tmp", dir=path.parent)
+    descriptor, temporary = tempfile.mkstemp(prefix=".tmp-", suffix=".json", dir=path.parent)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             json.dump(sanitize(data), handle, ensure_ascii=False, sort_keys=True)
@@ -150,7 +172,7 @@ def atomic_json(path: Path, data: dict[str, Any]) -> None:
 
 def atomic_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}", suffix=".tmp", dir=path.parent)
+    descriptor, temporary = tempfile.mkstemp(prefix=".tmp-", suffix=".jsonl", dir=path.parent)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             for record in records:
@@ -370,19 +392,21 @@ def run(args: argparse.Namespace, *, field_query: Callable[[], list[int]] = quer
         successful: list[int] = []
         failed: list[int] = []
         fatal_field_id: int | None = None
+        terminal_provider_category: str | None = None
         totals = {"attempts": 0, "timeouts": 0, "inserted": 0, "skipped": 0, "blocked": 0}
         for field_id in selected:
             attempted.append(field_id)
             succeeded = False
             field_fatal_code: int | None = None
             for attempt in range(1, args.max_attempts + 1):
-                temporary_log = run_dir is None
-                if run_dir is not None:
-                    log = run_dir / "per_field" / f"{field_id}_attempt_{attempt}.json"
-                else:
-                    descriptor, temporary_name = tempfile.mkstemp(suffix=".json")
-                    os.close(descriptor)
-                    log = Path(temporary_name)
+                # Keep the child IPC artifact below the Windows path budget.  The
+                # parsed, sanitized contract is durably retained in field_results.
+                temporary_log = True
+                descriptor, temporary_name = tempfile.mkstemp(
+                    prefix="agrosat_ndvi_child_", suffix=".json"
+                )
+                os.close(descriptor)
+                log = Path(temporary_name)
                 try:
                     outcome = sanitize(child_runner(command(field_id, start, end, current_mode, log, Path(str(lock_override or DEFAULT_LOCK) + f".child.{field_id}")), args.field_timeout_seconds))
                     totals["attempts"] += 1
@@ -397,6 +421,9 @@ def run(args: argparse.Namespace, *, field_query: Callable[[], list[int]] = quer
                         raise ValidationError("child process exit code is invalid")
                     child = parse_child(log, field_id=field_id, current_mode=current_mode, start=start, end=end, process_exit=process_exit)
                     record = {"field_id": field_id, "attempt": attempt, **outcome, "child_summary": child}
+                    category = provider_failure_category(outcome, child) if process_exit else None
+                    if category is not None:
+                        record["failure_category"] = category
                     totals["inserted"] += child["inserted_count"]
                     totals["skipped"] += child["skipped_existing_count"]
                     totals["blocked"] += child["quality_blocked_count"]
@@ -412,6 +439,9 @@ def run(args: argparse.Namespace, *, field_query: Callable[[], list[int]] = quer
                         break
                     record["classification"] = "RETRYABLE"
                     results.append(record)
+                    if category in {"authentication", "quota"}:
+                        terminal_provider_category = category
+                        break
                     if attempt < args.max_attempts:
                         sleeper(min(args.retry_base_seconds * 2 ** (attempt - 1), MAX_BACKOFF))
                 except ValidationError as exc:
@@ -432,11 +462,14 @@ def run(args: argparse.Namespace, *, field_query: Callable[[], list[int]] = quer
                 fatal_field_id = field_id
                 final_exit_code = field_fatal_code
                 break
+            if terminal_provider_category is not None:
+                final_exit_code = 1
+                break
         unattempted = [item for item in selected if item not in attempted]
         if fatal_field_id is None:
             final_exit_code = 1 if failed else 0
         retry_queue = retry_after(state, selected, failed)
-        summary.update(mode=current_mode, date_from=start.isoformat(), date_to=end.isoformat(), selected_field_ids=selected, attempted_field_ids=attempted, successful_field_ids=successful, failed_field_ids=failed, fatal_field_id=fatal_field_id, unattempted_field_ids=unattempted, batch_source_counts={"retry": retry_count, "rotation": rotation_count}, attempt_counts=totals["attempts"], success_count=len(successful), failure_count=len(failed), unattempted_count=len(unattempted), timeout_count=totals["timeouts"], inserted_count=totals["inserted"], skipped_existing_count=totals["skipped"], quality_blocked_count=totals["blocked"], retry_queue_before=state["retry_field_ids"], retry_queue_after=retry_queue, state_advanced=False)
+        summary.update(mode=current_mode, date_from=start.isoformat(), date_to=end.isoformat(), selected_field_ids=selected, attempted_field_ids=attempted, successful_field_ids=successful, failed_field_ids=failed, fatal_field_id=fatal_field_id, provider_failure_category=terminal_provider_category, unattempted_field_ids=unattempted, batch_source_counts={"retry": retry_count, "rotation": rotation_count}, attempt_counts=totals["attempts"], success_count=len(successful), failure_count=len(failed), unattempted_count=len(unattempted), timeout_count=totals["timeouts"], inserted_count=totals["inserted"], skipped_existing_count=totals["skipped"], quality_blocked_count=totals["blocked"], retry_queue_before=state["retry_field_ids"], retry_queue_after=retry_queue, state_advanced=False)
         if final_exit_code in (0, 1) and state_file is not None:
             next_state = {"schema_version": 1, "next_offset": next_offset, "retry_field_ids": retry_queue, "last_completed_run_id": run_id, "updated_at": now()}
     except (ValidationError, OSError) as exc:

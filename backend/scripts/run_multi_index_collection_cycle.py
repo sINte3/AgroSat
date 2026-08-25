@@ -143,7 +143,7 @@ def load_state(path: Path) -> dict[str, Any]:
 
 def atomic_json_write(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    fd, temp_name = tempfile.mkstemp(prefix=".tmp-", suffix=".json", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(sanitize_value(payload), handle, ensure_ascii=False, indent=2, sort_keys=True)

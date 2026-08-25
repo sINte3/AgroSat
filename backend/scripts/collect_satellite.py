@@ -8,12 +8,14 @@ behind their existing, independently idempotent child collectors.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -33,6 +35,7 @@ SCHEMA_VERSION = 1
 SUPPORTED_INDICES = ("ndvi", "savi", "evi", "ndmi", "ndre")
 MULTI_INDICES = frozenset(SUPPORTED_INDICES[1:])
 MAX_FIELDS = 100
+MAX_ACTIVE_FIELDS = 10_000
 MAX_DATE_DAYS = 30
 MAX_ATTEMPTS = 5
 MAX_TIMEOUT_SECONDS = 900
@@ -40,6 +43,7 @@ MAX_CYCLE_TIMEOUT_SECONDS = 21600
 LATEST_STATUS_FILENAME = "collector_latest_status.json"
 LAST_SUCCESS_FILENAME = "collector_last_success.json"
 LAST_FAILURE_FILENAME = "collector_last_failure.json"
+HEARTBEAT_FILENAME = "collector_heartbeat.json"
 MAX_CYCLE_SUMMARY_BYTES = 1024 * 1024
 PROVIDER_COUNTER_FIELDS = (
     "success_count",
@@ -171,8 +175,8 @@ def resolve_dates(
 def atomic_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(
-        prefix=f".{path.name}",
-        suffix=".tmp",
+        prefix=".tmp-",
+        suffix=".json",
         dir=path.parent,
     )
     try:
@@ -206,11 +210,11 @@ def classify_failure(summary: dict[str, Any]) -> str | None:
             *(
                 str(child.get(key, ""))
                 for child in children
-                for key in ("stdout", "stderr")
+                for key in ("stdout", "stderr", "failure_category")
             ),
         ]
     ).lower()
-    if any(marker in searchable for marker in ("invalid_client", "unauthorized", "401")):
+    if any(marker in searchable for marker in ("authentication", "invalid_client", "unauthorized", "401", "403")):
         return "auth"
     if any(marker in searchable for marker in ("quota", "rate limit", "429")):
         return "quota"
@@ -311,10 +315,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--date-from")
     parser.add_argument("--date-to")
     parser.add_argument("--lookback-days", type=int, default=14)
-    parser.add_argument("--max-attempts", type=int, default=3)
+    parser.add_argument("--max-attempts", type=int, default=2)
     parser.add_argument("--retry-base-seconds", type=int, default=2)
     parser.add_argument("--field-timeout-seconds", type=int, default=180)
-    parser.add_argument("--cycle-timeout-seconds", type=int, default=3600)
+    parser.add_argument("--cycle-timeout-seconds", type=int, default=21600)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--state-dir", required=True)
     parser.add_argument("--lock-dir", required=True)
@@ -422,6 +426,23 @@ def build_child_command(
     return command
 
 
+def resolve_active_field_ids() -> list[int]:
+    """Read the exact active-field scope once; never rely on rotating child state."""
+    from database import SessionLocal
+    from sqlalchemy import text
+
+    db = SessionLocal()
+    try:
+        values = [int(row[0]) for row in db.execute(
+            text("SELECT id FROM fields WHERE is_active=true ORDER BY id")
+        ).fetchall()]
+    finally:
+        db.close()
+    if not values or len(values) > MAX_ACTIVE_FIELDS or len(values) != len(set(values)):
+        raise ContractError("active-field scope is empty, duplicated, or exceeds the safety cap")
+    return values
+
+
 def _read_bounded(path: Path) -> str:
     with path.open("rb") as handle:
         raw = handle.read(MAX_CAPTURE_BYTES + 1)
@@ -480,6 +501,76 @@ def execute_child(command: list[str], timeout_seconds: int) -> dict[str, Any]:
                 pass
 
 
+class HeartbeatPublisher:
+    """Atomically publish liveness while a provider child is running."""
+
+    def __init__(self, path: Path, run_id: str, release_commit: str):
+        self.path = path
+        self.run_id = run_id
+        self.release_commit = release_commit
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, name="collector-heartbeat", daemon=True)
+
+    def _publish(self) -> None:
+        atomic_json(self.path, {
+            "schema_version": 1, "run_id": self.run_id, "pid": os.getpid(),
+            "release_commit": self.release_commit, "heartbeat_at": utc_now(),
+        })
+
+    def _loop(self) -> None:
+        while not self._stop.wait(30):
+            self._publish()
+
+    def start(self) -> None:
+        self._publish()
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=5)
+        self._publish()
+
+
+def aggregate_counters(summary: dict[str, Any]) -> dict[str, int]:
+    counters = {field: 0 for field in PROVIDER_COUNTER_FIELDS}
+    for child in summary.get("children", []):
+        values = child.get("counters") or {}
+        for field in counters:
+            value = values.get(field)
+            if type(value) is int and value >= 0:
+                counters[field] += value
+    return counters
+
+
+def provider_failure_category(provider_output: Path) -> str | None:
+    summaries = list(provider_output.glob("cycle_*/cycle_summary.json"))
+    if len(summaries) != 1:
+        return None
+    try:
+        path = summaries[0]
+        if path.stat().st_size > MAX_CYCLE_SUMMARY_BYTES:
+            return None
+        value = json.loads(path.read_text(encoding="utf-8")).get(
+            "provider_failure_category"
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return value if value in {"authentication", "quota", "network", "timeout", "cloud", "provider_error"} else None
+
+
+def provider_status(summary: dict[str, Any]) -> str:
+    failure = classify_failure(summary)
+    counters = aggregate_counters(summary)
+    if failure in {"auth", "quota", "network", "operational", "partial"}:
+        return "degraded"
+    if counters["success_count"] == 0 and counters["quality_blocked_count"] > 0:
+        return "quality_blocked"
+    if summary.get("exit_code") == 0 and counters["inserted_count"] == 0:
+        return "no_scene"
+    return "healthy" if summary.get("exit_code") == 0 else "degraded"
+
+
 def run(
     args: argparse.Namespace,
     *,
@@ -503,6 +594,8 @@ def run(
     lock = None
     summary_path: Path | None = None
     latest_status_path: Path | None = None
+    apply_run = None
+    heartbeat_publisher: HeartbeatPublisher | None = None
     try:
         plan = validate(args)
         for directory in (
@@ -523,35 +616,88 @@ def run(
             str(plan["lock_dir"] / "canonical_satellite.lock"),
             mutex_name=MUTEX_NAME,
         )
+        release_commit = os.environ.get("AGROSAT_RELEASE_COMMIT", "unknown").lower()
+        heartbeat_publisher = HeartbeatPublisher(
+            plan["state_dir"] / HEARTBEAT_FILENAME, run_id, release_commit,
+        )
+        heartbeat_publisher.start()
+        if plan["mode"] == "apply":
+            from config import settings
+            from services.autonomous_monitoring import begin_apply_run
+
+            release_commit = os.environ.get(
+                "AGROSAT_RELEASE_COMMIT", settings.release_revision,
+            ).lower()
+            run_key = hashlib.sha256(
+                f"{release_commit}|{run_id}|{plan['date_from']}|{plan['date_to']}".encode()
+            ).hexdigest()
+            apply_run = begin_apply_run(
+                run_key=run_key,
+                release_commit=release_commit,
+                audit_identity=os.environ.get(
+                    "AGROSAT_COLLECTOR_AUDIT_IDENTITY",
+                    "AgroSat_PROGRAM_R3_SentinelCycle",
+                ),
+            )
+        field_batches = [plan["field_ids"]]
+        if args.all_active_fields:
+            active_ids = resolve_active_field_ids()
+            field_batches = [
+                active_ids[offset:offset + args.batch_size]
+                for offset in range(0, len(active_ids), args.batch_size)
+            ]
+        summary["scope"] = {
+            "active_field_count": sum(len(batch) for batch in field_batches),
+            "batch_size": args.batch_size if args.all_active_fields else len(plan["field_ids"]),
+            "batch_count": len(field_batches),
+        }
         providers = []
         if "ndvi" in plan["indices"]:
             providers.append("ndvi")
         if any(code in MULTI_INDICES for code in plan["indices"]):
             providers.append("multi")
         final_code = 0
+        stop = False
         for provider in providers:
-            provider_output = run_dir / provider
-            provider_output.mkdir(parents=False, exist_ok=False)
-            command = build_child_command(provider, args, plan, provider_output)
-            outcome = sanitize(child_runner(command, args.cycle_timeout_seconds))
-            code = outcome.get("exit_code")
-            if type(code) is not int or code not in (0, 1, 2, 3, 4):
-                raise ContractError("child returned an invalid exit code")
-            summary["children"].append(
-                {
-                    "provider": provider,
-                    "exit_code": code,
-                    "timed_out": bool(outcome.get("timed_out")),
-                    "counters": provider_counters(provider_output),
-                    "stdout": outcome.get("stdout", ""),
-                    "stderr": outcome.get("stderr", ""),
-                }
-            )
-            if code in (2, 3, 4):
-                final_code = code
+            for batch_number, field_batch in enumerate(field_batches, start=1):
+                provider_output = run_dir / f"{provider}_batch_{batch_number:04d}"
+                provider_output.mkdir(parents=False, exist_ok=False)
+                command = build_child_command(
+                    provider, args, {**plan, "field_ids": field_batch}, provider_output,
+                )
+                remaining = args.cycle_timeout_seconds - (time.monotonic() - started)
+                if remaining <= 0:
+                    outcome = {"exit_code": 1, "timed_out": True, "stderr": "cycle timeout"}
+                else:
+                    outcome = sanitize(child_runner(command, max(1, int(remaining))))
+                code = outcome.get("exit_code")
+                if type(code) is not int or code not in (0, 1, 2, 3, 4):
+                    raise ContractError("child returned an invalid exit code")
+                summary["children"].append(
+                    {
+                        "provider": provider, "batch": batch_number,
+                        "field_count": len(field_batch), "exit_code": code,
+                        "timed_out": bool(outcome.get("timed_out")),
+                        "counters": provider_counters(provider_output),
+                        "failure_category": provider_failure_category(provider_output),
+                        "stdout": outcome.get("stdout", ""),
+                        "stderr": outcome.get("stderr", ""),
+                    }
+                )
+                if apply_run is not None:
+                    from services.autonomous_monitoring import heartbeat
+                    heartbeat(apply_run, aggregate_counters(summary))
+                if code in (2, 3, 4):
+                    final_code = code; stop = True; break
+                if code == 1 and final_code == 0:
+                    final_code = code
+                if code == 1 and summary["children"][-1]["failure_category"] in {
+                    "authentication", "quota",
+                }:
+                    stop = True
+                    break
+            if stop:
                 break
-            if code == 1 and final_code == 0:
-                final_code = code
     except ContractError as exc:
         final_code = 2
         summary["diagnostics"].append(sanitize_text(exc))
@@ -562,9 +708,43 @@ def run(
         final_code = 3 if exc.code == 3 else 4
         summary["diagnostics"].append("LOCK_CONTENTION" if exc.code == 3 else "LOCK_ERROR")
     except Exception as exc:
-        final_code = 4
-        summary["diagnostics"].append(sanitize_text(exc))
+        detail = sanitize_text(exc)
+        final_code = 3 if "advisory lock contention" in detail.lower() else 4
+        summary["diagnostics"].append(
+            "LOCK_CONTENTION" if final_code == 3 else detail
+        )
     finally:
+        if heartbeat_publisher is not None:
+            try:
+                heartbeat_publisher.stop()
+            except Exception as exc:
+                final_code = 4
+                summary["diagnostics"].append(sanitize_text(f"heartbeat persistence failed: {exc}"))
+        if apply_run is not None:
+            try:
+                from services.autonomous_monitoring import (
+                    finish_apply_run, reconcile_pixel_candidates, refresh_freshness,
+                )
+                provisional = {**summary, "exit_code": final_code}
+                status = provider_status(provisional)
+                freshness_count = refresh_freshness(
+                    apply_run,
+                    last_outcome="provider_degraded" if status == "degraded" else
+                    "quality_blocked" if status == "quality_blocked" else None,
+                )
+                anomaly = reconcile_pixel_candidates(apply_run) if final_code in {0, 1} else {
+                    "inserted_candidates": 0, "automatic_inspections": 0,
+                    "spike_guard_triggered": False,
+                }
+                summary["monitoring"] = {"freshness_rows": freshness_count, **anomaly}
+                finish_apply_run(
+                    apply_run, exit_code=final_code, provider_status=status,
+                    counters={**aggregate_counters(summary), **summary["monitoring"]},
+                    failure_category=classify_failure(provisional),
+                )
+            except Exception as exc:
+                final_code = 4
+                summary["diagnostics"].append(sanitize_text(f"monitoring reconciliation failed: {exc}"))
         if lock is not None:
             try:
                 lock_release(lock)

@@ -19,6 +19,8 @@ import ctypes
 import logging
 import os
 import sys
+import tempfile
+from datetime import datetime, timezone
 from ctypes import wintypes
 
 logger = logging.getLogger(__name__)
@@ -110,11 +112,27 @@ def _read_lock_content(path: str) -> tuple[int | None, str | None]:
 
 
 def _write_pid(path: str) -> None:
-    """Write current PID to lock file."""
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(f"PID={os.getpid()},agrosat-collector\n")
-        f.flush()
-        os.fsync(f.fileno())
+    """Atomically bind PID, start time, and immutable release identity."""
+    release = os.environ.get("AGROSAT_RELEASE_COMMIT", "unknown")
+    started = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=".agrosat-collector-", suffix=".lock.tmp", dir=os.path.dirname(path)
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as f:
+            f.write(
+                f"PID={os.getpid()},STARTED_AT={started},RELEASE={release},"
+                "OWNER=agrosat-canonical-collector\n"
+            )
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
 
 
 def _pid_is_alive(pid: int) -> bool:

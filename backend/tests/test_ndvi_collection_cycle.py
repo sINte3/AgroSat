@@ -47,6 +47,24 @@ class CycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             code=self.execute_run(self.args('--apply','--field-ids','1,2','--max-attempts','1','--output-dir',directory), child_runner=self.child(1)); summary=json.loads(next(Path(directory).glob('cycle_*/cycle_summary.json')).read_text())
             self.assertEqual(code,1); self.assertEqual(summary['failed_field_ids'],[1,2]); self.assertEqual(summary['success_count']+summary['failure_count']+summary['unattempted_count'],2)
+    def test_authentication_failure_is_not_retried_and_stops_batch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            code=self.execute_run(self.args('--apply','--field-ids','1,2','--max-attempts','2','--output-dir',directory), child_runner=self.child(1))
+            run_dir=next(Path(directory).glob('cycle_*'))
+            summary=json.loads((run_dir/'cycle_summary.json').read_text())
+            records=[json.loads(line) for line in (run_dir/'field_results.jsonl').read_text().splitlines()]
+            self.assertEqual(code,1); self.assertEqual(summary['attempt_counts'],4)
+            # A generic provider failure remains retryable; the dedicated marker is terminal.
+            self.assertIsNone(summary['provider_failure_category'])
+            self.assertEqual(len(records),4)
+        def auth_runner(cmd,_timeout):
+            result=self.child(1)(cmd,_timeout); result['stderr']='provider category=authentication status=403'; return result
+        with tempfile.TemporaryDirectory() as directory:
+            code=self.execute_run(self.args('--apply','--field-ids','1,2','--max-attempts','2','--output-dir',directory), child_runner=auth_runner)
+            summary=json.loads(next(Path(directory).glob('cycle_*/cycle_summary.json')).read_text())
+            self.assertEqual(code,1); self.assertEqual(summary['attempt_counts'],1)
+            self.assertEqual(summary['provider_failure_category'],'authentication')
+            self.assertEqual(summary['unattempted_field_ids'],[2])
     def test_fatal_accounting_and_no_state_advance(self):
         with tempfile.TemporaryDirectory() as directory:
             state=Path(directory)/'state.json'; code=self.execute_run(self.args('--apply','--all-active-fields','--batch-size','2','--state-file',str(state),'--output-dir',directory),field_query=lambda:[1,2],child_runner=self.child(2)); summary=json.loads(next(Path(directory).glob('cycle_*/cycle_summary.json')).read_text())
