@@ -3,6 +3,7 @@ param(
     [ValidateSet('Rehearsal', 'Production')][string]$Mode = 'Rehearsal',
     [string]$AuthorizationPath = '',
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-f0-9]{40}$')][string]$ReleaseCandidate,
+    [string]$ExpectedBranch = 'task/program-r3-mega-repair',
     [Parameter(Mandatory = $true)][string]$RehearsalRoot,
     [Parameter(Mandatory = $true)][string]$RehearsalDatabase,
     [Parameter(Mandatory = $true)][string]$SourceArchive,
@@ -53,7 +54,7 @@ if (-not (Test-Path -LiteralPath $migrationScript -PathType Leaf)) { throw 'DATA
 if (Test-Path -LiteralPath $releaseDirectory) { throw 'IMMUTABLE_RELEASE_ALREADY_EXISTS' }
 if ($PSCmdlet.ShouldProcess($releaseDirectory, 'materialize immutable isolated release and switch isolated pointer')) {
     $archiveValidator = Join-Path $PSScriptRoot 'Test-AgroSatReleaseArchive.ps1'
-    & $archiveValidator -ArchivePath $SourceArchive -ExpectedSha256 $actualArchiveHash -ReleaseCandidate $ReleaseCandidate -DestinationPath $releaseDirectory | Out-Null
+    & $archiveValidator -ArchivePath $SourceArchive -ExpectedSha256 $actualArchiveHash -ReleaseCandidate $ReleaseCandidate -ExpectedBranch $ExpectedBranch -DestinationPath $releaseDirectory | Out-Null
     if (-not (Test-Path -LiteralPath $releaseDirectory -PathType Container)) { throw 'IMMUTABLE_RELEASE_MATERIALIZATION_FAILED' }
     & $migrationScript -RehearsalDatabase $RehearsalDatabase -ReleaseDirectory $releaseDirectory -ReleaseCandidate $ReleaseCandidate
     if (-not $?) { throw 'ISOLATED_DATABASE_MIGRATION_FAILED' }
