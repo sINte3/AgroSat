@@ -3,6 +3,7 @@ param(
     [Parameter(Mandatory = $true)][string]$ArchivePath,
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$ExpectedSha256,
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-f0-9]{40}$')][string]$ReleaseCandidate,
+    [string]$ExpectedBranch = 'task/program-r3-mega-repair',
     [string]$DestinationPath = ''
 )
 
@@ -41,7 +42,7 @@ try {
         if ($null -eq $manifest.PSObject.Properties[$field]) { throw "RELEASE_ARCHIVE_MANIFEST_FIELD_MISSING:$field" }
     }
     if ($manifest.git_sha -cne $ReleaseCandidate) { throw 'RELEASE_ARCHIVE_GIT_SHA_MISMATCH' }
-    if ($manifest.branch -cne 'task/program-r3-mega-repair') { throw 'RELEASE_ARCHIVE_BRANCH_MISMATCH' }
+    if ($manifest.branch -cne $ExpectedBranch) { throw 'RELEASE_ARCHIVE_BRANCH_MISMATCH' }
 
     if ($DestinationPath) {
         $destination = [IO.Path]::GetFullPath($DestinationPath)
