@@ -81,10 +81,11 @@ function Get-RepositoryRuntimeContract {
     }
 }
 
-if (
-    [System.IO.Path]::GetFullPath($ProgramWorktree) -ne
-    "C:\AgroSat_worktrees\program-r3-mega-repair"
-) {
+$allowedProgramWorktrees = @(
+    "C:\AgroSat_worktrees\program-r3-mega-repair",
+    "C:\AgroSat_worktrees\program-r3-macrostage-d-production-release"
+)
+if ([System.IO.Path]::GetFullPath($ProgramWorktree) -notin $allowedProgramWorktrees) {
     throw "Program worktree does not match the PROGRAM R3 contract."
 }
 if ([System.IO.Path]::GetFullPath($SourceCheckout) -ne "C:\AgroSat") {
