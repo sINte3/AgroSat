@@ -53,8 +53,9 @@ def main() -> int:
     logging.getLogger("services.metrics").setLevel(logging.WARNING)
 
     database_name = engine.url.database or ""
-    if database_name == "agrosat" or not database_name.startswith("agrosat_r3_task217_"):
-        raise RuntimeError("TASK217_DATABASE_IDENTITY_REJECTED")
+    allowed_prefixes = ("agrosat_r3_task217_", "agrosat_r3_task218_")
+    if database_name == "agrosat" or not database_name.startswith(allowed_prefixes):
+        raise RuntimeError("PROTECTED_QUALIFICATION_DATABASE_IDENTITY_REJECTED")
     protected = json.loads(args.browser_credentials.resolve(strict=True).read_text("utf-8"))
     identities = protected["identities"]
     metrics: dict[str, list[float]] = defaultdict(list)
