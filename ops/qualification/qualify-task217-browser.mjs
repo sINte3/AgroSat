@@ -47,6 +47,7 @@ async function prepareApi() {
   const api = await request.newContext({ baseURL: baseUrl });
   try {
     const adminToken = await loginApi(api, identities.admin);
+    const agronomistToken = await loginApi(api, identities.agronomist);
     const otherToken = await loginApi(api, identities.other);
     const auth = { Authorization: `Bearer ${adminToken}` };
     const fieldResponse = await api.get('/api/fields/4', { headers: auth });
@@ -79,7 +80,14 @@ async function prepareApi() {
     assert.equal(unauthorized.status(), 401);
     const cross = await api.get('/api/anomaly-inspections/fields/4/timeline', { headers: { Authorization: `Bearer ${otherToken}` } });
     assert.equal(cross.status(), 404);
-    return { fieldName: field.properties.name, scene, workspace, sample, adminToken };
+    const alertsResponse = await api.get('/api/alerts/?limit=200&is_active=true', { headers: auth });
+    assert.equal(alertsResponse.status(), 200);
+    const alertQueueResponse = await api.get('/api/anomaly-inspections/queue?source_kind=alert&limit=200', { headers: auth });
+    assert.equal(alertQueueResponse.status(), 200);
+    const usedAlertIds = new Set((await alertQueueResponse.json()).items.map((item) => item.source.alert_id));
+    const availableAlert = (await alertsResponse.json()).find((item) => !usedAlertIds.has(item.id));
+    assert(availableAlert, 'No unlinked alert is available for the real UI source-entry check');
+    return { fieldName: field.properties.name, scene, workspace, sample, availableAlert, adminToken, agronomistToken };
   } finally {
     await api.dispose();
   }
@@ -97,12 +105,13 @@ const instrumentation = () => {
 };
 
 function diagnostics(page) {
-  const state = { consoleErrors: [], pageErrors: [], requestFailures: [], backend5xx: [], expectedOfflineFailures: 0, expectedAborts: 0, offline: false };
+  const state = { consoleErrors: [], pageErrors: [], requestFailures: [], backend5xx: [], expectedOfflineFailures: 0, expectedAborts: 0, expectedConflictConsoleErrors: 0, expectedConflictResponses: 0, offline: false, expectedConflictPhase: false };
   page.on('console', (message) => {
     if (message.type() !== 'error') return;
     const value = message.text().slice(0, 300);
     if (/favicon|ERR_BLOCKED_BY_CLIENT|tile\.openstreetmap|arcgisonline|demotiles/i.test(value)) return;
     if (state.offline && /ERR_INTERNET_DISCONNECTED|Network Error|Failed to load resource/i.test(value)) { state.expectedOfflineFailures += 1; return; }
+    if (state.expectedConflictPhase && /Failed to load resource: the server responded with a status of 409 \(Conflict\)/i.test(value)) { state.expectedConflictConsoleErrors += 1; return; }
     state.consoleErrors.push(value);
   });
   page.on('pageerror', (error) => state.pageErrors.push(String(error.message).slice(0, 300)));
@@ -115,6 +124,10 @@ function diagnostics(page) {
   });
   page.on('response', (response) => {
     const url = new URL(response.url());
+    if (state.expectedConflictPhase && url.pathname.endsWith('/finding') && response.status() === 409) {
+      state.expectedConflictResponses += 1;
+      return;
+    }
     if (url.origin === new URL(baseUrl).origin && url.pathname.startsWith('/api/') && response.status() >= 500) {
       state.backend5xx.push({ path: url.pathname, status: response.status() });
     }
@@ -170,34 +183,33 @@ async function fireMapClick(page, longitude, latitude) {
     for (let depth = 0; fiber && depth < 50; depth += 1, fiber = fiber.return) {
       for (const branch of [fiber, fiber.alternate].filter(Boolean)) {
         for (let hook = branch.memoizedState, count = 0; hook && count < 140; hook = hook.next, count += 1) {
-          const map = hook.memoizedState;
-          const records = Array.isArray(map?._listeners?.click) ? map._listeners.click : [];
-          if (records.some((record) => /lngLat/.test(String(typeof record === 'function' ? record : record?.listener)) && /sample/i.test(String(typeof record === 'function' ? record : record?.listener)))) return true;
+          const candidate = hook.memoizedState;
+          if (candidate && typeof candidate.project === 'function' && candidate.getCanvas?.() === element.querySelector('.maplibregl-canvas')) return true;
         }
       }
     }
     return false;
   }, null, { timeout: 15000 });
-  await page.evaluate(([lng, lat]) => {
+  const listenerCount = await page.evaluate(([lng, lat]) => {
     const element = document.querySelector('[aria-label="Интерактивная карта полей"]');
     const key = element && Object.keys(element).find((name) => name.startsWith('__reactFiber$'));
     let fiber = key ? element[key] : null;
-    let map = null;
-    for (let depth = 0; fiber && !map && depth < 50; depth += 1, fiber = fiber.return) {
+    for (let depth = 0; fiber && depth < 50; depth += 1, fiber = fiber.return) {
       for (const branch of [fiber, fiber.alternate].filter(Boolean)) {
         for (let hook = branch.memoizedState, count = 0; hook && count < 140; hook = hook.next, count += 1) {
-          const candidate = hook.memoizedState;
-          if (candidate && typeof candidate.fire === 'function' && candidate.getCanvas?.() === element.querySelector('.maplibregl-canvas')) { map = candidate; break; }
+          const map = hook.memoizedState;
+          if (map && typeof map.project === 'function' && map.getCanvas?.() === element.querySelector('.maplibregl-canvas')) {
+            const projected = map.project([lng, lat]);
+            const listeners = Array.isArray(map?._listeners?.click) ? map._listeners.click.length : 0;
+            map.fire('click', { lngLat: { lng, lat }, point: projected });
+            return listeners;
+          }
         }
       }
     }
-    if (!map) throw new Error('Map instance unavailable');
-    const records = Array.isArray(map._listeners?.click) ? [...map._listeners.click] : [];
-    const listeners = records.map((record) => typeof record === 'function' ? record : record?.listener)
-      .filter((listener) => typeof listener === 'function' && /lngLat/.test(String(listener)) && /sample/i.test(String(listener)));
-    if (listeners.length !== 1) throw new Error(`Pixel click listener count ${listeners.length}`);
-    listeners[0].call(map, { type: 'click', target: map, lngLat: { lng, lat }, point: map.project([lng, lat]) });
+    throw new Error('Map instance unavailable');
   }, [longitude, latitude]);
+  assert(listenerCount >= 1, 'MapLibre click listener is unavailable');
 }
 
 async function waitPixelReady(page) {
@@ -247,6 +259,8 @@ const browser = await chromium.launch({ headless: true, executablePath: process.
 browserProcessTrend.push({ phase: 'after_launch', count: browserProcessCount() });
 let browserClosed = false;
 let inspectionId;
+let manualInspectionId;
+let alertInspectionId;
 const workflow = {};
 const allDiagnostics = [];
 try {
@@ -270,9 +284,11 @@ try {
   assert(sceneButton, 'Qualified 25 July scene button missing');
   await sceneButton.click();
   await waitPixelReady(managerPage);
-  const sampleResponse = managerPage.waitForResponse((response) => new URL(response.url()).pathname.endsWith('/sample') && response.status() === 200);
-  await fireMapClick(managerPage, apiData.sample.longitude, apiData.sample.latitude);
-  assert.equal((await (await sampleResponse).json()).status, 'value');
+  const [sampleResponse] = await Promise.all([
+    managerPage.waitForResponse((response) => new URL(response.url()).pathname.endsWith('/sample') && response.status() === 200),
+    fireMapClick(managerPage, apiData.sample.longitude, apiData.sample.latitude),
+  ]);
+  assert.equal((await sampleResponse.json()).status, 'value');
   await managerPage.getByRole('button', { name: 'Создать осмотр', exact: true }).click();
   const dialog = managerPage.getByRole('dialog', { name: 'Создать осмотр' });
   await dialog.waitFor();
@@ -294,6 +310,104 @@ try {
   assert.equal(await managerPage.locator('dl').first().locator('dd').count(), 5);
   workflow.queue_kpis_ui = true;
   await managerPage.screenshot({ path: path.join(screenshotDirectory, 'desktop-queue.png'), fullPage: false });
+
+  await managerPage.getByRole('button', { name: 'Новый ручной осмотр' }).click();
+  await managerPage.getByLabel('ID поля').fill('4');
+  await managerPage.getByRole('button', { name: 'Продолжить' }).click();
+  const manualDialog = managerPage.getByRole('dialog', { name: 'Создать осмотр' });
+  await manualDialog.waitFor();
+  await manualDialog.getByLabel('Причина осмотра').fill('TASK 217 браузерная проверка ручного источника');
+  await manualDialog.getByLabel('Агроном').selectOption(String(identities.agronomist.id));
+  const manualResponsePromise = managerPage.waitForResponse((response) =>
+    new URL(response.url()).pathname === '/api/anomaly-inspections'
+    && response.request().method() === 'POST');
+  await manualDialog.getByRole('button', { name: 'Создать осмотр', exact: true }).click();
+  const manualResponse = await manualResponsePromise;
+  assert.equal(manualResponse.status(), 201);
+  manualInspectionId = (await manualResponse.json()).inspection.id;
+  await managerPage.waitForURL((url) => url.pathname === `/inspections/${manualInspectionId}`);
+  await managerPage.getByText('Ручной', { exact: true }).waitFor();
+  workflow.manual_entry_ui = true;
+
+  await managerPage.goto(`${baseUrl}/alerts`, { waitUntil: 'domcontentloaded' });
+  const alertCard = managerPage.getByTestId(`alert-card-${apiData.availableAlert.id}`);
+  await alertCard.waitFor();
+  await alertCard.click();
+  await alertCard.getByRole('button', { name: 'Создать осмотр' }).click();
+  const alertDialog = managerPage.getByRole('dialog', { name: 'Создать осмотр' });
+  await alertDialog.waitFor();
+  await alertDialog.getByLabel('Причина осмотра').fill('TASK 217 браузерная проверка источника-предупреждения');
+  await alertDialog.getByLabel('Агроном').selectOption({ index: 1 });
+  const alertResponsePromise = managerPage.waitForResponse((response) =>
+    new URL(response.url()).pathname === '/api/anomaly-inspections'
+    && response.request().method() === 'POST');
+  await alertDialog.getByRole('button', { name: 'Создать осмотр', exact: true }).click();
+  const alertResponse = await alertResponsePromise;
+  assert.equal(alertResponse.status(), 201);
+  alertInspectionId = (await alertResponse.json()).inspection.id;
+  await managerPage.waitForURL((url) => url.pathname === `/inspections/${alertInspectionId}`);
+  await managerPage.getByText('Предупреждение', { exact: true }).waitFor();
+  workflow.alert_entry_ui = true;
+
+  const conflictContext = await browser.newContext({
+    viewport: { width: 390, height: 844 }, hasTouch: true,
+    geolocation: { longitude: apiData.sample.longitude, latitude: apiData.sample.latitude },
+    permissions: ['geolocation'],
+  });
+  const conflictPage = await conflictContext.newPage();
+  await conflictPage.addInitScript(instrumentation);
+  const conflictDiagnostics = diagnostics(conflictPage); allDiagnostics.push(conflictDiagnostics);
+  await loginPage(conflictPage, identities.agronomist, `/inspections/${manualInspectionId}`);
+  await conflictPage.getByRole('button', { name: 'Начать осмотр' }).click();
+  await conflictPage.getByRole('button', { name: 'Сохранить на сервере' }).waitFor();
+  await conflictPage.getByLabel('Причина').selectOption('water_stress');
+  await conflictPage.getByLabel('Выраженность').selectOption('moderate');
+  await conflictPage.getByRole('button', { name: 'Моя геопозиция' }).click();
+  await conflictPage.getByLabel('Затронутая площадь').fill('0.75');
+  await conflictPage.getByLabel('Наблюдения').fill('TASK 217 локальный черновик для детерминированного конфликта');
+  await conflictPage.getByLabel('Рекомендованное действие').fill('Обновить серверную версию до восстановления связи');
+  conflictDiagnostics.offline = true;
+  await conflictContext.setOffline(true);
+  await conflictPage.getByRole('button', { name: 'Сохранить на сервере' }).click();
+  await conflictPage.getByText('Ожидает синхронизации', { exact: true }).waitFor();
+  const conflictApi = await request.newContext({ baseURL: baseUrl });
+  try {
+    const auth = { Authorization: `Bearer ${apiData.agronomistToken}` };
+    const currentResponse = await conflictApi.get(`/api/anomaly-inspections/${manualInspectionId}`, { headers: auth });
+    assert.equal(currentResponse.status(), 200);
+    const current = await currentResponse.json();
+    const serverMutation = await conflictApi.put(`/api/anomaly-inspections/${manualInspectionId}/finding`, {
+      headers: auth,
+      data: {
+        expected_version: current.version,
+        inspected_at: new Date().toISOString(),
+        gps_point: { longitude: apiData.sample.longitude, latitude: apiData.sample.latitude },
+        gps_accuracy_m: 5,
+        cause: 'water_stress',
+        other_explanation: null,
+        severity: 'moderate',
+        affected_area_ha: 0.5,
+        affected_area_pct: null,
+        observations: 'TASK 217 серверная версия для конфликта синхронизации',
+        recommended_action: 'Сохранить серверную версию и показать конфликт клиенту',
+        sync_state: 'server',
+      },
+    });
+    assert.equal(serverMutation.status(), 200);
+  } finally {
+    await conflictApi.dispose();
+  }
+  conflictDiagnostics.expectedConflictPhase = true;
+  await conflictContext.setOffline(false); conflictDiagnostics.offline = false;
+  await conflictPage.getByText('Конфликт: серверная версия новее', { exact: true }).waitFor({ timeout: 15000 });
+  assert.equal(conflictDiagnostics.expectedConflictResponses, 1);
+  const conflictDrafts = await indexedDbRecords(conflictPage);
+  assert.equal(conflictDrafts.length, 1);
+  assert.equal(conflictDrafts[0].status, 'conflict');
+  workflow.offline_conflict_visible = true;
+  await conflictContext.close();
+
+  await managerPage.goto(`${baseUrl}/inspections/${inspectionId}`, { waitUntil: 'domcontentloaded' });
 
   const agronomistContext = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, geolocation: { longitude: apiData.sample.longitude, latitude: apiData.sample.latitude }, permissions: ['geolocation'] });
   const agronomistPage = await agronomistContext.newPage();
@@ -403,6 +517,7 @@ try {
     const detailInteractiveMs = performance.now() - detailStarted;
     await assertNoOverflow(page);
     const tinyControls = await page.evaluate(() => [...document.querySelectorAll('button,input,select,textarea')].filter((element) => {
+      if (element.classList.contains('sr-only')) return false;
       const box = element.getBoundingClientRect();
       return box.width > 0 && box.height > 0 && (box.width < 40 || box.height < 40);
     }).length);
@@ -460,6 +575,11 @@ try {
     authenticated_storage_persisted: false,
     uploaded_photo_bytes_in_evidence: false,
     inspection_id: inspectionId,
+    source_entry_ids: {
+      pixel_ndvi: inspectionId,
+      alert: alertInspectionId,
+      manual: manualInspectionId,
+    },
     acquisition: expectedAcquisition,
     workflow,
     viewports: viewportResults,
@@ -483,6 +603,8 @@ try {
       unexpected_same_origin_failures: 0,
       expected_offline_failures: allDiagnostics.reduce((sum, item) => sum + item.expectedOfflineFailures, 0),
       expected_navigation_aborts: allDiagnostics.reduce((sum, item) => sum + item.expectedAborts, 0),
+      expected_conflict_responses: allDiagnostics.reduce((sum, item) => sum + item.expectedConflictResponses, 0),
+      expected_conflict_console_errors: allDiagnostics.reduce((sum, item) => sum + item.expectedConflictConsoleErrors, 0),
     },
     duration_ms: Date.now() - startedAt,
   };

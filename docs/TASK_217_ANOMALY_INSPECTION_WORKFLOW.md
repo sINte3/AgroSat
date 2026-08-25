@@ -73,3 +73,27 @@ without overwriting the server. Logout removes drafts for the departing identity
 Repository contract tests cover schemas, authorization, state transitions, offline
 isolation, cleanup, and UI copy. Database-backed qualification and repository Playwright
 exercise the real API, PostGIS, private media path, responsive UI, and full lifecycle.
+
+## Qualification and evidence
+
+Qualification databases must be freshly created with names beginning exactly with
+`agrosat_r3_task217_`. The protected setup, execution, compatibility-repair, and drop
+helpers reject every other target before a create, migration, mutation, or drop. The
+fresh-database gate proves upgrade to `0013_anomaly_inspection_workflow`, downgrade to
+`0012_pixel_ndvi_workspace`, re-upgrade, `alembic current`, `alembic check`, and the
+single-head invariant. Runtime qualification then proves tenant and role boundaries,
+lifecycle validity, immutable audit history, PostGIS containment, source linkage,
+photo validation and cleanup, pagination bounds, and database integrity.
+
+Repository-owned Playwright uses the production frontend build and the isolated API;
+it does not intercept routes or inject mock business data. It exercises Pixel NDVI,
+alert, and manual creation entry points, the complete inspection and intervention
+lifecycle, photo upload/view/delete, offline IndexedDB persistence, deterministic
+reconnect conflict handling, and repeated MapLibre/object-URL cleanup. Responsive
+checks cover 1440x900, 1024x768, and 390x844 and capture console, page, network, backend
+5xx, overflow, target-size, and axe-critical diagnostics.
+
+Canonical evidence for this task is stored outside the repository under the existing
+TASK_217 run. The gate matrix maps each contract requirement to both its implementation
+and runtime proof. Static source assertions are supporting evidence only and are never
+used as substitutes for runtime PASS results.

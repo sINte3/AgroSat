@@ -112,6 +112,7 @@ function AlertCard({
 
   return (
     <div
+      data-testid={`alert-card-${alert.id}`}
       className={`rounded-lg border border-l-4 ${borderColor} transition-colors cursor-pointer`}
       onClick={() => {
         onToggle(alert.id);

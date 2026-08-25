@@ -134,13 +134,13 @@ export default function AnomalyInspectionsPage({ onNavigate, enterprises = [], s
   }
 
   if (selectedInspectionId) {
-    if (detailState === 'loading' || detailState === 'idle') return <div className="h-full overflow-y-auto p-5"><div className="mx-auto h-72 max-w-6xl animate-pulse rounded-xl bg-slate-200" aria-label="Загрузка осмотра" /></div>;
-    if (detailState === 'error' || !detail) return <div className="flex h-full items-center justify-center p-5"><div className="max-w-md text-center"><p role="alert" className="font-semibold text-red-900">{error}</p><button type="button" onClick={refreshDetail} className="mt-4 min-h-11 rounded-lg bg-green-700 px-4 font-bold text-white">Повторить</button></div></div>;
+    if (detailState === 'loading' || detailState === 'idle') return <div className="h-full overflow-y-auto px-5 pb-5 pt-20"><div className="mx-auto h-72 max-w-6xl animate-pulse rounded-xl bg-slate-200" aria-label="Загрузка осмотра" /></div>;
+    if (detailState === 'error' || !detail) return <div className="flex h-full items-center justify-center px-5 pb-5 pt-20"><div className="max-w-md text-center"><p role="alert" className="font-semibold text-red-900">{error}</p><button type="button" onClick={refreshDetail} className="mt-4 min-h-11 rounded-lg bg-green-700 px-4 font-bold text-white">Повторить</button></div></div>;
     return <AnomalyInspectionDetail detail={detail} onRefresh={refreshDetail} onBack={() => onNavigate('field-inspections')} />;
   }
 
   return (
-    <div className="h-full overflow-y-auto bg-slate-50 px-4 py-5 sm:px-6" data-testid="inspection-queue">
+    <div className="h-full overflow-y-auto bg-slate-50 px-4 pb-5 pt-20 sm:px-6" data-testid="inspection-queue">
       <div className="mx-auto max-w-7xl space-y-5">
         <div className="flex flex-wrap items-start justify-between gap-3"><div><h1 className="text-xl font-bold text-slate-950">Осмотры</h1><p className="mt-1 max-w-[72ch] text-sm text-slate-600">От аномалии к полевому подтверждению, действию и проверке результата.</p></div>{canCreate && <button type="button" onClick={() => setManualOpen((value) => !value)} aria-expanded={manualOpen} className="min-h-11 rounded-lg bg-green-700 px-4 font-bold text-white hover:bg-green-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-800 focus-visible:ring-offset-2">Новый ручной осмотр</button>}</div>
         {manualOpen && <form className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 sm:flex-row sm:items-end" onSubmit={(event) => { event.preventDefault(); const id = Number(manualFieldId); if (Number.isSafeInteger(id) && id > 0) setManualSource({ kind: 'manual', field_id: id, reason: 'Проверить состояние поля по ручному наблюдению', priority: 'normal' }); }}><label className="flex-1 text-sm font-semibold text-slate-900">ID поля<input type="number" min="1" required value={manualFieldId} onChange={(event) => setManualFieldId(event.target.value)} className="mt-1.5 min-h-11 w-full rounded-lg border border-slate-300 px-3 font-normal" /></label><button type="submit" className="min-h-11 rounded-lg border border-green-700 px-4 font-bold text-green-800">Продолжить</button></form>}
@@ -159,4 +159,3 @@ export default function AnomalyInspectionsPage({ onNavigate, enterprises = [], s
 
 function FilterSelect({ label, value, onChange, options }) { return <label className="min-w-[9rem] flex-1 text-xs font-semibold text-slate-700">{label}<select value={value} onChange={(event) => onChange(event.target.value)} className="mt-1 min-h-11 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm font-normal">{options.map(([optionValue, optionLabel]) => <option key={optionValue || 'all'} value={optionValue}>{optionLabel}</option>)}</select></label>; }
 function QueueMeta({ label, value, urgent }) { return <div className="min-w-0"><span className="block text-xs font-semibold text-slate-600">{label}</span><span className={`mt-1 block break-words text-sm font-bold ${urgent ? 'text-red-800' : 'text-slate-900'}`}>{value}</span></div>; }
-

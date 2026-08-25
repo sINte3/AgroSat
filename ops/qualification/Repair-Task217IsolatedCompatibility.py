@@ -11,7 +11,7 @@ import psycopg2
 from sqlalchemy.engine import make_url
 
 
-PREFIX = "agrosat_r3_d_anomaly_"
+PREFIX = "agrosat_r3_task217_"
 SOURCE_PREFIX = "agrosat_r3_d_pixel_ndvi_"
 
 

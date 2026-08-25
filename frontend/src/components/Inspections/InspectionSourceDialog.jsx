@@ -16,7 +16,6 @@ function localDateTime(days = 1) {
   const offset = date.getTimezoneOffset() * 60000;
   return new Date(date.getTime() - offset).toISOString().slice(0, 16);
 }
-
 function sourceLabel(kind) {
   return { pixel_ndvi: 'Пиксельный NDVI', alert: 'Предупреждение', manual: 'Ручной контекст' }[kind] || kind;
 }
@@ -162,4 +161,3 @@ export default function InspectionSourceDialog({ source, onClose, onCreated }) {
     </div>
   );
 }
-

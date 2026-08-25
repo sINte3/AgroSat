@@ -17,7 +17,7 @@ from psycopg2 import sql
 from sqlalchemy.engine import make_url
 
 
-TARGET_PREFIX = "agrosat_r3_d_anomaly_"
+TARGET_PREFIX = "agrosat_r3_task217_"
 SOURCE_PREFIX = "agrosat_r3_d_pixel_ndvi_"
 SENSITIVE = re.compile(r"(?i)(secret|token|password|api.?key|database.?url|authorization|cookie|pgpass)")
 
@@ -71,6 +71,7 @@ def main() -> int:
     parser.add_argument("--runtime-root", type=Path, required=True)
     parser.add_argument("--backend-root", type=Path, required=True)
     parser.add_argument("--resume-existing", action="store_true")
+    parser.add_argument("--create-mode", choices=("empty", "clone"), default="clone")
     args = parser.parse_args()
 
     assert_target(args.database_name)
@@ -96,11 +97,16 @@ def main() -> int:
                 raise RuntimeError("TASK217_DATABASE_ALREADY_EXISTS")
             if not exists:
                 assert_target(args.database_name)
-                cursor.execute(
-                    sql.SQL("CREATE DATABASE {} TEMPLATE {}").format(
-                        sql.Identifier(args.database_name), sql.Identifier(source_url.database)
+                if args.create_mode == "empty":
+                    cursor.execute(
+                        sql.SQL("CREATE DATABASE {}").format(sql.Identifier(args.database_name))
                     )
-                )
+                else:
+                    cursor.execute(
+                        sql.SQL("CREATE DATABASE {} TEMPLATE {}").format(
+                            sql.Identifier(args.database_name), sql.Identifier(source_url.database)
+                        )
+                    )
     finally:
         connection.close()
 
@@ -133,7 +139,10 @@ def main() -> int:
         "database": args.database_name,
         "database_prefix_valid": True,
         "database_is_production": False,
-        "source_database_class": "approved_task215_isolated_clone",
+        "source_database_class": (
+            "fresh_empty_database" if args.create_mode == "empty"
+            else "approved_task215_isolated_clone"
+        ),
         "revision": revision,
         "postgis": postgis,
         "field_4_scene_count": field_scene_count,

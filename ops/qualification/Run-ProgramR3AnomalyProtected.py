@@ -13,7 +13,7 @@ from dotenv import dotenv_values
 from sqlalchemy.engine import make_url
 
 
-PREFIX = "agrosat_r3_d_anomaly_"
+PREFIX = "agrosat_r3_task217_"
 SENSITIVE = re.compile(r"(?i)(secret|token|password|api.?key|database.?url|authorization|cookie|pgpass)")
 
 
@@ -24,6 +24,11 @@ def main() -> int:
     parser.add_argument("--media-root", type=Path, required=True)
     parser.add_argument("--cache-root", type=Path, required=True)
     parser.add_argument("--cwd", type=Path, required=True)
+    parser.add_argument(
+        "--environment",
+        choices=("task217-anomaly-qualification", "development"),
+        default="task217-anomaly-qualification",
+    )
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     if args.database_name == "agrosat" or not args.database_name.startswith(PREFIX):
@@ -40,7 +45,7 @@ def main() -> int:
     environment.update({
         "DATABASE_URL": source.set(database=args.database_name).render_as_string(hide_password=False),
         "AGROSAT_RUNTIME_ENV_FILE": str(runtime_env),
-        "ENVIRONMENT": "task217-anomaly-qualification",
+        "ENVIRONMENT": args.environment,
         "DEBUG": "false",
         "PUBLIC_REGISTRATION_ENABLED": "false",
         "WIALON_ENABLED": "false",
