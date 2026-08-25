@@ -210,7 +210,7 @@ $manifest = [ordered]@{
         "validate explicit release candidate and branch alignment",
         "validate Git-native source archive SHA-256 and release manifest",
         "materialize immutable candidate under authorized rehearsal root",
-        "apply migrations only to isolated agrosat_r3_rc_ database",
+        "apply migrations only to an authorized isolated release database",
         "launch loopback-only health and tenant/security smoke",
         "switch isolated current-release pointer",
         "validate backup and restore isolated database",
@@ -224,7 +224,8 @@ if ($WriteManifest) {
     }
     $allowedRoots = @(
         "C:\AgroSat_backups\PROGRAM_R3_FAST_TRACK_RELEASE_CANDIDATE\RUNS\",
-        "C:\AgroSat_backups\PROGRAM_R3_MEGA_RELEASE_REPAIR\"
+        "C:\AgroSat_backups\PROGRAM_R3_MEGA_RELEASE_REPAIR\",
+        "C:\AgroSat_backups\PROGRAM_R3_MACROSTAGE_D_PRODUCTION_RELEASE\RUNS\"
     )
     $resolvedOutput = [System.IO.Path]::GetFullPath($OutputPath)
     if (@($allowedRoots | Where-Object {

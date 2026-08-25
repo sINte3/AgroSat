@@ -43,7 +43,7 @@ def read_json(path):
 def fixture(tmp_path, health="success", restore="success"):
     candidate, prior = "a" * 40, "b" * 40
     prior_hash = "c" * 64
-    database = "agrosat_r3_rc_runtime"
+    database = "agrosat_r3_task218_runtime"
     root = tmp_path / "root with spaces"
     scripts = root / "scripts with spaces"
     scripts.mkdir(parents=True)
@@ -138,7 +138,7 @@ def test_health_recovery_identity_and_restore_path_fail_before_restore(tmp_path,
     elif case == "malformed": f["identity"].write_text("not-json")
     elif case == "backup": overrides["ValidatedBackupSha256"] = "d" * 64
     elif case == "sha": f["identity"].write_text(json.dumps({"backup_sha256": "d" * 64, "rehearsal_database": f["database"]}))
-    elif case == "database": f["identity"].write_text(json.dumps({"backup_sha256": f["backup_hash"], "rehearsal_database": "agrosat_r3_rc_other"}))
+    elif case == "database": f["identity"].write_text(json.dumps({"backup_sha256": f["backup_hash"], "rehearsal_database": "agrosat_r3_task218_other"}))
     else:
         outside = tmp_path / "outside restore.ps1"
         outside.write_text("param($RehearsalDatabase,$ValidatedBackup,$ReleaseCandidate)\n")

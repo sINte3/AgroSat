@@ -1,6 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$ProgramWorktree = 'C:\AgroSat_worktrees\program-r3-mega-repair',
+    [string]$ProgramBranch = 'task/program-r3-mega-repair',
+    [string]$AcceptedSourceBaseline = '40e8e379d9d29cb4bfb8afebdd9c489c19756fac',
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-f0-9]{40}$')][string]$ReleaseCandidate,
     [Parameter(Mandatory = $true)][string]$OutputDirectory
 )
@@ -10,11 +12,19 @@ $ErrorActionPreference = 'Stop'
 
 $worktree = [IO.Path]::GetFullPath($ProgramWorktree)
 $output = [IO.Path]::GetFullPath($OutputDirectory)
-if ($worktree -ne 'C:\AgroSat_worktrees\program-r3-mega-repair') { throw 'RELEASE_ARCHIVE_WORKTREE_MISMATCH' }
+$allowedWorktrees = @(
+    'C:\AgroSat_worktrees\program-r3-mega-repair',
+    'C:\AgroSat_worktrees\program-r3-macrostage-d-production-release'
+)
+if ($worktree -notin $allowedWorktrees) { throw 'RELEASE_ARCHIVE_WORKTREE_MISMATCH' }
 if ($output.StartsWith($worktree + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'RELEASE_ARCHIVE_OUTPUT_INSIDE_WORKTREE' }
-if (-not $output.StartsWith('C:\AgroSat_backups\PROGRAM_R3_FAST_TRACK_RELEASE_CANDIDATE\RUNS\', [StringComparison]::OrdinalIgnoreCase)) { throw 'RELEASE_ARCHIVE_OUTPUT_OUTSIDE_EVIDENCE_ROOT' }
+$allowedOutputRoots = @(
+    'C:\AgroSat_backups\PROGRAM_R3_FAST_TRACK_RELEASE_CANDIDATE\RUNS\',
+    'C:\AgroSat_backups\PROGRAM_R3_MACROSTAGE_D_PRODUCTION_RELEASE\RUNS\'
+)
+if (@($allowedOutputRoots | Where-Object { $output.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }).Count -eq 0) { throw 'RELEASE_ARCHIVE_OUTPUT_OUTSIDE_EVIDENCE_ROOT' }
 if ((& git -C $worktree rev-parse HEAD).Trim() -cne $ReleaseCandidate) { throw 'RELEASE_ARCHIVE_CANDIDATE_NOT_HEAD' }
-if ((& git -C $worktree rev-parse origin/task/program-r3-mega-repair).Trim() -cne $ReleaseCandidate) { throw 'RELEASE_ARCHIVE_ORIGIN_NOT_ALIGNED' }
+if ((& git -C $worktree rev-parse "origin/$ProgramBranch").Trim() -cne $ReleaseCandidate) { throw 'RELEASE_ARCHIVE_ORIGIN_NOT_ALIGNED' }
 if (@(& git -C $worktree status --porcelain=v1 --untracked-files=all).Count -ne 0) { throw 'RELEASE_ARCHIVE_WORKTREE_NOT_CLEAN' }
 
 $tracked = @(& git -C $worktree ls-tree -r --name-only $ReleaseCandidate)
@@ -26,7 +36,7 @@ if (Test-Path -LiteralPath $archivePath) { throw 'RELEASE_ARCHIVE_ALREADY_EXISTS
 & git -C $worktree archive --format=zip --output=$archivePath $ReleaseCandidate
 if ($LASTEXITCODE -ne 0) { throw 'RELEASE_ARCHIVE_GIT_ARCHIVE_FAILED' }
 
-$manifest = [ordered]@{ schema_version=1; git_sha=$ReleaseCandidate; branch='task/program-r3-mega-repair'; accepted_source_baseline='40e8e379d9d29cb4bfb8afebdd9c489c19756fac'; created_utc=(Get-Date).ToUniversalTime().ToString('o'); archive_contract_version=1; first_pilot_feature_state=@{ sentinel='ENABLED'; wialon='DISABLED'; telegram='DISABLED'; mock_mode='DISABLED_FAIL_CLOSED'; web_embedded_scheduler='DISABLED'; collectors='SEPARATE_CLI_ONLY' } }
+$manifest = [ordered]@{ schema_version=1; git_sha=$ReleaseCandidate; branch=$ProgramBranch; accepted_source_baseline=$AcceptedSourceBaseline; created_utc=(Get-Date).ToUniversalTime().ToString('o'); archive_contract_version=1; first_pilot_feature_state=@{ sentinel='ENABLED'; wialon='DISABLED'; telegram='DISABLED'; mock_mode='DISABLED_FAIL_CLOSED'; web_embedded_scheduler='DISABLED'; collectors='SEPARATE_CLI_ONLY' } }
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tempRoot | Out-Null
 try {
