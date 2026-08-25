@@ -70,6 +70,12 @@ def fingerprint(value: str) -> str:
 def classify(path: str, rule: str, value: str) -> str:
     lowered = value.casefold()
     if (
+        path == "backend/tests/test_program_r1_live_sentinel_qualification.py"
+        and rule == "private_key_header"
+        and value == "-----BEGIN PRIVATE KEY-----"
+    ):
+        return "verified_sanitizer_test_fixture"
+    if (
         path.startswith("ops/qualification/")
         and rule == "credentialed_database_url"
         and ("$(" in value or "${" in value)
