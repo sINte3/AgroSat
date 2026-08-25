@@ -3,6 +3,7 @@ param(
     [string]$ProgramWorktree = "C:\AgroSat_worktrees\program-r3-mega-repair",
     [string]$SourceCheckout = "C:\AgroSat",
     [string]$SourceBaseline = "40e8e379d9d29cb4bfb8afebdd9c489c19756fac",
+    [string]$SourceCheckoutBaseline = "",
     [string]$ProgramBranch = "task/program-r3-mega-repair",
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-f0-9]{40}$')][string]$ReleaseCandidate,
     [string]$SourceArchive = "",
@@ -94,6 +95,10 @@ if ([System.IO.Path]::GetFullPath($SourceCheckout) -ne "C:\AgroSat") {
 if ($SourceBaseline -notmatch "^[a-f0-9]{40}$") {
     throw "Source baseline is not a full Git SHA."
 }
+if (-not $SourceCheckoutBaseline) { $SourceCheckoutBaseline = $SourceBaseline }
+if ($SourceCheckoutBaseline -notmatch "^[a-f0-9]{40}$") {
+    throw "Source checkout baseline is not a full Git SHA."
+}
 if (($SourceArchive -and -not $SourceArchiveSha256) -or (-not $SourceArchive -and $SourceArchiveSha256)) { throw "ARCHIVE_IDENTITY_INCOMPLETE" }
 if ($SourceArchiveSha256 -and $SourceArchiveSha256 -notmatch "^[a-fA-F0-9]{64}$") { throw "SOURCE_ARCHIVE_HASH_INVALID" }
 
@@ -155,7 +160,7 @@ $commitCount = [string](
 
 $sourceMainUnchanged = (
     $sourceBranch -eq "main" -and
-    $sourceHead -eq $SourceBaseline -and
+    $sourceHead -eq $SourceCheckoutBaseline -and
     $sourceOriginHead -eq $SourceBaseline -and
     $sourceStatus.Count -eq 0
 )
@@ -178,6 +183,9 @@ $manifest = [ordered]@{
     schema_version = 3
     generated_at = (Get-Date).ToUniversalTime().ToString("o")
     source_baseline = $SourceBaseline
+    source_checkout_baseline = $SourceCheckoutBaseline
+    source_checkout_head = $sourceHead
+    source_origin_main = $sourceOriginHead
     program_branch = $ProgramBranch
     observed_branch = $branch
     release_candidate = $ReleaseCandidate
