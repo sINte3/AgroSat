@@ -184,6 +184,19 @@ MATRIX = (
     contract("GET", "/api/monitoring/candidates", tenant_scope="enterprise_filter", cross_tenant=404),
     contract("POST", "/api/monitoring/candidates/{candidate_id}/transition", GLOBAL_ROLES, "candidate_object", write=True, cross_tenant=404, unknown_object=404),
     contract("POST", "/api/monitoring/candidates/{candidate_id}/inspection", GLOBAL_ROLES, "candidate_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/agronomy-plans", MUTATING_ROLES, "inspection_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("GET", "/api/agronomy-plans/queue", tenant_scope="enterprise_filter", cross_tenant=404),
+    contract("GET", "/api/agronomy-plans/summary", tenant_scope="enterprise_filter", cross_tenant=404),
+    contract("GET", "/api/agronomy-plans/export.csv", tenant_scope="enterprise_filter", cross_tenant=404),
+    contract("GET", "/api/agronomy-plans/{plan_id}", tenant_scope="agronomy_plan_object", cross_tenant=404, unknown_object=404),
+    contract("PUT", "/api/agronomy-plans/{plan_id}", MUTATING_ROLES, "agronomy_plan_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/agronomy-plans/{plan_id}/transition", MUTATING_ROLES, "agronomy_plan_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/agronomy-plans/{plan_id}/work", MUTATING_ROLES, "agronomy_plan_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/agronomy-plans/{plan_id}/work/{item_id}/transition", MUTATING_ROLES, "agronomy_plan_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/agronomy-plans/{plan_id}/work/{item_id}/evidence", MUTATING_ROLES, "agronomy_plan_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("GET", "/api/agronomy-plans/{plan_id}/evidence/{photo_id}", tenant_scope="agronomy_plan_object", cross_tenant=404, unknown_object=404),
+    contract("DELETE", "/api/agronomy-plans/{plan_id}/evidence/{photo_id}", MUTATING_ROLES, "agronomy_plan_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("POST", "/api/agronomy-plans/{plan_id}/reevaluate", MUTATING_ROLES, "agronomy_plan_object", write=True, cross_tenant=404, unknown_object=404),
 )
 
 
@@ -198,7 +211,7 @@ def openapi_operations():
 
 def test_matrix_covers_every_openapi_operation_exactly():
     expected = {(item.method, item.path) for item in MATRIX}
-    assert len(expected) == len(MATRIX) == 125
+    assert len(expected) == len(MATRIX) == 138
     assert expected == set(openapi_operations())
 
 
@@ -238,6 +251,7 @@ def test_object_contracts_hide_cross_tenant_existence():
         "productivity_run_object",
         "variable_rate_object",
         "candidate_object",
+        "agronomy_plan_object",
     }
     for item in MATRIX:
         if item.tenant_scope in object_scopes:

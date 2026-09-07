@@ -1,10 +1,10 @@
  [CmdletBinding()]
 param(
-    [string]$ProgramWorktree = "C:\AgroSat_worktrees\program-r3-macrostage-e-autonomous-monitoring",
+    [string]$ProgramWorktree = "C:\AgroSat_worktrees\program-r3-macrostage-f-closed-loop-agronomy",
     [string]$SourceCheckout = "C:\AgroSat",
-    [string]$SourceBaseline = "f2a12f92f58829d9dfc2ef642c805175d863b34f",
-    [string]$SourceCheckoutBaseline = "40e8e379d9d29cb4bfb8afebdd9c489c19756fac",
-    [string]$ProgramBranch = "task/program-r3-macrostage-e-autonomous-monitoring",
+    [string]$SourceBaseline = "f3a95f4e4d97b025a967ae3812603e5aae0d969d",
+    [string]$SourceCheckoutBaseline = "f3a95f4e4d97b025a967ae3812603e5aae0d969d",
+    [string]$ProgramBranch = "task/program-r3-macrostage-f-closed-loop-agronomy",
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-f0-9]{40}$')][string]$ReleaseCandidate,
     [string]$SourceArchive = "",
     [string]$SourceArchiveSha256 = "",
@@ -85,7 +85,8 @@ function Get-RepositoryRuntimeContract {
 $allowedProgramWorktrees = @(
     "C:\AgroSat_worktrees\program-r3-mega-repair",
     "C:\AgroSat_worktrees\program-r3-macrostage-d-production-release",
-    "C:\AgroSat_worktrees\program-r3-macrostage-e-autonomous-monitoring"
+    "C:\AgroSat_worktrees\program-r3-macrostage-e-autonomous-monitoring",
+    "C:\AgroSat_worktrees\program-r3-macrostage-f-closed-loop-agronomy"
 )
 if ([System.IO.Path]::GetFullPath($ProgramWorktree) -notin $allowedProgramWorktrees) {
     throw "Program worktree does not match the PROGRAM R3 contract."

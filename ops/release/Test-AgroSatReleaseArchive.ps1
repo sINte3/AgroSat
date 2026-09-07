@@ -3,7 +3,7 @@ param(
     [Parameter(Mandatory = $true)][string]$ArchivePath,
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$ExpectedSha256,
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-f0-9]{40}$')][string]$ReleaseCandidate,
-    [string]$ExpectedBranch = 'task/program-r3-macrostage-e-autonomous-monitoring',
+    [string]$ExpectedBranch = 'task/program-r3-macrostage-f-closed-loop-agronomy',
     [string]$DestinationPath = ''
 )
 

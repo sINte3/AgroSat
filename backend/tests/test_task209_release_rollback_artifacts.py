@@ -80,8 +80,8 @@ def test_release_archive_validator_covers_safe_immutable_archive_contract(tmp_pa
     manifest = {
         "schema_version": 1,
         "git_sha": candidate,
-        "branch": "task/program-r3-macrostage-e-autonomous-monitoring",
-        "accepted_source_baseline": "f2a12f92f58829d9dfc2ef642c805175d863b34f",
+        "branch": "task/program-r3-macrostage-f-closed-loop-agronomy",
+        "accepted_source_baseline": "f3a95f4e4d97b025a967ae3812603e5aae0d969d",
         "created_utc": "2026-08-17T00:00:00Z",
     }
     archive = tmp_path / "archive with spaces.zip"
@@ -115,8 +115,8 @@ def test_release_archive_validator_fails_closed_for_identity_and_unsafe_path(tmp
     manifest = {
         "schema_version": 1,
         "git_sha": candidate,
-        "branch": "task/program-r3-macrostage-e-autonomous-monitoring",
-        "accepted_source_baseline": "f2a12f92f58829d9dfc2ef642c805175d863b34f",
+        "branch": "task/program-r3-macrostage-f-closed-loop-agronomy",
+        "accepted_source_baseline": "f3a95f4e4d97b025a967ae3812603e5aae0d969d",
         "created_utc": "2026-08-17T00:00:00Z",
     }
     with zipfile.ZipFile(archive, "w") as package:
@@ -156,10 +156,10 @@ def test_manifest_preview_proves_source_and_program_integrity():
         result = powershell("New-ReleaseManifest.ps1", "-ReleaseCandidate", candidate)
         report = json.loads(result.stdout)
     assert report["source_baseline"] == (
-        "f2a12f92f58829d9dfc2ef642c805175d863b34f"
+        "f3a95f4e4d97b025a967ae3812603e5aae0d969d"
     )
-    assert report["program_branch"] == "task/program-r3-macrostage-e-autonomous-monitoring"
-    assert report["observed_branch"] == "task/program-r3-macrostage-e-autonomous-monitoring"
+    assert report["program_branch"] == "task/program-r3-macrostage-f-closed-loop-agronomy"
+    assert report["observed_branch"] == "task/program-r3-macrostage-f-closed-loop-agronomy"
     assert report["release_candidate"] == candidate
     assert report["program_head"] == candidate
     assert report["origin_program_head"] == candidate
@@ -167,7 +167,7 @@ def test_manifest_preview_proves_source_and_program_integrity():
     assert report["origin_aligned"] is True
     assert report["production_deployed"] is False
     assert report["production_database_changed"] is False
-    assert report["alembic_head"] == "0014_autonomous_satellite_monitoring"
+    assert report["alembic_head"] == "0015_closed_loop_agronomy"
     assert report["alembic_head_count"] == 1
     assert report["required_runtime_versions"] == {
         "python": "3.11+",
