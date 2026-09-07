@@ -736,7 +736,19 @@ def run(
                     "inserted_candidates": 0, "automatic_inspections": 0,
                     "spike_guard_triggered": False,
                 }
-                summary["monitoring"] = {"freshness_rows": freshness_count, **anomaly}
+                verification = {
+                    "eligible": 0, "improved": 0, "unchanged": 0, "worsened": 0,
+                    "pending_quality_provider": 0, "conflicts": 0, "failures": 0,
+                    "reopened": 0,
+                }
+                if final_code in {0, 1}:
+                    from database import SessionLocal
+                    from services.closed_loop_agronomy import reconcile_pending
+                    verification = reconcile_pending(SessionLocal, limit=100)
+                summary["monitoring"] = {
+                    "freshness_rows": freshness_count, **anomaly,
+                    "verifications": verification,
+                }
                 finish_apply_run(
                     apply_run, exit_code=final_code, provider_status=status,
                     counters={**aggregate_counters(summary), **summary["monitoring"]},

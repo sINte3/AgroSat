@@ -257,7 +257,7 @@ def follow_up(db, actor, plan, reason, key):
         'title':'Повторный осмотр по плану '+str(plan['id']), 'instructions':reason, 'source_reason':reason,
         'priority':plan['priority'], 'status':'new', 'follow_up_of_id':plan['inspection_id'],
     })
-    inspections._audit(db, actor, inspection, 'inspection_created', inspection['version'], {'plan_id':plan['id'], 'reason':reason}, key=request_key)
+    inspections._audit(db, actor, inspection, 'inspection_created', inspection['version'], {'reason':reason})
     return inspection['id']
 
 

@@ -15,14 +15,16 @@ $output = [IO.Path]::GetFullPath($OutputDirectory)
 $allowedWorktrees = @(
     'C:\AgroSat_worktrees\program-r3-mega-repair',
     'C:\AgroSat_worktrees\program-r3-macrostage-d-production-release',
-    'C:\AgroSat_worktrees\program-r3-macrostage-e-autonomous-monitoring'
+    'C:\AgroSat_worktrees\program-r3-macrostage-e-autonomous-monitoring',
+    'C:\AgroSat_worktrees\program-r3-macrostage-f-closed-loop-agronomy'
 )
 if ($worktree -notin $allowedWorktrees) { throw 'RELEASE_ARCHIVE_WORKTREE_MISMATCH' }
 if ($output.StartsWith($worktree + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'RELEASE_ARCHIVE_OUTPUT_INSIDE_WORKTREE' }
 $allowedOutputRoots = @(
     'C:\AgroSat_backups\PROGRAM_R3_FAST_TRACK_RELEASE_CANDIDATE\RUNS\',
     'C:\AgroSat_backups\PROGRAM_R3_MACROSTAGE_D_PRODUCTION_RELEASE\RUNS\',
-    'C:\AgroSat_backups\PROGRAM_R3_MACROSTAGE_E_AUTONOMOUS_MONITORING\RUNS\'
+    'C:\AgroSat_backups\PROGRAM_R3_MACROSTAGE_E_AUTONOMOUS_MONITORING\RUNS\',
+    'C:\AgroSat_backups\PROGRAM_R3_MACROSTAGE_F_CLOSED_LOOP_AGRONOMY\RUNS\'
 )
 if (@($allowedOutputRoots | Where-Object { $output.StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }).Count -eq 0) { throw 'RELEASE_ARCHIVE_OUTPUT_OUTSIDE_EVIDENCE_ROOT' }
 if ((& git -C $worktree rev-parse HEAD).Trim() -cne $ReleaseCandidate) { throw 'RELEASE_ARCHIVE_CANDIDATE_NOT_HEAD' }

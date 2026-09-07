@@ -43,6 +43,22 @@
         "verification history",
         "operational audit events"
       ]
+    },
+    {
+      "path": "backend/alembic/versions/0015_closed_loop_agronomy.py",
+      "revision": "0015_closed_loop_agronomy",
+      "downgrade_safety": "destructive_after_closed_loop_data",
+      "safe_before_data": true,
+      "strategy_after_data": "restore_validated_pre_task220_backup_or_roll_forward",
+      "human_approval_required": true,
+      "production_applied": false,
+      "data_at_risk": [
+        "agronomy plans",
+        "agronomy work items",
+        "agronomy verification history",
+        "agronomy audit events",
+        "work evidence bindings"
+      ]
     }
   ]
 }

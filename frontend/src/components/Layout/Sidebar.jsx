@@ -11,6 +11,7 @@ const NAV_ITEMS = [
   { key: 'monitoring', icon: MonitoringIcon },
   { key: 'field-attention', icon: AttentionIcon },
   { key: 'field-inspections', icon: InspectionIcon },
+  { key: 'agronomy-plans', icon: AgronomyIcon },
   { key: 'alerts', icon: BellIcon },
   { key: 'enterprises', icon: BuildingIcon },
   { key: 'reports', icon: ReportIcon },
@@ -173,6 +174,10 @@ function AttentionIcon({ className }) {
 
 function InspectionIcon({ className }) {
   return <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className={className}><path d="M9 5h6m-6 4h6m-6 4h3M7 3h10a2 2 0 012 2v14H5V5a2 2 0 012-2zM9 19v2m6-2v2"/></svg>;
+}
+
+function AgronomyIcon({ className }) {
+  return <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className={className}><path d="M4 5h16v14H4zM8 9h8M8 13h5M7 5V3m10 2V3M15 16l2 2 3-4"/></svg>;
 }
 
 function ReportIcon({ className }) {

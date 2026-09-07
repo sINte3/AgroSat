@@ -17,6 +17,7 @@ import AnomalyInspectionsPage from './pages/AnomalyInspectionsPage';
 import LoginPage from './pages/LoginPage';
 import UnauthorizedPage from './pages/UnauthorizedPage';
 import MonitoringPage from './pages/MonitoringPage';
+import AgronomyPlansPage from './pages/AgronomyPlansPage';
 import { getCachedEnterprises } from './api/client';
 import { getRoleDefaultPath, isViewAllowedForRole } from './config/roleAccess';
 
@@ -27,6 +28,7 @@ const PATH_VIEW_MAP = {
   '/attention': 'field-attention',
   '/inspections': 'field-inspections',
   '/monitoring': 'monitoring',
+  '/agronomy-plans': 'agronomy-plans',
   '/enterprises': 'enterprises',
   '/reports': 'reports',
   '/login': 'login',
@@ -46,6 +48,11 @@ const resolvePathname = (pathname) => {
   if (inspectionMatch) {
     const selectedInspectionId = parsePositiveId(inspectionMatch[1]);
     if (selectedInspectionId) return { view: 'field-inspection-detail', selectedInspectionId, selectedFieldId: null, selectedEnterpriseId: null };
+  }
+  const agronomyMatch = pathname.match(/^\/agronomy-plans\/(\d+)$/);
+  if (agronomyMatch) {
+    const selectedPlanId = parsePositiveId(agronomyMatch[1]);
+    if (selectedPlanId) return { view: 'agronomy-plans', selectedPlanId, selectedFieldId: null, selectedEnterpriseId: null, selectedInspectionId: null };
   }
   const analyticsMatch = pathname.match(/^\/fields\/(\d+)\/analytics$/);
   if (analyticsMatch) {
@@ -76,6 +83,7 @@ const resolvePathname = (pathname) => {
     selectedFieldId: null,
     selectedEnterpriseId: null,
     selectedInspectionId: null,
+    selectedPlanId: null,
   };
 };
 
@@ -88,6 +96,7 @@ function AppLayout() {
   const [selectedFieldId, setSelectedFieldId] = useState(initialRoute.selectedFieldId);
   const [selectedEnterpriseId, setSelectedEnterpriseId] = useState(initialRoute.selectedEnterpriseId);
   const [selectedInspectionId, setSelectedInspectionId] = useState(initialRoute.selectedInspectionId);
+  const [selectedPlanId, setSelectedPlanId] = useState(initialRoute.selectedPlanId);
   const [enterprises, setEnterprises] = useState([]);
   const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
   const closeMobileNavigation = useCallback(() => setMobileNavigationOpen(false), []);
@@ -108,6 +117,7 @@ function AppLayout() {
     setSelectedFieldId(route.selectedFieldId);
     setSelectedEnterpriseId(route.selectedEnterpriseId);
     setSelectedInspectionId(route.selectedInspectionId);
+    setSelectedPlanId(route.selectedPlanId);
   }, [location.pathname]);
 
   const handleFieldClick = useCallback((fieldId) => {
@@ -181,6 +191,8 @@ function AppLayout() {
         setView('field-inspections'); setSelectedInspectionId(null); navigate('/inspections'); break;
       case 'monitoring':
         setView('monitoring'); navigate('/monitoring'); break;
+      case 'agronomy-plans':
+        setView('agronomy-plans'); setSelectedPlanId(parsePositiveId(id)); navigate(id ? `/agronomy-plans/${id}` : '/agronomy-plans'); break;
       case 'field-inspection-detail': {
         const validInspectionId = parsePositiveId(id); if (!validInspectionId) break;
         setView('field-inspection-detail'); setSelectedInspectionId(validInspectionId); navigate(`/inspections/${validInspectionId}`); break;
@@ -226,6 +238,7 @@ function AppLayout() {
       case 'field-attention': return { title: 'Требуют внимания' };
       case 'field-inspections': return { title: 'Осмотры полей' };
       case 'monitoring': return { title: 'Автономный мониторинг', subtitle: 'Свежесть, аномалии и решения оператора' };
+      case 'agronomy-plans': return { title: 'Меры и контроль', subtitle: selectedPlanId ? `План #${selectedPlanId}` : 'Решения, работы и проверка результата' };
       case 'field-inspection-detail': return { title: 'Осмотры полей', subtitle: selectedInspectionId ? `Осмотр #${selectedInspectionId}` : null };
       case 'reports':     return { title: 'Отчёты' };
       case 'enterprise-detail': return { title: 'Предприятие', subtitle: selectedEnterpriseId ? `#${selectedEnterpriseId}` : null };
@@ -266,6 +279,8 @@ function AppLayout() {
         return <AnomalyInspectionsPage onNavigate={handleNavigate} enterprises={enterprises} selectedInspectionId={selectedInspectionId} />;
       case 'monitoring':
         return <MonitoringPage onNavigate={handleNavigate} enterprises={enterprises} />;
+      case 'agronomy-plans':
+        return <AgronomyPlansPage onNavigate={handleNavigate} enterprises={enterprises} selectedPlanId={selectedPlanId} />;
       case 'enterprises':
         return <EnterprisesPage onNavigate={handleNavigate} />;
       case 'enterprise-detail':

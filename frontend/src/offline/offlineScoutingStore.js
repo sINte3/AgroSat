@@ -236,6 +236,30 @@ export async function getOfflineDraft(scope, inspectionId) {
   return record?.scope === scope ? record : null;
 }
 
+export async function saveAgronomyDraft(user, planId, data) {
+  const scope = offlineScope(user);
+  const id = positiveId(planId);
+  if (!scope || !id) throw new Error('agronomy plan scope is required');
+  const record = { key: `${scope}:agronomy:${id}`, scope, kind: 'agronomy-draft', planId: id, ...data, updatedAt: new Date().toISOString(), schemaVersion: DATABASE_VERSION };
+  await put(DRAFTS, record);
+  await prune(DRAFTS, scope, MAX_DRAFTS);
+  return record;
+}
+
+export async function getAgronomyDraft(user, planId) {
+  const scope = offlineScope(user);
+  const id = positiveId(planId);
+  if (!scope || !id) return null;
+  const record = await storeRequest(DRAFTS, 'readonly', store => store.get(`${scope}:agronomy:${id}`));
+  return record?.scope === scope && record?.kind === 'agronomy-draft' ? record : null;
+}
+
+export async function removeAgronomyDraft(user, planId) {
+  const scope = offlineScope(user);
+  const id = positiveId(planId);
+  if (scope && id) await remove(DRAFTS, `${scope}:agronomy:${id}`);
+}
+
 export async function enqueueOfflineDraft(draft) {
   if (!draft?.scope || !positiveId(draft?.inspectionId)) throw new Error('invalid offline draft');
   const queued = {
