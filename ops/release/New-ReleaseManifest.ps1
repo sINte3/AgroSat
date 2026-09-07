@@ -3,7 +3,7 @@ param(
     [string]$ProgramWorktree = "C:\AgroSat_worktrees\program-r3-macrostage-f-closed-loop-agronomy",
     [string]$SourceCheckout = "C:\AgroSat",
     [string]$SourceBaseline = "f3a95f4e4d97b025a967ae3812603e5aae0d969d",
-    [string]$SourceCheckoutBaseline = "f3a95f4e4d97b025a967ae3812603e5aae0d969d",
+    [string]$SourceCheckoutBaseline = "40e8e379d9d29cb4bfb8afebdd9c489c19756fac",
     [string]$ProgramBranch = "task/program-r3-macrostage-f-closed-loop-agronomy",
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-f0-9]{40}$')][string]$ReleaseCandidate,
     [string]$SourceArchive = "",
