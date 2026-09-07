@@ -126,6 +126,7 @@ from api.variable_rate_recommendations import (
 from api.commercial_tenant import router as commercial_tenant_router
 from api.anomaly_inspections import router as anomaly_inspections_router
 from api.autonomous_monitoring import router as autonomous_monitoring_router
+from api.closed_loop_agronomy import router as closed_loop_agronomy_router
 
 app.include_router(auth_router)
 app.include_router(enterprises_router)
@@ -161,6 +162,7 @@ app.include_router(variable_rate_recommendations_router)
 app.include_router(commercial_tenant_router)
 app.include_router(anomaly_inspections_router)
 app.include_router(autonomous_monitoring_router)
+app.include_router(closed_loop_agronomy_router)
 
 
 # ─── Базовые эндпоинты ───────────────────────────────────────────────────────

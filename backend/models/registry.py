@@ -9,3 +9,7 @@ from models.autonomous_monitoring import register_autonomous_monitoring
 
 register_program_r3_schema()
 register_autonomous_monitoring()
+
+from models.closed_loop_agronomy import register_closed_loop_agronomy
+
+register_closed_loop_agronomy()
