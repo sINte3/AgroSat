@@ -13,3 +13,7 @@ register_autonomous_monitoring()
 from models.closed_loop_agronomy import register_closed_loop_agronomy
 
 register_closed_loop_agronomy()
+
+from models.operational_center import register_operational_center
+
+register_operational_center()
