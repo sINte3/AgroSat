@@ -304,11 +304,26 @@ def main() -> int:
         if completed["status"] != "pending_verification":
             raise AssertionError("completed work must await satellite verification")
 
+        reconciliation_passes = []
+        for _attempt in range(20):
+            with SessionLocal() as session:
+                reconciliation = reconcile_notifications(
+                    session, apply=True, limit=500, as_of=now
+                )
+            reconciliation_passes.append(reconciliation)
+            if reconciliation["created"] == 0:
+                break
+        if (
+            reconciliation_passes[0]["created"] < 1
+            or reconciliation_passes[-1]["created"] != 0
+            or len(reconciliation_passes) == 20
+        ):
+            raise AssertionError("notification reconciliation did not drain bounded batches")
         with SessionLocal() as session:
-            first_reconcile = reconcile_notifications(session, apply=True, limit=500, as_of=now)
-        with SessionLocal() as session:
-            second_reconcile = reconcile_notifications(session, apply=True, limit=500, as_of=now)
-        if first_reconcile["created"] < 1 or second_reconcile["created"] != 0:
+            idempotent_replay = reconcile_notifications(
+                session, apply=True, limit=500, as_of=now
+            )
+        if idempotent_replay["created"] != 0:
             raise AssertionError("notification reconciliation is not idempotent")
 
         current["actor"] = actors["manager"]
@@ -532,8 +547,8 @@ def main() -> int:
             "telematics_status": "unsupported",
             "wialon_enabled": False,
             "telegram_enabled": False,
-            "first_reconcile": first_reconcile,
-            "second_reconcile": second_reconcile,
+            "reconciliation_passes": reconciliation_passes,
+            "idempotent_replay": idempotent_replay,
             "notification_transition_replayed": True,
             "cross_tenant_non_enumeration": 2,
             "viewer_write_denials": 1,

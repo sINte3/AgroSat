@@ -51,6 +51,9 @@ def test_candidate_contract_is_bounded_and_has_every_required_type():
     assert "u.is_active=true" in sql
     assert "u.role IN ('admin','manager','agronomist')" in sql
     assert "viewer" not in sql
+    assert "NOT EXISTS (" in sql
+    assert "existing.provenance->>'source_cycle'=recipients.source_cycle" in sql
+    assert sql.index("NOT EXISTS (") < sql.rindex("LIMIT :limit")
 
 
 def test_resolution_contract_is_source_owned_and_bounded():

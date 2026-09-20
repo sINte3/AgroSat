@@ -186,7 +186,16 @@ WITH facts AS (
         (u.id=facts.assigned_to_id OR u.role='admin' OR u.role='manager'))
     )
 )
-SELECT * FROM recipients
+SELECT recipients.* FROM recipients
+WHERE NOT EXISTS (
+  SELECT 1 FROM operational_notifications existing
+  WHERE existing.enterprise_id=recipients.enterprise_id
+    AND existing.recipient_user_id=recipients.recipient_user_id
+    AND existing.notification_type=recipients.notification_type
+    AND existing.source_kind=recipients.source_kind
+    AND existing.source_id=recipients.source_id
+    AND existing.provenance->>'source_cycle'=recipients.source_cycle
+)
 ORDER BY enterprise_id,notification_type,source_kind,source_id,recipient_user_id
 LIMIT :limit
 """
