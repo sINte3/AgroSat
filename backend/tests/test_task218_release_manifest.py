@@ -29,6 +29,13 @@ def test_task218_manifest_separates_origin_main_from_local_checkout_identity():
 
     candidate = git(REPOSITORY, "rev-parse", "HEAD")
     branch = git(REPOSITORY, "branch", "--show-current")
+    origin_branch = subprocess.run(
+        ["git", "-C", str(REPOSITORY), "rev-parse", "--verify", f"origin/{branch}"],
+        capture_output=True,
+        text=True,
+    )
+    if origin_branch.returncode != 0:
+        pytest.skip("release manifest requires the task branch to be pushed in G4")
     source_head = git(SOURCE_CHECKOUT, "rev-parse", "HEAD")
     origin_main = git(REPOSITORY, "rev-parse", "origin/main")
     result = subprocess.run(

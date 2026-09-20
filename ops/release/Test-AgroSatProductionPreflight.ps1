@@ -21,6 +21,7 @@ $root = [IO.Path]::GetFullPath($RehearsalRoot)
 $task218Root = 'C:\AgroSat_backups\PROGRAM_R3_MACROSTAGE_D_PRODUCTION_RELEASE\RUNS\'
 $task219Root = 'C:\AgroSat_backups\PROGRAM_R3_MACROSTAGE_E_AUTONOMOUS_MONITORING\RUNS\'
 $task220Root = 'C:\AgroSat_backups\PROGRAM_R3_MACROSTAGE_F_CLOSED_LOOP_AGRONOMY\RUNS\'
+$task221Root = 'C:\AgroSat_backups\PROGRAM_R3_MACROSTAGE_G_OPERATIONAL_COMMAND_CENTER\RUNS\'
 $legacyRoot = (
     $root.StartsWith('C:\AgroSat_rehearsal\PROGRAM_R3_MEGA_RELEASE_REPAIR\RUNS\', [StringComparison]::OrdinalIgnoreCase) -or
     $root.StartsWith('C:\AgroSat_backups\PROGRAM_R3_FAST_TRACK_RELEASE_CANDIDATE\RUNS\', [StringComparison]::OrdinalIgnoreCase)
@@ -28,9 +29,12 @@ $legacyRoot = (
 $task218 = $root.StartsWith($task218Root, [StringComparison]::OrdinalIgnoreCase)
 $task219 = $root.StartsWith($task219Root, [StringComparison]::OrdinalIgnoreCase)
 $task220 = $root.StartsWith($task220Root, [StringComparison]::OrdinalIgnoreCase)
-if (-not ($legacyRoot -or $task218 -or $task219 -or $task220)) { throw 'REHEARSAL_ROOT_GUARD_FAILED' }
+$task221 = $root.StartsWith($task221Root, [StringComparison]::OrdinalIgnoreCase)
+if (-not ($legacyRoot -or $task218 -or $task219 -or $task220 -or $task221)) { throw 'REHEARSAL_ROOT_GUARD_FAILED' }
 if ($root -eq 'C:\AgroSat_rehearsal\PROGRAM_R3_MEGA_RELEASE_REPAIR\RUNS') { throw 'REHEARSAL_ROOT_MUST_BE_RUN_DIRECTORY' }
-if ($task220) {
+if ($task221) {
+    if ($RehearsalDatabase -notmatch '^agrosat_r3_task221_[a-z0-9_]+$') { throw 'REHEARSAL_DATABASE_GUARD_FAILED' }
+} elseif ($task220) {
     if ($RehearsalDatabase -notmatch '^agrosat_r3_task220_[a-z0-9_]+$') { throw 'REHEARSAL_DATABASE_GUARD_FAILED' }
 } elseif ($task219) {
     if ($RehearsalDatabase -notmatch '^agrosat_r3_task219_[a-z0-9_]+$') { throw 'REHEARSAL_DATABASE_GUARD_FAILED' }

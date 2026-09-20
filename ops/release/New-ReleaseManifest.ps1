@@ -1,10 +1,10 @@
  [CmdletBinding()]
 param(
-    [string]$ProgramWorktree = "C:\AgroSat_worktrees\program-r3-macrostage-f-closed-loop-agronomy",
+    [string]$ProgramWorktree = "C:\AgroSat_worktrees\program-r3-macrostage-g-operational-command-center",
     [string]$SourceCheckout = "C:\AgroSat",
-    [string]$SourceBaseline = "f3a95f4e4d97b025a967ae3812603e5aae0d969d",
+    [string]$SourceBaseline = "387eaeda6bcbcc3ef0a2e2951b8f87bbf75ad927",
     [string]$SourceCheckoutBaseline = "40e8e379d9d29cb4bfb8afebdd9c489c19756fac",
-    [string]$ProgramBranch = "task/program-r3-macrostage-f-closed-loop-agronomy",
+    [string]$ProgramBranch = "task/program-r3-macrostage-g-operational-command-center",
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-f0-9]{40}$')][string]$ReleaseCandidate,
     [string]$SourceArchive = "",
     [string]$SourceArchiveSha256 = "",
@@ -86,7 +86,8 @@ $allowedProgramWorktrees = @(
     "C:\AgroSat_worktrees\program-r3-mega-repair",
     "C:\AgroSat_worktrees\program-r3-macrostage-d-production-release",
     "C:\AgroSat_worktrees\program-r3-macrostage-e-autonomous-monitoring",
-    "C:\AgroSat_worktrees\program-r3-macrostage-f-closed-loop-agronomy"
+    "C:\AgroSat_worktrees\program-r3-macrostage-f-closed-loop-agronomy",
+    "C:\AgroSat_worktrees\program-r3-macrostage-g-operational-command-center"
 )
 if ([System.IO.Path]::GetFullPath($ProgramWorktree) -notin $allowedProgramWorktrees) {
     throw "Program worktree does not match the PROGRAM R3 contract."
@@ -237,7 +238,9 @@ if ($WriteManifest) {
         "C:\AgroSat_backups\PROGRAM_R3_FAST_TRACK_RELEASE_CANDIDATE\RUNS\",
         "C:\AgroSat_backups\PROGRAM_R3_MEGA_RELEASE_REPAIR\",
         "C:\AgroSat_backups\PROGRAM_R3_MACROSTAGE_D_PRODUCTION_RELEASE\RUNS\",
-        "C:\AgroSat_backups\PROGRAM_R3_MACROSTAGE_E_AUTONOMOUS_MONITORING\RUNS\"
+        "C:\AgroSat_backups\PROGRAM_R3_MACROSTAGE_E_AUTONOMOUS_MONITORING\RUNS\",
+        "C:\AgroSat_backups\PROGRAM_R3_MACROSTAGE_F_CLOSED_LOOP_AGRONOMY\RUNS\",
+        "C:\AgroSat_backups\PROGRAM_R3_MACROSTAGE_G_OPERATIONAL_COMMAND_CENTER\RUNS\"
     )
     $resolvedOutput = [System.IO.Path]::GetFullPath($OutputPath)
     if (@($allowedRoots | Where-Object {

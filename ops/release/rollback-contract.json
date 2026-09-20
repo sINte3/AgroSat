@@ -59,6 +59,19 @@
         "agronomy audit events",
         "work evidence bindings"
       ]
+    },
+    {
+      "path": "backend/alembic/versions/0016_operational_command_center.py",
+      "revision": "0016_operational_command_center",
+      "downgrade_safety": "destructive_after_operational_notification_data",
+      "safe_before_data": true,
+      "strategy_after_data": "restore_validated_pre_task221_backup_or_roll_forward",
+      "human_approval_required": true,
+      "production_applied": false,
+      "data_at_risk": [
+        "operational notifications",
+        "append-only operational notification events"
+      ]
     }
   ]
 }
