@@ -7,6 +7,7 @@ import {
 
 const NAV_ITEMS = [
   { key: 'dashboard', icon: DashboardIcon },
+  { key: 'operational-center', icon: CommandCenterIcon },
   { key: 'fields', icon: MapIcon },
   { key: 'monitoring', icon: MonitoringIcon },
   { key: 'field-attention', icon: AttentionIcon },
@@ -148,6 +149,15 @@ function DashboardIcon({ className }) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className={className}>
       <path d="M3 3v18h18M7 16v-4M12 16V8M17 16v-6"/>
+    </svg>
+  );
+}
+
+function CommandCenterIcon({ className }) {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className={className}>
+      <circle cx="12" cy="12" r="8" />
+      <path d="M12 7v5l3 2M4 12h2m12 0h2M12 4v2m0 12v2" />
     </svg>
   );
 }

@@ -36,6 +36,7 @@
     "test:anomaly-inspection": "node scripts/test-anomaly-inspection-workflow.mjs"
     ,"test:autonomous-monitoring": "node scripts/test-autonomous-monitoring.mjs"
     ,"test:closed-loop-agronomy": "node scripts/test-closed-loop-agronomy.mjs"
+    ,"test:operational-center": "node scripts/test-operational-center.mjs"
   },
   "dependencies": {
     "@mapbox/mapbox-gl-draw": "1.5.0",

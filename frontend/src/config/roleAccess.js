@@ -1,5 +1,6 @@
 const FULL_NAVIGATION_KEYS = Object.freeze([
   'dashboard',
+  'operational-center',
   'fields',
   'field-attention',
   'field-inspections',
@@ -10,12 +11,13 @@ const FULL_NAVIGATION_KEYS = Object.freeze([
 ]);
 
 const ADMIN_NAVIGATION_KEYS = Object.freeze([
-  'dashboard', 'fields', 'monitoring', 'field-attention',
+  'dashboard', 'operational-center', 'fields', 'monitoring', 'field-attention',
   'field-inspections', 'alerts', 'enterprises', 'reports',
   'agronomy-plans',
 ]);
 
 const AGRONOMIST_NAVIGATION_KEYS = Object.freeze([
+  'operational-center',
   'field-inspections',
   'agronomy-plans',
   'field-attention',
@@ -33,6 +35,7 @@ const FULL_VIEW_KEYS = new Set([
 const ADMIN_VIEW_KEYS = new Set([...FULL_VIEW_KEYS, 'monitoring']);
 
 const AGRONOMIST_VIEW_KEYS = new Set([
+  'operational-center',
   'agronomy-plans',
   'fields',
   'field-detail',
@@ -43,6 +46,7 @@ const AGRONOMIST_VIEW_KEYS = new Set([
 ]);
 
 const NAVIGATION_LABELS = Object.freeze({
+  'operational-center': 'Операционный центр',
   'agronomy-plans': 'Меры и контроль',
   monitoring: 'Мониторинг',
   dashboard: 'Сегодня',

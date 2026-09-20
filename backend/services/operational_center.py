@@ -513,7 +513,7 @@ def filter_options(db, user, enterprise_id: int | None = None) -> dict[str, Any]
     crop_where = " WHERE " + " AND ".join(crop_conditions)
     crops = _rows(db.execute(text("SELECT DISTINCT ct.id,ct.name_ru AS label,NULL::integer AS enterprise_id FROM crop_types ct JOIN crop_seasons cs ON cs.crop_type_id=ct.id JOIN fields f ON f.id=cs.field_id" + crop_where + " ORDER BY label,ct.id LIMIT 200"), params))
     assignee_where = "AND u.enterprise_id=:enterprise_id" if enterprise_id is not None else ""
-    assignees = _rows(db.execute(text("SELECT u.id,u.full_name AS label,u.enterprise_id FROM users u WHERE u.is_active=true AND u.role IN ('manager','agronomist') " + assignee_where + " ORDER BY u.full_name,u.id LIMIT 200"), params))
+    assignees = _rows(db.execute(text("SELECT u.id,COALESCE(u.full_name,u.email) AS label,u.enterprise_id FROM users u WHERE u.is_active=true AND u.role IN ('manager','agronomist') " + assignee_where + " ORDER BY COALESCE(u.full_name,u.email),u.id LIMIT 200"), params))
     if actor["role"] == "agronomist":
         assignees = [item for item in assignees if item["id"] == actor["user_id"]]
     return {"enterprises": enterprises, "fields": fields, "crops": crops, "assignees": assignees}

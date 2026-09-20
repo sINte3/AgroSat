@@ -18,6 +18,7 @@ import LoginPage from './pages/LoginPage';
 import UnauthorizedPage from './pages/UnauthorizedPage';
 import MonitoringPage from './pages/MonitoringPage';
 import AgronomyPlansPage from './pages/AgronomyPlansPage';
+import OperationalCenterPage from './pages/OperationalCenterPage';
 import { getCachedEnterprises } from './api/client';
 import { getRoleDefaultPath, isViewAllowedForRole } from './config/roleAccess';
 
@@ -29,6 +30,7 @@ const PATH_VIEW_MAP = {
   '/inspections': 'field-inspections',
   '/monitoring': 'monitoring',
   '/agronomy-plans': 'agronomy-plans',
+  '/operational-center': 'operational-center',
   '/enterprises': 'enterprises',
   '/reports': 'reports',
   '/login': 'login',
@@ -44,6 +46,15 @@ const parsePositiveId = (value) => {
 };
 
 const resolvePathname = (pathname) => {
+  const operationalCaseMatch = pathname.match(/^\/operational-center\/cases\/(.+)$/);
+  if (operationalCaseMatch) {
+    try {
+      const selectedOperationalCaseKey = decodeURIComponent(operationalCaseMatch[1]);
+      if (/^(inspection|candidate|alert|freshness|external):[A-Za-z0-9:_-]{1,160}$/.test(selectedOperationalCaseKey)) {
+        return { view: 'operational-center', selectedOperationalCaseKey, selectedInspectionId: null, selectedPlanId: null, selectedFieldId: null, selectedEnterpriseId: null };
+      }
+    } catch (_) { /* Invalid encoding falls through to the role default view. */ }
+  }
   const inspectionMatch = pathname.match(/^\/inspections\/(\d+)$/);
   if (inspectionMatch) {
     const selectedInspectionId = parsePositiveId(inspectionMatch[1]);
@@ -84,6 +95,7 @@ const resolvePathname = (pathname) => {
     selectedEnterpriseId: null,
     selectedInspectionId: null,
     selectedPlanId: null,
+    selectedOperationalCaseKey: null,
   };
 };
 
@@ -97,6 +109,7 @@ function AppLayout() {
   const [selectedEnterpriseId, setSelectedEnterpriseId] = useState(initialRoute.selectedEnterpriseId);
   const [selectedInspectionId, setSelectedInspectionId] = useState(initialRoute.selectedInspectionId);
   const [selectedPlanId, setSelectedPlanId] = useState(initialRoute.selectedPlanId);
+  const [selectedOperationalCaseKey, setSelectedOperationalCaseKey] = useState(initialRoute.selectedOperationalCaseKey);
   const [enterprises, setEnterprises] = useState([]);
   const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
   const closeMobileNavigation = useCallback(() => setMobileNavigationOpen(false), []);
@@ -118,6 +131,7 @@ function AppLayout() {
     setSelectedEnterpriseId(route.selectedEnterpriseId);
     setSelectedInspectionId(route.selectedInspectionId);
     setSelectedPlanId(route.selectedPlanId);
+    setSelectedOperationalCaseKey(route.selectedOperationalCaseKey);
   }, [location.pathname]);
 
   const handleFieldClick = useCallback((fieldId) => {
@@ -138,6 +152,7 @@ function AppLayout() {
     setMobileNavigationOpen(false);
     const targetView = target === 'field' ? 'field-detail'
       : target === 'enterprise' ? 'enterprise-detail'
+      : target === 'operational-case' ? 'operational-center'
       : target;
     if (!isViewAllowedForRole(role, targetView)) {
       navigate(getRoleDefaultPath(role), { replace: true });
@@ -193,6 +208,13 @@ function AppLayout() {
         setView('monitoring'); navigate('/monitoring'); break;
       case 'agronomy-plans':
         setView('agronomy-plans'); setSelectedPlanId(parsePositiveId(id)); navigate(id ? `/agronomy-plans/${id}` : '/agronomy-plans'); break;
+      case 'operational-center':
+        setView('operational-center'); setSelectedOperationalCaseKey(null); navigate('/operational-center'); break;
+      case 'operational-case': {
+        const caseKey = String(id || '');
+        if (!/^(inspection|candidate|alert|freshness|external):[A-Za-z0-9:_-]{1,160}$/.test(caseKey)) break;
+        setView('operational-center'); setSelectedOperationalCaseKey(caseKey); navigate(`/operational-center/cases/${encodeURIComponent(caseKey)}`); break;
+      }
       case 'field-inspection-detail': {
         const validInspectionId = parsePositiveId(id); if (!validInspectionId) break;
         setView('field-inspection-detail'); setSelectedInspectionId(validInspectionId); navigate(`/inspections/${validInspectionId}`); break;
@@ -239,6 +261,7 @@ function AppLayout() {
       case 'field-inspections': return { title: 'Осмотры полей' };
       case 'monitoring': return { title: 'Автономный мониторинг', subtitle: 'Свежесть, аномалии и решения оператора' };
       case 'agronomy-plans': return { title: 'Меры и контроль', subtitle: selectedPlanId ? `План #${selectedPlanId}` : 'Решения, работы и проверка результата' };
+      case 'operational-center': return { title: 'Операционный центр', subtitle: selectedOperationalCaseKey || 'Приоритет, ответственность, сроки и проверка результата' };
       case 'field-inspection-detail': return { title: 'Осмотры полей', subtitle: selectedInspectionId ? `Осмотр #${selectedInspectionId}` : null };
       case 'reports':     return { title: 'Отчёты' };
       case 'enterprise-detail': return { title: 'Предприятие', subtitle: selectedEnterpriseId ? `#${selectedEnterpriseId}` : null };
@@ -281,6 +304,8 @@ function AppLayout() {
         return <MonitoringPage onNavigate={handleNavigate} enterprises={enterprises} />;
       case 'agronomy-plans':
         return <AgronomyPlansPage onNavigate={handleNavigate} enterprises={enterprises} selectedPlanId={selectedPlanId} />;
+      case 'operational-center':
+        return <OperationalCenterPage onNavigate={handleNavigate} selectedCaseKey={selectedOperationalCaseKey} />;
       case 'enterprises':
         return <EnterprisesPage onNavigate={handleNavigate} />;
       case 'enterprise-detail':
