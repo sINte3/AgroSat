@@ -14,6 +14,7 @@ const [
   maplibreRuntime,
   productivityZonePanel,
   pixelAnomalyPanel,
+  anomalyInspectionDetail,
 ] = await Promise.all([
   read('../src/components/Map/FieldMap.jsx'),
   read('../src/api/fieldTiles.js'),
@@ -26,6 +27,7 @@ const [
   read('../src/maplibreRuntime.js'),
   read('../src/components/Field/ProductivityZonePanel.jsx'),
   read('../src/components/Field/PixelAnomalyPanel.jsx'),
+  read('../src/components/Inspections/AnomalyInspectionDetail.jsx'),
 ]);
 
 assert.doesNotMatch(fieldMap, /fields\/geojson\/all/);
@@ -60,10 +62,11 @@ assert.match(fieldListPanel, /matchMedia\('\(max-width: 639px\)'\)/);
 assert.match(fieldListPanel, /removeEventListener\('change', collapseForMobile\)/);
 assert.match(fieldListPanel, /aria-controls="field-list-panel"/);
 
-assert.match(maplibreRuntime, /maplibre-gl\/dist\/maplibre-gl-csp/);
-assert.match(maplibreRuntime, /maplibre-gl-csp-worker\?url/);
+assert.match(maplibreRuntime, /import \* as maplibregl from 'maplibre-gl'/);
+assert.match(maplibreRuntime, /maplibre-gl-worker\.mjs\?worker&url/);
 assert.match(maplibreRuntime, /setWorkerUrl\(mapLibreWorkerUrl\)/);
-for (const owner of [fieldMap, productivityZonePanel, pixelAnomalyPanel]) {
+assert.doesNotMatch(maplibreRuntime, /maplibre-gl-csp|createObjectURL|blob:/);
+for (const owner of [fieldMap, productivityZonePanel, pixelAnomalyPanel, anomalyInspectionDetail]) {
   assert.match(owner, /maplibreRuntime/);
   assert.doesNotMatch(owner, /from ['"]maplibre-gl['"]/);
 }

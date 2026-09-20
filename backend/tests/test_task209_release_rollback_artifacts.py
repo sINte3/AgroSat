@@ -190,7 +190,7 @@ def test_manifest_preview_proves_source_and_program_integrity():
     assert report["alembic_head_count"] == 1
     assert report["required_runtime_versions"] == {
         "python": "3.11+",
-        "node": "18+",
+        "node": "22+",
         "backend_image": "python:3.11-slim",
         "npm_lockfile_version": 3,
         "sources": ["README.md", "backend/Dockerfile", "frontend/package-lock.json"],

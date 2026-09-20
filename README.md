@@ -18,7 +18,7 @@ AgroSat — внутренняя платформа для:
 ### 1. Требования
 - Docker + Docker Compose
 - Python 3.11+
-- Node.js 18+
+- Node.js 22+
 
 ### 2. Настройка
 

@@ -33,16 +33,16 @@
     "test:commercial-tenant-browser": "node scripts/test-commercial-tenant-browser.mjs",
     "test:production-api-origin": "node scripts/test-production-api-origin.mjs",
     "test:pixel-ndvi-workspace": "node scripts/test-pixel-ndvi-workspace.mjs",
-    "test:anomaly-inspection": "node scripts/test-anomaly-inspection-workflow.mjs"
-    ,"test:autonomous-monitoring": "node scripts/test-autonomous-monitoring.mjs"
-    ,"test:closed-loop-agronomy": "node scripts/test-closed-loop-agronomy.mjs"
-    ,"test:operational-center": "node scripts/test-operational-center.mjs"
-    ,"test:operational-center-browser": "node scripts/qualify-operational-center-browser.mjs"
+    "test:anomaly-inspection": "node scripts/test-anomaly-inspection-workflow.mjs",
+    "test:autonomous-monitoring": "node scripts/test-autonomous-monitoring.mjs",
+    "test:closed-loop-agronomy": "node scripts/test-closed-loop-agronomy.mjs",
+    "test:operational-center": "node scripts/test-operational-center.mjs",
+    "test:operational-center-browser": "node scripts/qualify-operational-center-browser.mjs"
   },
   "dependencies": {
     "@mapbox/mapbox-gl-draw": "1.5.0",
     "axios": "^1.7.2",
-    "maplibre-gl": "^4.5.0",
+    "maplibre-gl": "6.10.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^7.18.0",

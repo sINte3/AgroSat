@@ -1,10 +1,10 @@
-import maplibregl from 'maplibre-gl/dist/maplibre-gl-csp';
-import mapLibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-csp-worker?url';
+import * as maplibregl from 'maplibre-gl';
+import mapLibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 
 
-// The default MapLibre bundle creates a process-wide blob: worker URL during
-// module evaluation and cannot revoke it safely on logout. The CSP build keeps
-// the worker as a normal Vite asset, so map ownership remains deterministic.
+// MapLibre v6 is ESM-only. Vite's worker pipeline emits a self-contained,
+// same-origin worker asset, so no process-wide blob URL is created and the
+// installed worker always matches the map runtime.
 maplibregl.setWorkerUrl(mapLibreWorkerUrl);
 
 export default maplibregl;

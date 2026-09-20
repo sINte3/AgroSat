@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import maplibregl from 'maplibre-gl';
+import maplibregl from '../../maplibreRuntime';
 
 import { useAuth } from '../../context/AuthContext';
 import {

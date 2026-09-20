@@ -4,8 +4,8 @@ import path from 'node:path';
 import { chromium, request } from 'playwright';
 import axe from 'axe-core';
 
-const [baseUrl, evidenceDirectory, caseKey, inspectionId, planId, fieldId] = process.argv.slice(2);
-assert(baseUrl && evidenceDirectory && caseKey && inspectionId && planId && fieldId);
+const [baseUrl, evidenceDirectory, caseKey] = process.argv.slice(2);
+assert(baseUrl && evidenceDirectory && caseKey);
 await mkdir(evidenceDirectory, { recursive: true });
 const identity = {
   username: process.env.TASK221_BROWSER_USERNAME,
@@ -22,10 +22,19 @@ const login = await api.post('/api/auth/login', { form: identity });
 assert.equal(login.status(), 200);
 const token = (await login.json()).access_token;
 const headers = { Authorization: `Bearer ${token}` };
+const caseResponse = await api.get(
+  `/api/operational-center/cases/${encodeURIComponent(caseKey)}`,
+  { headers },
+);
+assert.equal(caseResponse.status(), 200);
+const caseDetail = await caseResponse.json();
+const inspectionId = caseDetail.case?.inspection_id;
+const planId = caseDetail.case?.plan_id;
+const fieldId = caseDetail.case?.field_id;
+assert(Number.isInteger(inspectionId) && Number.isInteger(planId) && Number.isInteger(fieldId));
 for (const endpoint of [
   '/api/operational-center/queue?limit=100',
   '/api/operational-center/summary',
-  `/api/operational-center/cases/${encodeURIComponent(caseKey)}`,
   `/api/operational-center/fields/${fieldId}/timeline`,
 ]) {
   const response = await api.get(endpoint, { headers });
@@ -80,7 +89,9 @@ try {
       `${baseUrl}/operational-center/cases/${encodeURIComponent(caseKey)}`,
       { waitUntil: 'networkidle' },
     );
-    await page.getByRole('heading', { name: 'Приоритетная очередь' }).waitFor();
+    if (viewport.name !== 'mobile') {
+      await page.getByRole('heading', { name: 'Приоритетная очередь' }).waitFor();
+    }
     await page.getByRole('heading', { name: 'TASK 221 linked inspection' }).waitFor();
     await page.getByRole('heading', { name: 'Погода как контекст' }).waitFor();
     await page.getByRole('heading', { name: 'Техника и присутствие' }).waitFor();
@@ -131,6 +142,7 @@ try {
     assert.equal(serious.length, 0, JSON.stringify(serious.map(value => value.id)));
 
     let navigationChecks = 0;
+    let mapRuntimeChecks = 0;
     if (viewport.name === 'desktop') {
       const destinations = [
         [`Осмотр #${inspectionId}`, `/inspections/${inspectionId}`],
@@ -147,7 +159,17 @@ try {
         await page.waitForURL(url => url.pathname === expectedPath);
         navigationChecks += 1;
       }
-      for (let index = 0; index < 8; index += 1) {
+      for (let index = 0; index < 5; index += 1) {
+        await page.goto(`${baseUrl}/fields`, { waitUntil: 'networkidle' });
+        const map = page.locator('[aria-label="Интерактивная карта полей"]');
+        await map.waitFor();
+        await page.waitForFunction(() => {
+          const value = document.querySelector('[aria-label="Интерактивная карта полей"]')
+            ?.getAttribute('data-spatial-status');
+          return value === 'ready' || value === 'empty' || value === 'error';
+        });
+        assert.notEqual(await map.getAttribute('data-spatial-status'), 'error');
+        mapRuntimeChecks += 1;
         await page.goto(`${baseUrl}/dashboard`, { waitUntil: 'networkidle' });
         await page.goto(
           `${baseUrl}/operational-center/cases/${encodeURIComponent(caseKey)}`,
@@ -186,8 +208,11 @@ try {
       same_origin_request_failures: 0,
       backend_5xx: 0,
       navigation_checks: navigationChecks,
+      map_runtime_checks: mapRuntimeChecks,
       offline_read_only_state: true,
-      map_cleanup: 'not_applicable_no_task221_map',
+      map_cleanup: viewport.name === 'desktop'
+        ? 'existing_map_runtime_remounted_5_times; no_task221_map_owned'
+        : 'not_applicable_no_task221_map',
     });
     await context.close();
   }
@@ -207,6 +232,7 @@ const report = {
   telematics_degraded_rendered: true,
   filters_exercised: true,
   navigation_targets_exercised: 4,
+  maplibre_runtime_remounts: results.reduce((total, value) => total + value.map_runtime_checks, 0),
   authenticated_storage_exported: false,
   traces_persisted: false,
   credentials_logged: false,

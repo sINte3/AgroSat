@@ -69,13 +69,13 @@ function Get-RepositoryRuntimeContract {
     $readme = Get-Content -LiteralPath (Join-Path $Repository 'README.md') -Raw
     $dockerfile = Get-Content -LiteralPath (Join-Path $Repository 'backend\Dockerfile') -Raw
     $packageLock = Get-Content -LiteralPath (Join-Path $Repository 'frontend\package-lock.json') -Raw
-    if ($readme -notmatch 'Python 3\.11\+' -or $readme -notmatch 'Node\.js 18\+') { throw 'REPOSITORY_RUNTIME_CONTRACT_MISSING' }
+    if ($readme -notmatch 'Python 3\.11\+' -or $readme -notmatch 'Node\.js 22\+') { throw 'REPOSITORY_RUNTIME_CONTRACT_MISSING' }
     if ($dockerfile -notmatch '(?m)^FROM python:3\.11-slim\s*$') { throw 'BACKEND_RUNTIME_IMAGE_CONTRACT_MISMATCH' }
     $lockfileVersion = [regex]::Match($packageLock, '"lockfileVersion"\s*:\s*(?<version>\d+)')
     if (-not $lockfileVersion.Success) { throw 'NPM_LOCKFILE_VERSION_MISSING' }
     return [ordered]@{
         python = '3.11+'
-        node = '18+'
+        node = '22+'
         backend_image = 'python:3.11-slim'
         npm_lockfile_version = [int]$lockfileVersion.Groups['version'].Value
         sources = @('README.md', 'backend/Dockerfile', 'frontend/package-lock.json')

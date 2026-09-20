@@ -120,6 +120,8 @@ The page uses native interactive elements, visible focus treatment, at least 44 
 
 The page is read-only while offline. It does not queue notification mutations and links users to the existing supported offline scouting workflow instead of adding a second offline mutation system.
 
+The frontend runtime contract is Node.js 22 or newer. Qualification pins MapLibre GL JS `6.10.0`, uses its ESM namespace export, and emits the matching module worker through Vite's same-origin worker pipeline. Existing map owners continue to import the centralized `maplibreRuntime`; browser qualification exercises a field map after repeated mount/unmount cycles so this dependency security upgrade is covered even though TASK 221 adds no map of its own.
+
 ## Qualification
 
 TASK 221 qualification tools are under `ops/qualification` and reject production database identity. They accept only `agrosat_r3_task221_*` targets, validate that the protected source configuration resolves to database `agrosat`, strip inherited sensitive variables, and force Wialon and Telegram off.
@@ -132,7 +134,7 @@ Qualification covers:
 - a real D/E/F-linked inspection → plan → work → evidence → awaiting-verification case plus a deterministic overdue case;
 - notification reconciliation replay, transition idempotency, RBAC, non-enumeration, query budgets, degraded external context, readiness independence, and populated downgrade refusal;
 - affected and full backend tests, frontend contract suites, production build, and non-forced npm audit;
-- authenticated browser verification at 1440×900, 1024×768, and 390×844 with filters, detail, navigation, offline behavior, keyboard focus, accessibility, overflow, console, page, request, and 5xx checks.
+- authenticated browser verification at 1440×900, 1024×768, and 390×844 with filters, detail, navigation, offline behavior, keyboard focus, accessibility, overflow, console, page, request, and 5xx checks, plus a desktop MapLibre runtime and remount check after the dependency upgrade.
 
 Evidence and screenshots are written only to the active TASK 221 run under `C:\AgroSat_backups`; runtime media/cache are also outside the source tree. No raw evidence photo, credential, database URL, token, cookie, authorization header, or provider payload is copied into the source archive or sanitized report.
 
