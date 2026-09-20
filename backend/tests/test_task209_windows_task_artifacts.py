@@ -70,7 +70,11 @@ def test_only_install_script_can_register_task():
         for script in scripts
         if "Register-ScheduledTask" in script.read_text(encoding="utf-8")
     ]
-    assert registrars == ["Install-CollectorTask.ps1"]
+    assert set(registrars) == {
+        "Install-CollectorTask.ps1",
+        "Install-OperationalNotificationsTask.ps1",
+    }
+    assert all(name.startswith("Install-") for name in registrars)
 
 
 def test_mutating_scripts_require_apply_and_should_process():

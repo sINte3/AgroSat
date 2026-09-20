@@ -197,6 +197,13 @@ MATRIX = (
     contract("GET", "/api/agronomy-plans/{plan_id}/evidence/{photo_id}", tenant_scope="agronomy_plan_object", cross_tenant=404, unknown_object=404),
     contract("DELETE", "/api/agronomy-plans/{plan_id}/evidence/{photo_id}", MUTATING_ROLES, "agronomy_plan_object", write=True, cross_tenant=404, unknown_object=404),
     contract("POST", "/api/agronomy-plans/{plan_id}/reevaluate", MUTATING_ROLES, "agronomy_plan_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("GET", "/api/operational-center/queue", tenant_scope="enterprise_filter", cross_tenant=404),
+    contract("GET", "/api/operational-center/summary", tenant_scope="enterprise_filter", cross_tenant=404),
+    contract("GET", "/api/operational-center/filter-options", tenant_scope="enterprise_filter", cross_tenant=404),
+    contract("GET", "/api/operational-center/cases/{case_key}", tenant_scope="operational_case_object", cross_tenant=404, unknown_object=404),
+    contract("GET", "/api/operational-center/fields/{field_id}/timeline", tenant_scope="field_object", cross_tenant=404, unknown_object=404),
+    contract("GET", "/api/operational-center/notifications", tenant_scope="recipient_scope"),
+    contract("POST", "/api/operational-center/notifications/{notification_id}/transition", MUTATING_ROLES, "operational_notification_object", write=True, cross_tenant=404, unknown_object=404),
 )
 
 
@@ -211,7 +218,7 @@ def openapi_operations():
 
 def test_matrix_covers_every_openapi_operation_exactly():
     expected = {(item.method, item.path) for item in MATRIX}
-    assert len(expected) == len(MATRIX) == 138
+    assert len(expected) == len(MATRIX) == 145
     assert expected == set(openapi_operations())
 
 
@@ -252,6 +259,8 @@ def test_object_contracts_hide_cross_tenant_existence():
         "variable_rate_object",
         "candidate_object",
         "agronomy_plan_object",
+        "operational_case_object",
+        "operational_notification_object",
     }
     for item in MATRIX:
         if item.tenant_scope in object_scopes:
