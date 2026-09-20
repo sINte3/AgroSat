@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "task_name": "\\AgroSat_PROGRAM_R3_OperationalNotifications",
+  "task_description": "PROGRAM R3 bounded Operational Center notification reconciliation",
+  "execution_identity": "<DOMAIN>\\AgroSatNotifications$",
+  "execution_sid": "S-1-5-18",
+  "expected_windows_timezone_id": "West Asia Standard Time",
+  "release_commit": "0000000000000000000000000000000000000000",
+  "immutable_release_root": "C:\\AgroSat_releases\\PROGRAM_R3",
+  "release_manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "working_directory": "C:\\AgroSat_releases\\PROGRAM_R3\\0000000000000000000000000000000000000000",
+  "python_executable": "C:\\AgroSat_runtime\\PROGRAM_R3\\python\\Scripts\\python.exe",
+  "runtime_env_file": "C:\\AgroSat_runtime\\PROGRAM_R3\\config\\backend.env",
+  "runner_script": "C:\\AgroSat_runtime\\PROGRAM_R3\\scheduler\\Invoke-OperationalNotifications.ps1",
+  "schedule": {
+    "interval_minutes": 15,
+    "start_when_available": true,
+    "restart_count": 3,
+    "restart_interval_minutes": 5,
+    "execution_time_limit_minutes": 10,
+    "multiple_instances": "IgnoreNew"
+  },
+  "reconciliation": {
+    "limit": 200,
+    "output_directory": "C:\\AgroSat_runtime\\PROGRAM_R3\\0000000000000000000000000000000000000000\\operational-notifications"
+  }
+}
