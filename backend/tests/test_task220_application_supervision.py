@@ -28,7 +28,10 @@ def configuration(tmp_path):
 
 
 def test_manifest_tampering_and_unrelated_runtime_fail_closed(tmp_path):
-    cfg, releases, runtimes, release = configuration(tmp_path)
+    # Keep the nested fake release below Win32 MAX_PATH even when pytest's
+    # canonical TASK run basetemp is already long.  The sibling remains owned
+    # by this isolated pytest run and preserves the real release-root guards.
+    cfg, releases, runtimes, release = configuration(tmp_path.parent / "m")
     app.validate(cfg, release_root=releases, runtime_root=runtimes)
     unrelated = tmp_path / "unrelated"
     unrelated.mkdir()
