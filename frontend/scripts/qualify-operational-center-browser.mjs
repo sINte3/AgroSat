@@ -155,7 +155,9 @@ try {
           `${baseUrl}/operational-center/cases/${encodeURIComponent(caseKey)}`,
           { waitUntil: 'networkidle' },
         );
-        await page.getByRole('button', { name: label, exact: true }).click();
+        await page.getByRole('navigation', { name: 'Связанные рабочие разделы' })
+          .getByRole('button', { name: label, exact: true })
+          .click();
         await page.waitForURL(url => url.pathname === expectedPath);
         navigationChecks += 1;
       }
