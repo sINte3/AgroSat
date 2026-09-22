@@ -10,10 +10,27 @@ from openpyxl import Workbook
 from sqlalchemy import text
 
 from api.dependencies import normalize_role
+from services import observation_quality
 from services.field_attention import MAX_SCOPE_FIELDS, build_attention_queue
 
 
 TASHKENT = ZoneInfo("Asia/Tashkent")
+
+# "Latest accepted stored observation" uses the canonical quality contract in
+# services/observation_quality.py, so a NULL cloud_cover_pct written by the
+# canonical collectors no longer hides an otherwise good observation.
+_ACCEPTED_NDVI_OBSERVATION = observation_quality.accepted_observation_sql(
+    value_column="n.mean_ndvi",
+    valid_pixels_column="n.valid_pixels_pct",
+    cloud_column="n.cloud_cover_pct",
+    minimum_valid_pixels_pct=observation_quality.MIN_VALID_PIXELS_ANALYSIS_PCT,
+)
+_ACCEPTED_INDEX_OBSERVATION = observation_quality.accepted_observation_sql(
+    value_column="s.mean_value",
+    valid_pixels_column="s.valid_pixels_pct",
+    cloud_column="s.cloud_cover_pct",
+    minimum_valid_pixels_pct=observation_quality.MIN_VALID_PIXELS_ANALYSIS_PCT,
+)
 DEFINITIONS_VERSION = "task209_executive_v1"
 MANAGEMENT_ROLES = frozenset({"admin", "manager"})
 ACCOUNTABILITY_KINDS = frozenset(
@@ -247,18 +264,14 @@ def _overview_sql(tenant_clause):
           FROM ndvi_records n
           JOIN scope_fields sf ON sf.field_id=n.field_id
           WHERE n.captured_date <= :as_of_date
-            AND n.mean_ndvi IS NOT NULL
-            AND n.valid_pixels_pct >= 50
-            AND n.cloud_cover_pct <= 30
+            AND {_ACCEPTED_NDVI_OBSERVATION}
           UNION ALL
           SELECT s.index_code, s.captured_date
           FROM satellite_index_records s
           JOIN scope_fields sf ON sf.field_id=s.field_id
           WHERE s.captured_date <= :as_of_date
             AND s.index_code IN ('savi','evi','ndmi','ndre')
-            AND s.mean_value IS NOT NULL
-            AND s.valid_pixels_pct >= 50
-            AND s.cloud_cover_pct <= 30
+            AND {_ACCEPTED_INDEX_OBSERVATION}
         ),
         latest_observations AS (
           SELECT index_code, max(captured_date) AS captured_date

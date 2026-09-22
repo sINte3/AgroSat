@@ -18,6 +18,7 @@ from shapely.geometry import shape, mapping
 from shapely import wkt
 
 from config import settings
+from services import observation_quality
 from services.sentinel_provider import resolve_sentinel_provider
 from services.satellite_safety import (
     MOCK_SATELLITE_SOURCE,
@@ -54,7 +55,9 @@ def validate_ndvi_quality(mean_ndvi, cloud_cover_pct=None, min_ndvi=None, max_nd
     Rejection criteria for agricultural fields:
     - mean_ndvi < 0: water/cloud/shadow artifact (impossible for crops)
     - mean_ndvi > 1.0: sensor error
-    - cloud_cover_pct > 30: too cloudy for reliable reading
+    - measured cloud cover above observation_quality.MAX_CLOUD_COVER_PCT:
+      too cloudy for reliable reading. An absent (NULL) cloud percentage is
+      unknown metadata, not evidence of cloud, and does not reject.
     - min_ndvi < -0.5 AND max_ndvi > 0.5: mixed pixel (cloud edge + vegetation)
     - mean_ndvi very close to 0 (< 0.02) with low std: bare sensor noise
     """
@@ -93,9 +96,18 @@ def validate_ndvi_quality(mean_ndvi, cloud_cover_pct=None, min_ndvi=None, max_nd
         except (TypeError, ValueError):
             cloud_cover_pct = None
 
-    if cloud_cover_pct is not None and cloud_cover_pct > 30:
+    # Ingest admission gate, not the accepted-observation contract: it
+    # deliberately admits more than analysis later accepts (see
+    # services/observation_quality.py). Only the cloud ceiling is shared, so it
+    # is sourced from the canonical contract instead of repeated here. A NULL
+    # cloud percentage is not cloud evidence and never rejects on its own.
+    if (
+        cloud_cover_pct is not None
+        and cloud_cover_pct > observation_quality.MAX_CLOUD_COVER_PCT
+    ):
         logger.info(
-            f"NDVI quality gate REJECT [{field_name}]: cloud cover {cloud_cover_pct:.1f}% > 30%"
+            f"NDVI quality gate REJECT [{field_name}]: cloud cover {cloud_cover_pct:.1f}% "
+            f"> {observation_quality.MAX_CLOUD_COVER_PCT:.0f}%"
         )
         return False, f"high cloud cover ({cloud_cover_pct:.1f}%)"
 

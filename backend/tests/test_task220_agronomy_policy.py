@@ -45,10 +45,29 @@ def test_wait_and_provider_pending_are_distinct():
     assert evaluate(observation(), None, '2026-08-05', '2026-08-13', freshness='PROVIDER_DEGRADED')['status']=='PROVIDER_DEGRADED'
 
 
-@pytest.mark.parametrize(('changes','status'), [({'cloud':31},'CLOUD_BLOCKED'),({'valid':49},'QUALITY_BLOCKED'),({'value':float('nan')},'QUALITY_BLOCKED'),({'cloud':None},'QUALITY_BLOCKED'),({'value':1.1},'QUALITY_BLOCKED')])
+@pytest.mark.parametrize(('changes','status'), [({'cloud':31},'CLOUD_BLOCKED'),({'valid':49},'QUALITY_BLOCKED'),({'value':float('nan')},'QUALITY_BLOCKED'),({'value':1.1},'QUALITY_BLOCKED'),({'cloud':-5},'QUALITY_BLOCKED'),({'cloud':150},'QUALITY_BLOCKED'),({'cloud':float('nan')},'QUALITY_BLOCKED')])
 def test_quality_cannot_masquerade_as_improvement(changes, status):
     assert quality(observation(**changes))==status
     assert evaluate(observation(), observation(when='2026-08-13', **changes), '2026-08-05','2026-08-13')['status']==status
+
+
+def test_absent_cloud_metadata_is_neutral_not_blocking():
+    """H0-A: an unmeasured cloud percentage is not evidence of cloud cover.
+
+    This case previously expected QUALITY_BLOCKED. That expectation encoded
+    the C1 production defect: the canonical Sentinel-2 collectors never
+    populate cloud_cover_pct, so every real observation was rejected for
+    missing metadata rather than for measured cloud. SCL masking has already
+    removed cloud, shadow, snow and invalid scene classes before
+    valid_pixels_pct is computed, so valid_pixels_pct -- which is still
+    mandatory here -- carries the cloud evidence. See
+    services/observation_quality.py.
+    """
+    assert quality(observation(cloud=None)) is None
+    result = evaluate(observation(), observation(.5, '2026-08-13', cloud=None), '2026-08-05', '2026-08-13')
+    assert result['status']=='IMPROVED'
+    # Absent cloud metadata never relaxes the valid-pixel requirement.
+    assert quality(observation(cloud=None, valid=49))=='QUALITY_BLOCKED'
 
 
 def test_field_average_does_not_resolve_local_zone():

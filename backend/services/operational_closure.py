@@ -11,6 +11,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from api.dependencies import ALLOWED_ROLES, TENANT_ROLES
+from services import observation_quality
 from services.operational_verification import (
     ALGORITHM_VERSION,
     LIMITATION,
@@ -22,6 +23,32 @@ from services.operational_verification import (
 
 TASHKENT = ZoneInfo("Asia/Tashkent")
 ACTIVE_ACTION_STATUSES = ("open", "in_progress", "blocked")
+
+# LEGACY TASK_209 verification. This is the single place that is deliberately
+# STRICTER than the canonical contract in services/observation_quality.py: it
+# still requires the observation to carry measured cloud metadata.
+#
+# Reason: ck_action_verification_reference_shape and
+# ck_action_verification_observation_shape require a persisted
+# action_verification_requests row to carry a non-null cloud percentage
+# whenever it carries a value. Accepting an observation whose cloud metadata
+# was never measured would therefore violate that CHECK when the verification
+# is resolved. Relaxing it needs an Alembic migration on those constraints,
+# which is out of scope for H0-A and is recorded as a follow-up instead.
+#
+# The deviation is expressed through the canonical builder's documented
+# ``require_cloud_metadata`` flag so that no second hand-written predicate
+# exists and the thresholds cannot drift.
+_LEGACY_NDVI_ACCEPTED = observation_quality.accepted_observation_sql(
+    value_column="mean_ndvi",
+    minimum_valid_pixels_pct=observation_quality.MIN_VALID_PIXELS_ANALYSIS_PCT,
+    require_cloud_metadata=True,
+)
+_LEGACY_INDEX_ACCEPTED = observation_quality.accepted_observation_sql(
+    value_column="mean_value",
+    minimum_valid_pixels_pct=observation_quality.MIN_VALID_PIXELS_ANALYSIS_PCT,
+    require_cloud_metadata=True,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -977,26 +1004,23 @@ def _eligible_observations(db, verification):
     minimum_date = reference_date + timedelta(
         days=verification["minimum_separation_days"]
     )
-    common_quality = (
-        "valid_pixels_pct IS NOT NULL AND valid_pixels_pct >= 50 "
-        "AND cloud_cover_pct IS NOT NULL AND cloud_cover_pct <= 30 "
-    )
+    common_quality = _LEGACY_NDVI_ACCEPTED if code == "ndvi" else _LEGACY_INDEX_ACCEPTED
     if code == "ndvi":
         reference_sql = (
             "SELECT id,captured_date,mean_ndvi AS value,valid_pixels_pct,"
             "cloud_cover_pct,satellite FROM ndvi_records "
             "WHERE field_id=:field_id AND captured_date<=:reference_date "
-            "AND mean_ndvi IS NOT NULL AND "
+            "AND "
             + common_quality
-            + "ORDER BY captured_date DESC,id DESC LIMIT 1"
+            + " ORDER BY captured_date DESC,id DESC LIMIT 1"
         )
         candidate_sql = (
             "SELECT id,captured_date,mean_ndvi AS value,valid_pixels_pct,"
             "cloud_cover_pct,satellite FROM ndvi_records "
             "WHERE field_id=:field_id AND captured_date>:reference_date "
-            "AND captured_date>=:minimum_date AND mean_ndvi IS NOT NULL AND "
+            "AND captured_date>=:minimum_date AND "
             + common_quality
-            + "ORDER BY captured_date ASC,id ASC LIMIT 1"
+            + " ORDER BY captured_date ASC,id ASC LIMIT 1"
         )
         params = {
             "field_id": field_id,
@@ -1009,18 +1033,18 @@ def _eligible_observations(db, verification):
             "SELECT id,captured_date,mean_value AS value,valid_pixels_pct,"
             "cloud_cover_pct,satellite FROM satellite_index_records "
             "WHERE field_id=:field_id AND index_code=:index_code "
-            "AND captured_date<=:reference_date AND mean_value IS NOT NULL AND "
+            "AND captured_date<=:reference_date AND "
             + common_quality
-            + "ORDER BY captured_date DESC,id DESC LIMIT 1"
+            + " ORDER BY captured_date DESC,id DESC LIMIT 1"
         )
         candidate_sql = (
             "SELECT id,captured_date,mean_value AS value,valid_pixels_pct,"
             "cloud_cover_pct,satellite FROM satellite_index_records "
             "WHERE field_id=:field_id AND index_code=:index_code "
             "AND captured_date>:reference_date "
-            "AND captured_date>=:minimum_date AND mean_value IS NOT NULL AND "
+            "AND captured_date>=:minimum_date AND "
             + common_quality
-            + "ORDER BY captured_date ASC,id ASC LIMIT 1"
+            + " ORDER BY captured_date ASC,id ASC LIMIT 1"
         )
         params = {
             "field_id": field_id,

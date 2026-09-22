@@ -1,7 +1,8 @@
 """Versioned, deterministic decision support. No network or generative service."""
 
 from datetime import date, datetime, timedelta
-import math
+
+from services import observation_quality
 
 POLICY = "r3-f-v1"
 WAIT_DAYS = 7
@@ -35,16 +36,21 @@ def day(value):
 
 
 def quality(observation):
+    """Classify one observation through the canonical quality contract.
+
+    Returns ``None`` when the observation is accepted, otherwise the
+    ``agronomy_plans.verification_status`` value that describes the rejection.
+    A NULL ``cloud`` no longer blocks: see services/observation_quality.py.
+    """
     if not observation:
         return "PENDING_DATA"
-    value, cloud, valid = (observation.get(k) for k in ("value", "cloud", "valid"))
-    if cloud is not None and math.isfinite(cloud) and cloud > 30:
-        return "CLOUD_BLOCKED"
-    if any(v is None or not math.isfinite(v) for v in (value, cloud, valid)):
-        return "QUALITY_BLOCKED"
-    if not -1 <= value <= 1 or not 0 <= cloud <= 30 or not 50 <= valid <= 100:
-        return "QUALITY_BLOCKED"
-    return None
+    verdict = observation_quality.evaluate(
+        value=observation.get("value"),
+        valid_pixels_pct=observation.get("valid"),
+        cloud_cover_pct=observation.get("cloud"),
+        minimum_valid_pixels_pct=observation_quality.MIN_VALID_PIXELS_ANALYSIS_PCT,
+    )
+    return observation_quality.legacy_blocked_status(verdict)
 
 
 def recommend(snapshot):

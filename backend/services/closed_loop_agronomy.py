@@ -14,9 +14,23 @@ import models.registry  # canonical metadata, no relationship loading
 from database import Base
 from services import anomaly_inspections as inspections
 from services import agronomy_policy as policy
+from services import observation_quality
 
 DECISION_ROLES = {'admin', 'manager', 'agronomist'}
 TERMINAL = {'closed', 'cancelled', 'superseded'}
+
+# Baseline and post-work observations are accepted through the canonical
+# contract in services/observation_quality.py. A NULL cloud_cover_pct is
+# neutral: the canonical collectors mask cloud through the Sentinel-2 SCL layer
+# before computing valid_pixels_pct, so valid_pixels_pct is the quality signal.
+_ACCEPTED_NDVI_OBSERVATION = observation_quality.accepted_observation_sql(
+    value_column='mean_ndvi',
+    minimum_valid_pixels_pct=observation_quality.MIN_VALID_PIXELS_ANALYSIS_PCT,
+)
+_ACCEPTED_INDEX_OBSERVATION = observation_quality.accepted_observation_sql(
+    value_column='mean_value',
+    minimum_valid_pixels_pct=observation_quality.MIN_VALID_PIXELS_ANALYSIS_PCT,
+)
 
 
 def table(name):
@@ -119,7 +133,7 @@ def observation(db, field_id, *, before=None, after=None, identifier=None, accep
     if identifier:
         where += ' AND id=:id'; params['id']=identifier
     if accepted:
-        where += ' AND mean_ndvi BETWEEN -1 AND 1 AND valid_pixels_pct BETWEEN 50 AND 100 AND cloud_cover_pct BETWEEN 0 AND 30'
+        where += ' AND ' + _ACCEPTED_NDVI_OBSERVATION
     return one(db, 'SELECT id,captured_date AS date,mean_ndvi AS value,min_ndvi AS min,max_ndvi AS max,p10_ndvi AS p10,p90_ndvi AS p90,cloud_cover_pct AS cloud,valid_pixels_pct AS valid,satellite FROM ndvi_records WHERE '+where+' ORDER BY captured_date DESC,id DESC LIMIT 1', params)
 
 
@@ -128,7 +142,7 @@ def source_snapshot(db, source):
     baseline = observation(db, source['field_id'], before=now())
     season = one(db, 'SELECT s.season_year,s.variety,s.planting_date,s.expected_harvest_date,c.name_ru AS crop_name FROM crop_seasons s JOIN crop_types c ON c.id=s.crop_type_id WHERE s.field_id=:field AND s.season_year=:year ORDER BY s.id DESC LIMIT 1', {'field':source['field_id'], 'year':now().year})
     freshness = one(db, "SELECT status,last_accepted_at,last_quality_reason,last_failure_reason FROM satellite_field_freshness WHERE field_id=:field AND enterprise_id=:enterprise AND index_code='ndvi'", {'field':source['field_id'], 'enterprise':source['enterprise_id']})
-    indices = rows(db, "SELECT DISTINCT ON (index_code) index_code,captured_date,mean_value,valid_pixels_pct,cloud_cover_pct FROM satellite_index_records WHERE field_id=:field AND captured_date<=CURRENT_DATE AND mean_value IS NOT NULL AND valid_pixels_pct>=50 AND cloud_cover_pct<=30 ORDER BY index_code,captured_date DESC LIMIT 5", {'field':source['field_id']})
+    indices = rows(db, "SELECT DISTINCT ON (index_code) index_code,captured_date,mean_value,valid_pixels_pct,cloud_cover_pct FROM satellite_index_records WHERE field_id=:field AND captured_date<=CURRENT_DATE AND " + _ACCEPTED_INDEX_OBSERVATION + " ORDER BY index_code,captured_date DESC LIMIT 5", {'field':source['field_id']})
     candidate = one(db, 'SELECT id,source_key,zone_key,scene_id,confidence,evidence,explanation FROM autonomous_anomaly_candidates WHERE inspection_id=:id AND field_id=:field AND enterprise_id=:enterprise', {'id':source['id'], 'field':source['field_id'], 'enterprise':source['enterprise_id']})
     return jsonable_encoder({'as_of':now().date(), 'inspection_version':source['version'], 'finding':finding, 'baseline':baseline,
         'season':season, 'freshness':freshness, 'indices':indices, 'candidate':candidate,

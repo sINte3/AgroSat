@@ -16,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 
 from api.dependencies import ALLOWED_ROLES, TENANT_ROLES
 from database import SessionLocal
+from services import observation_quality
 from services.autonomous_anomaly_engine import RulePolicy, freshness_status, plan_automatic_inspections
 
 
@@ -23,6 +24,85 @@ ADVISORY_LOCK_KEY = 871_320_219
 RULE_VERSION = "r3-e-v1"
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 STATES = {"NEW", "CONFIRMED", "DISMISSED", "INSPECTION_CREATED", "RESOLVED", "SUPERSEDED"}
+
+# Freshness accepts an observation through the canonical contract in
+# services/observation_quality.py. A NULL cloud_cover_pct is neutral because the
+# canonical collectors mask cloud via the Sentinel-2 SCL layer before computing
+# valid_pixels_pct; see that module for the full reasoning.
+_FRESHNESS_NDVI_ACCEPTED = observation_quality.accepted_observation_sql(
+    value_column="n.mean_ndvi",
+    valid_pixels_column="n.valid_pixels_pct",
+    cloud_column="n.cloud_cover_pct",
+    minimum_valid_pixels_pct=observation_quality.MIN_VALID_PIXELS_FRESHNESS_PCT,
+)
+_FRESHNESS_INDEX_ACCEPTED = observation_quality.accepted_observation_sql(
+    value_column="s.mean_value",
+    valid_pixels_column="s.valid_pixels_pct",
+    cloud_column="s.cloud_cover_pct",
+    minimum_valid_pixels_pct=observation_quality.MIN_VALID_PIXELS_FRESHNESS_PCT,
+)
+
+# One definition of the freshness computation, shared by the write path and by
+# the read-only preview, so a dry run can never disagree with the write it
+# previews. Age boundaries are unchanged: FRESH through 10 days, AGING through
+# 20 days, STALE beyond that.
+_FRESHNESS_COMPUTED_SQL = f"""
+        WITH codes(index_code) AS (VALUES ('ndvi'),('savi'),('evi'),('ndmi'),('ndre')),
+        active AS (
+          SELECT f.id AS field_id,f.enterprise_id,c.index_code
+            FROM fields f CROSS JOIN codes c WHERE f.is_active=true
+        ), latest AS (
+          SELECT a.*,o.scene_key,o.accepted_at
+            FROM active a
+            LEFT JOIN LATERAL (
+              SELECT 'ndvi_record:'||n.id AS scene_key,n.captured_date::timestamptz AS accepted_at
+                FROM ndvi_records n
+               WHERE a.index_code='ndvi' AND n.field_id=a.field_id
+                 AND {_FRESHNESS_NDVI_ACCEPTED}
+              UNION ALL
+              SELECT 'satellite_index_record:'||s.id,s.captured_date::timestamptz
+                FROM satellite_index_records s
+               WHERE s.index_code=a.index_code AND s.field_id=a.field_id
+                 AND {_FRESHNESS_INDEX_ACCEPTED}
+              ORDER BY accepted_at DESC LIMIT 1
+            ) o ON true
+        ), computed AS (
+          SELECT enterprise_id,field_id,index_code,
+                 CASE WHEN accepted_at IS NULL THEN
+                   CASE :outcome WHEN 'cloud_blocked' THEN 'CLOUD_BLOCKED'
+                     WHEN 'provider_degraded' THEN 'PROVIDER_DEGRADED'
+                     WHEN 'quality_blocked' THEN 'QUALITY_BLOCKED' ELSE 'NEVER_COLLECTED' END
+                   WHEN current_date-accepted_at::date<=10 THEN 'FRESH'
+                   WHEN current_date-accepted_at::date<=20 THEN 'AGING' ELSE 'STALE' END AS status,
+                 scene_key,accepted_at
+            FROM latest
+        )
+"""
+
+_REFRESH_FRESHNESS_SQL = _FRESHNESS_COMPUTED_SQL + """
+        INSERT INTO satellite_field_freshness
+          (enterprise_id,field_id,index_code,status,last_accepted_scene,last_accepted_at,
+           last_failure_reason,last_run_id,updated_at)
+        SELECT enterprise_id,field_id,index_code,status,scene_key,accepted_at,
+               :outcome,:run_id,now()
+          FROM computed
+        ON CONFLICT (field_id,index_code) DO UPDATE SET
+          enterprise_id=excluded.enterprise_id,status=excluded.status,
+          last_accepted_scene=excluded.last_accepted_scene,last_accepted_at=excluded.last_accepted_at,
+          last_failure_reason=excluded.last_failure_reason,last_run_id=excluded.last_run_id,updated_at=now()
+        RETURNING id
+"""
+
+_FRESHNESS_PREVIEW_SQL = _FRESHNESS_COMPUTED_SQL + """
+        SELECT c.status AS computed_status,
+               COALESCE(stored.status,'(absent)') AS stored_status,
+               count(*)::bigint AS row_count
+          FROM computed c
+          LEFT JOIN satellite_field_freshness stored
+            ON stored.field_id=c.field_id AND stored.index_code=c.index_code
+         GROUP BY 1,2
+         ORDER BY 1,2
+"""
 
 
 @dataclass
@@ -110,52 +190,36 @@ def heartbeat(run: ApplyRun, counters: dict | None = None) -> None:
     run.session.commit()
 
 
+def _freshness_outcome(last_outcome: str | None) -> str | None:
+    if last_outcome in {"cloud_blocked", "provider_degraded", "quality_blocked"}:
+        return last_outcome
+    return None
+
+
 def refresh_freshness(run: ApplyRun, *, last_outcome: str | None = None) -> int:
-    outcome = last_outcome if last_outcome in {"cloud_blocked", "provider_degraded", "quality_blocked"} else None
-    result = run.session.execute(text("""
-        WITH codes(index_code) AS (VALUES ('ndvi'),('savi'),('evi'),('ndmi'),('ndre')),
-        active AS (
-          SELECT f.id AS field_id,f.enterprise_id,c.index_code
-            FROM fields f CROSS JOIN codes c WHERE f.is_active=true
-        ), latest AS (
-          SELECT a.*,o.scene_key,o.accepted_at
-            FROM active a
-            LEFT JOIN LATERAL (
-              SELECT 'ndvi_record:'||n.id AS scene_key,n.captured_date::timestamptz AS accepted_at
-                FROM ndvi_records n
-               WHERE a.index_code='ndvi' AND n.field_id=a.field_id
-                 AND n.mean_ndvi BETWEEN -1 AND 1
-                 AND COALESCE(n.valid_pixels_pct,0)>=60 AND COALESCE(n.cloud_cover_pct,101)<=30
-              UNION ALL
-              SELECT 'satellite_index_record:'||s.id,s.captured_date::timestamptz
-                FROM satellite_index_records s
-               WHERE s.index_code=a.index_code AND s.field_id=a.field_id
-                 AND s.mean_value BETWEEN -1 AND 1
-                 AND COALESCE(s.valid_pixels_pct,0)>=60 AND COALESCE(s.cloud_cover_pct,101)<=30
-              ORDER BY accepted_at DESC LIMIT 1
-            ) o ON true
-        )
-        INSERT INTO satellite_field_freshness
-          (enterprise_id,field_id,index_code,status,last_accepted_scene,last_accepted_at,
-           last_failure_reason,last_run_id,updated_at)
-        SELECT enterprise_id,field_id,index_code,
-               CASE WHEN accepted_at IS NULL THEN
-                 CASE :outcome WHEN 'cloud_blocked' THEN 'CLOUD_BLOCKED'
-                   WHEN 'provider_degraded' THEN 'PROVIDER_DEGRADED'
-                   WHEN 'quality_blocked' THEN 'QUALITY_BLOCKED' ELSE 'NEVER_COLLECTED' END
-                 WHEN current_date-accepted_at::date<=10 THEN 'FRESH'
-                 WHEN current_date-accepted_at::date<=20 THEN 'AGING' ELSE 'STALE' END,
-               scene_key,accepted_at,:outcome,:run_id,now()
-          FROM latest
-        ON CONFLICT (field_id,index_code) DO UPDATE SET
-          enterprise_id=excluded.enterprise_id,status=excluded.status,
-          last_accepted_scene=excluded.last_accepted_scene,last_accepted_at=excluded.last_accepted_at,
-          last_failure_reason=excluded.last_failure_reason,last_run_id=excluded.last_run_id,updated_at=now()
-        RETURNING id
-    """), {"run_id": run.run_id, "outcome": outcome})
+    result = run.session.execute(
+        text(_REFRESH_FRESHNESS_SQL),
+        {"run_id": run.run_id, "outcome": _freshness_outcome(last_outcome)},
+    )
     count = len(result.fetchall())
     run.session.commit()
     return count
+
+
+def freshness_preview(session, *, last_outcome: str | None = None) -> list[dict]:
+    """Report what freshness would become, without writing anything.
+
+    Read-only counterpart of :func:`refresh_freshness`. Both share the same
+    computation, so a dry run cannot disagree with the write it previews.
+    Returns one row per (computed status, stored status) pair with a count;
+    ``stored_status`` is ``'(absent)'`` where no freshness row exists yet.
+    """
+    return _rows(
+        session.execute(
+            text(_FRESHNESS_PREVIEW_SQL),
+            {"outcome": _freshness_outcome(last_outcome)},
+        )
+    )
 
 
 def reconcile_pixel_candidates(run: ApplyRun) -> dict[str, int | bool]:

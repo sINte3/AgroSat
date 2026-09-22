@@ -4,11 +4,15 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
+from services import observation_quality
+
 
 SUPPORTED_INDEX_CODES = frozenset({"ndvi", "savi", "evi", "ndmi", "ndre"})
 ALGORITHM_VERSION = "observation_direction_v1"
-QUALITY_VALID_PIXELS_MIN = 50.0
-QUALITY_CLOUD_MAX = 30.0
+# Sourced from the canonical contract so the two cannot drift apart.
+QUALITY_VALID_PIXELS_MIN = observation_quality.MIN_VALID_PIXELS_ANALYSIS_PCT
+QUALITY_CLOUD_MAX = observation_quality.MAX_CLOUD_COVER_PCT
+# Confidence heuristic, not part of the acceptance contract.
 HIGH_VALID_PIXELS_MIN = 80.0
 HIGH_CLOUD_MAX = 10.0
 LIMITATION = (
@@ -26,15 +30,32 @@ class Observation:
     observed_at: date
     value: float
     valid_pixels_pct: float
-    cloud_cover_pct: float
+    # May be None: the canonical collectors do not measure scene-level cloud
+    # cover. See services/observation_quality.py.
+    cloud_cover_pct: float | None
     satellite: str
 
 
 def accepted_quality(observation: Observation) -> bool:
-    return (
-        0 <= observation.cloud_cover_pct <= QUALITY_CLOUD_MAX
-        and QUALITY_VALID_PIXELS_MIN <= observation.valid_pixels_pct <= 100
+    """Whether one observation satisfies the canonical quality contract."""
+    return observation_quality.is_accepted(
+        value=observation.value,
+        valid_pixels_pct=observation.valid_pixels_pct,
+        cloud_cover_pct=observation.cloud_cover_pct,
+        minimum_valid_pixels_pct=QUALITY_VALID_PIXELS_MIN,
     )
+
+
+def _cloud_within(cloud_cover_pct: float | None, maximum: float) -> bool:
+    """Whether measured cloud metadata is at or below ``maximum``.
+
+    Unmeasured metadata cannot support a positive claim about cloud cover, so
+    it does not satisfy a high-confidence criterion. It does not reject the
+    observation either; that is the acceptance contract's job.
+    """
+    if cloud_cover_pct is None:
+        return False
+    return cloud_cover_pct <= maximum
 
 
 def candidate_eligible(
@@ -108,8 +129,8 @@ def resolve_direction(
     high = (
         reference.valid_pixels_pct >= HIGH_VALID_PIXELS_MIN
         and candidate.valid_pixels_pct >= HIGH_VALID_PIXELS_MIN
-        and reference.cloud_cover_pct <= HIGH_CLOUD_MAX
-        and candidate.cloud_cover_pct <= HIGH_CLOUD_MAX
+        and _cloud_within(reference.cloud_cover_pct, HIGH_CLOUD_MAX)
+        and _cloud_within(candidate.cloud_cover_pct, HIGH_CLOUD_MAX)
     )
     return {
         "result": result,

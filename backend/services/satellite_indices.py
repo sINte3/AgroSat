@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from services import observation_quality
+
 logger = logging.getLogger(__name__)
 
 EPSILON = 1e-10
@@ -583,7 +585,13 @@ def validate_index_quality(
         except (TypeError, ValueError):
             cloud_cover_pct = None
 
-    if cloud_cover_pct is not None and cloud_cover_pct > 30:
+    # Ingest admission gate, not the accepted-observation contract; only the
+    # shared cloud ceiling comes from services/observation_quality.py. A NULL
+    # cloud percentage is not cloud evidence and never rejects on its own.
+    if (
+        cloud_cover_pct is not None
+        and cloud_cover_pct > observation_quality.MAX_CLOUD_COVER_PCT
+    ):
         return False, f"{code} high cloud cover ({cloud_cover_pct:.1f}%)"
 
     if valid_pixels_pct is not None:
