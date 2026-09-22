@@ -93,15 +93,72 @@ _REFRESH_FRESHNESS_SQL = _FRESHNESS_COMPUTED_SQL + """
         RETURNING id
 """
 
-_FRESHNESS_PREVIEW_SQL = _FRESHNESS_COMPUTED_SQL + """
-        SELECT c.status AS computed_status,
-               COALESCE(stored.status,'(absent)') AS stored_status,
+# ── Manual recovery write path (scripts/recompute_satellite_freshness.py) ───
+#
+# refresh_freshness() above is the COLLECTOR's write path: it rewrites every
+# freshness row and stamps the run that produced it. A manual recovery is not a
+# collection run, so it must neither claim nor erase that provenance. The
+# recovery path below is therefore separate, and deliberately narrower:
+#
+#   * it reuses _FRESHNESS_COMPUTED_SQL, so the accepted-observation predicate
+#     stays defined in exactly one place;
+#   * it considers ONLY (field, index) pairs that have an accepted persisted
+#     observation. Absence of evidence is not evidence: a pair with no accepted
+#     observation is left exactly as the collector left it, including a
+#     PROVIDER_DEGRADED / QUALITY_BLOCKED / CLOUD_BLOCKED status that a manual
+#     command has no authority to reinterpret;
+#   * it writes only rows whose stored state actually differs (IS DISTINCT
+#     FROM), so a second apply writes zero rows and updated_at does not move;
+#   * it updates only the columns it has authoritative new information for --
+#     status, last_accepted_scene, last_accepted_at -- plus updated_at. It
+#     leaves last_run_id, last_failure_reason, last_quality_reason,
+#     last_attempted_scene, last_attempted_at and next_eligible_at untouched.
+#
+# The :outcome bind is inherited from the shared CTE. It is unreachable here:
+# it only feeds the branch for rows with no accepted scene, which this path
+# excludes. It is bound to NULL so the statement stays valid.
+_RECOVERY_CHANGES_SQL = _FRESHNESS_COMPUTED_SQL + """
+        , recovery AS (
+          SELECT c.enterprise_id,c.field_id,c.index_code,
+                 c.status AS computed_status,c.scene_key,c.accepted_at,
+                 stored.id AS stored_id,stored.status AS stored_status,
+                 stored.last_accepted_scene AS stored_scene,
+                 stored.last_accepted_at AS stored_accepted_at
+            FROM computed c
+            LEFT JOIN satellite_field_freshness stored
+              ON stored.field_id=c.field_id AND stored.index_code=c.index_code
+           WHERE c.accepted_at IS NOT NULL
+        ), changes AS (
+          SELECT * FROM recovery
+           WHERE stored_id IS NULL
+              OR stored_status IS DISTINCT FROM computed_status
+              OR stored_scene IS DISTINCT FROM scene_key
+              OR stored_accepted_at IS DISTINCT FROM accepted_at
+        )
+"""
+
+_RECOVERY_PREVIEW_SQL = _RECOVERY_CHANGES_SQL + """
+        SELECT computed_status,
+               COALESCE(stored_status,'(absent)') AS stored_status,
                count(*)::bigint AS row_count
-          FROM computed c
-          LEFT JOIN satellite_field_freshness stored
-            ON stored.field_id=c.field_id AND stored.index_code=c.index_code
+          FROM changes
          GROUP BY 1,2
          ORDER BY 1,2
+"""
+
+_RECOVERY_APPLY_SQL = _RECOVERY_CHANGES_SQL + """
+        INSERT INTO satellite_field_freshness
+          (enterprise_id,field_id,index_code,status,last_accepted_scene,
+           last_accepted_at,updated_at)
+        SELECT enterprise_id,field_id,index_code,computed_status,scene_key,
+               accepted_at,now()
+          FROM changes
+        ON CONFLICT (field_id,index_code) DO UPDATE SET
+          status=excluded.status,
+          last_accepted_scene=excluded.last_accepted_scene,
+          last_accepted_at=excluded.last_accepted_at,
+          updated_at=now()
+        RETURNING id
 """
 
 
@@ -206,20 +263,30 @@ def refresh_freshness(run: ApplyRun, *, last_outcome: str | None = None) -> int:
     return count
 
 
-def freshness_preview(session, *, last_outcome: str | None = None) -> list[dict]:
-    """Report what freshness would become, without writing anything.
+def freshness_recovery_preview(session) -> list[dict]:
+    """Report the exact rows a manual freshness recovery would write.
 
-    Read-only counterpart of :func:`refresh_freshness`. Both share the same
-    computation, so a dry run cannot disagree with the write it previews.
-    Returns one row per (computed status, stored status) pair with a count;
-    ``stored_status`` is ``'(absent)'`` where no freshness row exists yet.
+    Read-only: writes nothing and takes no lock. The result is the same
+    ``changes`` set that :func:`apply_freshness_recovery` writes, so the
+    preview count and the write count cannot disagree when both run inside one
+    locked transaction. Returns one row per (computed status, stored status)
+    pair with a count; ``stored_status`` is ``'(absent)'`` where no freshness
+    row exists yet.
     """
-    return _rows(
-        session.execute(
-            text(_FRESHNESS_PREVIEW_SQL),
-            {"outcome": _freshness_outcome(last_outcome)},
-        )
-    )
+    return _rows(session.execute(text(_RECOVERY_PREVIEW_SQL), {"outcome": None}))
+
+
+def apply_freshness_recovery(session) -> int:
+    """Write the bounded recovery change set and return the rows written.
+
+    Does **not** commit: the caller owns the transaction, so the advisory lock
+    it holds covers this write. Only rows whose accepted-observation-derived
+    state actually differs are touched, so calling this twice writes zero rows
+    the second time. Collector provenance columns are preserved; see
+    ``_RECOVERY_CHANGES_SQL`` above.
+    """
+    result = session.execute(text(_RECOVERY_APPLY_SQL), {"outcome": None})
+    return len(result.fetchall())
 
 
 def reconcile_pixel_candidates(run: ApplyRun) -> dict[str, int | bool]:

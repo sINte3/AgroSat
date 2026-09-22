@@ -266,7 +266,10 @@ cd backend
 export AGROSAT_TEST_DATABASE_URL="postgresql://…/agrosat_h0a_contract"
 python3 -m pytest tests/test_h0a_freshness_postgres_contract.py -q
 ```
-→ **22 passed**
+→ **34 passed** (22 from the original contract work, plus 12 added by the
+architect review fix: provenance preservation, physical idempotency, exact
+mutation count, run-derived statuses surviving a recovery, lock ordering, and
+the recovery's mutation surface)
 
 The suite refuses to run against anything but an isolated database: the target
 name must start with `agrosat_h0a`, and the literal name `agrosat` is rejected.
@@ -291,8 +294,8 @@ Both runs executed in the same container, same interpreter, no database URL set.
 
 | | Base `dc23f12` | This branch |
 |---|---|---|
-| passed | 1002 | **1044** (+42) |
-| skipped | 4 | **26** (+22) |
+| passed | 1002 | **1046** (+44) |
+| skipped | 4 | **38** (+34) |
 | failed | 26 | **26** |
 
 The two `FAILED` lists were diffed and are **byte-identical** — no failure
@@ -304,9 +307,13 @@ needs a reachable database. That last one was re-run in a throwaway git worktree
 at `dc23f12` and fails identically there, so it is pre-existing and
 environmental.
 
-Deltas fully accounted for: +42 passed = 39 new unit tests + 2 extra
-parametrized malformed-cloud cases + 1 new NULL-neutrality test; +22 skipped =
-the database-gated file.
+Deltas fully accounted for: **+44 passed** = 41 new unit contract tests + 2
+extra parametrized malformed-cloud cases + 1 new NULL-neutrality test;
+**+34 skipped** = the database-gated file, which skips when
+`AGROSAT_TEST_DATABASE_URL` is unset.
+
+(An earlier draft of this document reported 1044 / 26. That count was taken
+before the last two ingest-gate tests were added and is corrected here.)
 
 ---
 
@@ -359,23 +366,88 @@ python backend\scripts\recompute_satellite_freshness.py
 python backend\scripts\recompute_satellite_freshness.py --apply
 ```
 
-Properties:
+### It is a recovery path, not the collector's refresh
+
+This distinction is load-bearing, and the first implementation got it wrong.
+
+The original version drove the recovery through the collector's own
+`refresh_freshness()`, which performs an unconditional UPSERT over every
+freshness row and stamps the run that produced it. Run manually, with no run to
+stamp, that **erased collector provenance** (`last_run_id` and
+`last_failure_reason` were overwritten with NULL) and **touched every row on
+every pass**. A second `--apply` reported `rows_changing: 0` while still
+UPDATEing every row and moving every `updated_at`. It was logically idempotent
+and physically not. Corrected in the follow-up commit; `refresh_freshness()`
+itself was not changed and remains the collector's own path.
+
+The recovery now has its own bounded write path. It reuses
+`_FRESHNESS_COMPUTED_SQL`, so the accepted-observation predicate is still
+defined in exactly one place, but it differs from the collector deliberately:
+
+**Exact writes.** The change set is computed with `IS DISTINCT FROM` across
+`status`, `last_accepted_scene` and `last_accepted_at`. Only rows that actually
+differ are written, so `rows_changing` from the preview and
+`freshness_rows_written` from the apply are the same number, and a second
+`--apply` writes **zero rows** and leaves every `updated_at` untouched. This is
+physical idempotency, verified by comparing whole rows before and after.
+
+**Provenance preservation.** The recovery updates only the columns it has
+authoritative new information for — `status`, `last_accepted_scene`,
+`last_accepted_at`, and `updated_at`. It leaves untouched:
+
+| Column | Owner |
+|---|---|
+| `last_run_id` | the collector run that produced the row |
+| `last_failure_reason` | that run's outcome |
+| `last_quality_reason` | that run's quality verdict |
+| `last_attempted_scene` | that run's attempt |
+| `last_attempted_at` | that run's attempt |
+| `next_eligible_at` | the collector's scheduling |
+
+**Absence of evidence is not evidence.** The recovery considers only
+(field, index) pairs that *have* an accepted persisted observation. A pair with
+none is left exactly as the collector left it — a `PROVIDER_DEGRADED`,
+`QUALITY_BLOCKED` or `CLOUD_BLOCKED` status is **never** rewritten to
+`NEVER_COLLECTED` just because a manual command has no run-level outcome to
+offer. Reconstructing historical provider-run outcomes is not this command's
+job. The corollary: a row that is *wrongly* `FRESH` with no accepted
+observation is also left alone; the collector corrects that on its next cycle.
+
+### Properties
 
 * **dry run by default** — `--apply` is required to write anything;
 * writes to **no table other than `satellite_field_freshness`**;
+* **inserts no `satellite_collection_runs` row** — a manual recovery is not a
+  collection cycle and must not invent one;
+* **writes no observation rows**;
 * **contacts no satellite provider** and imports no provider module (asserted by test);
 * **creates no scheduler and no Scheduled Task**;
-* refuses to run while a collection cycle is in flight (`status='running'` with a
-  heartbeat inside 6 hours) and then takes the collector's advisory lock, so the
-  two are mutually exclusive;
-* the lock is `pg_try_advisory_xact_lock`, held in the *same transaction* as the
-  write — a session-scoped lock is unreliable here because SQLAlchemy returns the
-  connection to the pool on commit (see §9);
-* **idempotent** — a second `--apply` reports `rows_changing: 0`;
-* emits one JSON summary (`freshness_before`, `transitions`, `rows_evaluated`,
-  `rows_changing`, `observations_written`, `freshness_after`, `provider_calls: 0`)
-  with credential-shaped text redacted;
+* **physically idempotent** — a second `--apply` reports `rows_changing: 0`,
+  `freshness_rows_written: 0`, and mutates nothing at all;
+* emits one JSON summary (`schema_version: 2`, `freshness_before`,
+  `transitions`, `rows_changing`, `freshness_rows_written`, `freshness_after`,
+  `provider_calls: 0`) with credential-shaped text redacted. The field is named
+  `freshness_rows_written`, not `observations_written`, because this command
+  writes no observations;
 * exit codes: `0` ok, `2` contract/configuration, `3` lock contention, `4` operational.
+
+### Locking
+
+`--apply` runs as **one transaction**, in this order:
+
+1. take the collector's transaction-scoped advisory lock
+   (`pg_try_advisory_xact_lock`) — a session-scoped lock is unreliable here
+   because SQLAlchemy returns the connection to the pool on commit (see §9);
+2. **while holding it**, check for a genuinely in-flight collector
+   (`status='running'` with a heartbeat inside 6 hours) and refuse with exit 3
+   if one is running;
+3. compute the exact change set under that same locked state;
+4. perform the bounded update;
+5. commit exactly once.
+
+Because the preview and the write read the same locked state, they cannot
+disagree. No helper commits mid-transaction. The dry run is read-only and takes
+no lock.
 
 No Alembic migration is involved. No observation row is created, modified or
 deleted.
@@ -464,12 +536,13 @@ opportunistic fixes".
    to be retained.
 
 2. **The collector's own advisory lock has the pooling weakness fixed in the new
-   CLI.** `begin_apply_run` takes a *session-scoped* `pg_try_advisory_lock`;
-   SQLAlchemy returns the connection to the pool on commit, so the lock can be
-   released on a different backend than the one that will try to unlock it. My
-   own test caught this pattern in my first draft of the reconciliation CLI
-   (second `--apply` wrongly reported lock contention). The CLI now uses
-   `pg_try_advisory_xact_lock`; the collector was **not** changed.
+   CLI. Deferred to H0-D / C3 follow-up.** `begin_apply_run` takes a
+   *session-scoped* `pg_try_advisory_lock`; SQLAlchemy returns the connection to
+   the pool on commit, so the lock can be released on a different backend than
+   the one that will try to unlock it. My own test caught this pattern in my
+   first draft of the reconciliation CLI (second `--apply` wrongly reported lock
+   contention). The CLI uses `pg_try_advisory_xact_lock`; the collector was
+   **not** changed, per the architect's instruction to leave it for H0-D/C3.
 
 **Carried forward from the audit, untouched:**
 
@@ -519,10 +592,16 @@ Not executed. Notification worker stays disabled throughout steps 1–4.
    `0016_operational_command_center`.
 2. **Preview freshness.** `python backend\scripts\recompute_satellite_freshness.py`
    Expect `rows_changing` ≈ 1,375 and `transitions` showing
-   `computed=FRESH stored=NEVER_COLLECTED`. Confirm `provider_calls: 0`.
-3. **Apply freshness.** Same command with `--apply`. Re-run once; expect
-   `rows_changing: 0` (idempotent). Alternatively skip steps 2–3 entirely and let
-   the next scheduled collection cycle rewrite freshness itself.
+   `computed=FRESH stored=NEVER_COLLECTED`. Confirm `provider_calls: 0` and
+   `freshness_rows_written: 0` (a dry run writes nothing).
+3. **Apply freshness.** Same command with `--apply`. Expect
+   `freshness_rows_written` to equal the preview's `rows_changing`. Re-run once;
+   expect `rows_changing: 0` and `freshness_rows_written: 0`. Alternatively skip
+   steps 2–3 entirely and let the next scheduled collection cycle rewrite
+   freshness itself.
+   Rows that the recovery reports as unchanged but that are still not `FRESH`
+   are pairs with no accepted observation; those are the collector's to resolve,
+   not this command's.
 4. **Retire the false notifications.** Run
    `reconcile_operational_notifications.py` dry, then `--apply`, repeating until
    `resolved` reports 0 (3–7 passes for 1,375 rows). Verify no row count dropped:

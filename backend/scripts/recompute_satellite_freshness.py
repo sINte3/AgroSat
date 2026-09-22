@@ -12,14 +12,29 @@ What it does NOT do:
 * it never recollects or rewrites an observation;
 * it writes nothing outside ``satellite_field_freshness``, which is derived
   state that the collector already rewrites on every cycle;
+* it never inserts a ``satellite_collection_runs`` row: a manual recovery is
+  not a collection cycle and must not invent one;
 * it installs no scheduler and no Scheduled Task.
 
-It is a dry run unless ``--apply`` is passed. Both modes share one SQL
-definition with the collector's own freshness refresh, so the preview cannot
-disagree with the write.
+This is a *recovery* path, not the collector's refresh. It is deliberately
+narrower than ``refresh_freshness``:
 
-Safety: ``--apply`` takes the collector's PostgreSQL advisory lock, so this
-command and a running collection cycle are mutually exclusive.
+* it touches only (field, index) pairs that have an accepted persisted
+  observation, so a PROVIDER_DEGRADED / QUALITY_BLOCKED / CLOUD_BLOCKED status
+  is never reinterpreted from the mere absence of one;
+* it writes only rows whose state actually differs, so a second ``--apply``
+  writes zero rows and does not move ``updated_at``;
+* it preserves collector provenance: ``last_run_id``, ``last_failure_reason``,
+  ``last_quality_reason``, ``last_attempted_scene``, ``last_attempted_at`` and
+  ``next_eligible_at`` are left untouched.
+
+It is a dry run unless ``--apply`` is passed. Both modes share one SQL
+definition of the change set, so the preview cannot disagree with the write.
+
+Safety: ``--apply`` runs as a single transaction that takes the collector's
+transaction-scoped advisory lock first, then checks for an in-flight cycle,
+then previews and writes under that same lock, then commits once. The dry run
+is read-only and takes no lock.
 
 Exit codes: 0 ok, 2 contract/validation error, 3 lock contention,
 4 operational error.
@@ -47,9 +62,8 @@ from config import settings
 from database import SessionLocal
 from services.autonomous_monitoring import (
     ADVISORY_LOCK_KEY,
-    ApplyRun,
-    freshness_preview,
-    refresh_freshness,
+    apply_freshness_recovery,
+    freshness_recovery_preview,
 )
 
 
@@ -104,18 +118,31 @@ def _status_counts(session) -> dict[str, int]:
     return {str(row[0]): int(row[1]) for row in rows}
 
 
+def _transitions(session) -> tuple[list[dict[str, Any]], int]:
+    """The exact change set a recovery would write, plus its row count."""
+    rows = [
+        {
+            "computed_status": row["computed_status"],
+            "stored_status": row["stored_status"],
+            "row_count": int(row["row_count"]),
+        }
+        for row in freshness_recovery_preview(session)
+    ]
+    return rows, sum(row["row_count"] for row in rows)
+
+
 def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
     started = time.monotonic()
     apply_mode = bool(args.apply)
     summary: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "command": "recompute_satellite_freshness",
         "mode": "apply" if apply_mode else "dry-run",
         "started_at": utc_now(),
         "status": "failed",
         "exit_code": 4,
         "provider_calls": 0,
-        "observations_written": 0,
+        "freshness_rows_written": 0,
     }
 
     if not str(settings.database_url or "").strip():
@@ -129,74 +156,59 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
 
     session = SessionLocal()
     try:
+        if not apply_mode:
+            # Read-only: no lock needed, and nothing is written.
+            summary["freshness_before"] = _status_counts(session)
+            summary["transitions"], summary["rows_changing"] = _transitions(session)
+            session.rollback()
+            summary.update(status="succeeded", exit_code=0)
+            return 0, summary
+
+        # One transaction for the whole apply: take the lock first, then read
+        # and write the same locked state, then commit exactly once. The lock
+        # is transaction-scoped because SQLAlchemy returns the connection to
+        # the pool on commit, which would strand a session-scoped lock.
+        session.rollback()
+        locked = bool(
+            session.execute(
+                text("SELECT pg_try_advisory_xact_lock(:key)"),
+                {"key": ADVISORY_LOCK_KEY},
+            ).scalar()
+        )
+        if not locked:
+            session.rollback()
+            summary.update(
+                status="lock_contended",
+                exit_code=3,
+                failure_category="lock_contention",
+                diagnostic="another freshness writer holds the advisory lock",
+            )
+            return 3, summary
+
+        # Checked while holding the lock: a collector that has not yet taken
+        # the lock cannot slip in between this check and the write.
+        in_flight = session.execute(
+            text(
+                "SELECT count(*) FROM satellite_collection_runs "
+                "WHERE status = 'running' "
+                "AND heartbeat_at > now() - interval '6 hours'"
+            )
+        ).scalar_one()
+        if in_flight:
+            session.rollback()
+            summary.update(
+                status="lock_contended",
+                exit_code=3,
+                failure_category="lock_contention",
+                diagnostic="a satellite collection cycle is currently running",
+            )
+            return 3, summary
+
         summary["freshness_before"] = _status_counts(session)
-        transitions = freshness_preview(session)
-        summary["transitions"] = [
-            {
-                "computed_status": row["computed_status"],
-                "stored_status": row["stored_status"],
-                "row_count": int(row["row_count"]),
-            }
-            for row in transitions
-        ]
-        summary["rows_evaluated"] = sum(
-            item["row_count"] for item in summary["transitions"]
-        )
-        summary["rows_changing"] = sum(
-            item["row_count"]
-            for item in summary["transitions"]
-            if item["computed_status"] != item["stored_status"]
-        )
-
-        if apply_mode:
-            # Freshness is owned by the collector during a cycle. Refuse while a
-            # cycle is genuinely in flight.
-            in_flight = session.execute(
-                text(
-                    "SELECT count(*) FROM satellite_collection_runs "
-                    "WHERE status = 'running' "
-                    "AND heartbeat_at > now() - interval '6 hours'"
-                )
-            ).scalar_one()
-            if in_flight:
-                summary.update(
-                    status="lock_contended",
-                    exit_code=3,
-                    failure_category="lock_contention",
-                    diagnostic="a satellite collection cycle is currently running",
-                )
-                return 3, summary
-
-            # Transaction-scoped lock, taken in the same transaction as the
-            # write. A session-scoped lock would be unreliable here because
-            # SQLAlchemy returns the connection to the pool on commit.
-            session.rollback()
-            locked = bool(
-                session.execute(
-                    text("SELECT pg_try_advisory_xact_lock(:key)"),
-                    {"key": ADVISORY_LOCK_KEY},
-                ).scalar()
-            )
-            if not locked:
-                session.rollback()
-                summary.update(
-                    status="lock_contended",
-                    exit_code=3,
-                    failure_category="lock_contention",
-                    diagnostic="another freshness writer holds the advisory lock",
-                )
-                return 3, summary
-
-            # refresh_freshness writes and commits inside this transaction, so
-            # the lock covers the write and is released with it.
-            written = refresh_freshness(
-                ApplyRun(session=session, run_id=None, run_key="freshness-reconcile"),
-                last_outcome=None,
-            )
-            summary["observations_written"] = int(written)
-            summary["freshness_after"] = _status_counts(session)
-        else:
-            session.rollback()
+        summary["transitions"], summary["rows_changing"] = _transitions(session)
+        summary["freshness_rows_written"] = apply_freshness_recovery(session)
+        summary["freshness_after"] = _status_counts(session)
+        session.commit()
 
         summary.update(status="succeeded", exit_code=0)
         return 0, summary

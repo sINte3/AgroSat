@@ -86,6 +86,7 @@ class ContractBase(unittest.TestCase):
             "operational_notification_events",
             "operational_notifications",
             "satellite_field_freshness",
+            "satellite_collection_runs",
             "ndvi_records",
             "satellite_index_records",
             "fields",
@@ -176,6 +177,26 @@ class ContractBase(unittest.TestCase):
         ).scalar_one()
         self.session.commit()
         return record_id
+
+    def _seed_every_index(self, *, captured, valid_pixels_pct=100.0, cloud_cover_pct=None):
+        """Seed all five indices, as one real collection cycle does.
+
+        Freshness is tracked per (field, index), so a field seeded with NDVI
+        alone legitimately has four NEVER_COLLECTED rows. Seeding the whole set
+        keeps these assertions about the repair rather than about absent data.
+        """
+        self._insert_ndvi(
+            captured=captured,
+            valid_pixels_pct=valid_pixels_pct,
+            cloud_cover_pct=cloud_cover_pct,
+        )
+        for index_code in ("savi", "evi", "ndmi", "ndre"):
+            self._insert_index(
+                index_code=index_code,
+                captured=captured,
+                valid_pixels_pct=valid_pixels_pct,
+                cloud_cover_pct=cloud_cover_pct,
+            )
 
     def _refresh(self, last_outcome=None):
         from services.autonomous_monitoring import ApplyRun, refresh_freshness
@@ -412,7 +433,7 @@ class FreshnessContractTests(ContractBase):
         self.assertEqual(code, 0)
         self.assertEqual(summary["mode"], "dry-run")
         self.assertEqual(summary["provider_calls"], 0)
-        self.assertEqual(summary["observations_written"], 0)
+        self.assertEqual(summary["freshness_rows_written"], 0)
         self.assertGreater(summary["rows_changing"], 0)
         # Nothing was written.
         self.assertEqual(self._freshness()["ndvi"]["status"], "NEVER_COLLECTED")
@@ -439,8 +460,10 @@ class FreshnessContractTests(ContractBase):
 
         self.assertEqual((first_code, second_code), (0, 0))
         self.assertEqual(self._freshness()["ndvi"]["status"], "FRESH")
-        # Idempotent: the second pass finds nothing left to change.
+        # Idempotent: the second pass finds nothing left to change and,
+        # crucially, writes no rows at all.
         self.assertEqual(second["rows_changing"], 0)
+        self.assertEqual(second["freshness_rows_written"], 0)
         self.assertEqual(second["freshness_after"], first["freshness_after"])
 
     def test_reconciliation_refuses_a_non_isolated_target_name(self):
@@ -479,6 +502,349 @@ class FreshnessContractTests(ContractBase):
         ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, imported)
+
+
+class RecoveryProvenanceTests(ContractBase):
+    """Architect review of 81ff420: the manual recovery must be minimally mutating.
+
+    The collector's refresh_freshness() rewrites every freshness row and stamps
+    the run that produced it. Driving a manual recovery through it erased
+    collector provenance and touched every row on every pass. These tests pin
+    the dedicated recovery path's guarantees instead.
+    """
+
+    def _run_command(self, argv):
+        import scripts.recompute_satellite_freshness as command
+
+        original = command.SessionLocal
+        command.SessionLocal = self.Session
+        try:
+            return command.run(command.parse_args(argv))
+        finally:
+            command.SessionLocal = original
+
+    def _collection_run(self):
+        """A real, completed collection run to attribute freshness rows to."""
+        from sqlalchemy import text
+
+        run_id = self.session.execute(
+            text(
+                "INSERT INTO satellite_collection_runs "
+                "(id,run_key,mode,status,release_commit,rule_version,audit_identity,"
+                " started_at,heartbeat_at,provider_status) "
+                "VALUES (gen_random_uuid(),'h0a-seed-'||gen_random_uuid()::text,"
+                " 'apply','succeeded',"
+                " repeat('a',40),'r3-e-v1','h0a',now(),now(),'healthy') RETURNING id"
+            )
+        ).scalar_one()
+        self.session.commit()
+        return run_id
+
+    def _row(self, index_code="ndvi"):
+        from sqlalchemy import text
+
+        return self.session.execute(
+            text(
+                "SELECT status,last_run_id,last_failure_reason,last_quality_reason,"
+                "       last_attempted_scene,last_attempted_at,next_eligible_at,"
+                "       last_accepted_scene,last_accepted_at,updated_at "
+                "  FROM satellite_field_freshness WHERE index_code=:code"
+            ),
+            {"code": index_code},
+        ).mappings().one()
+
+    def _stage_damaged_row_with_provenance(self):
+        """C1 damage on a row that carries real collector provenance."""
+        from sqlalchemy import text
+
+        run_id = self._collection_run()
+        self._insert_ndvi(captured=date.today())
+        self._refresh()
+        self.session.execute(
+            text(
+                "UPDATE satellite_field_freshness SET "
+                "  status='NEVER_COLLECTED', last_accepted_scene=NULL, "
+                "  last_accepted_at=NULL, last_run_id=:run_id, "
+                "  last_failure_reason='provider_degraded', "
+                "  last_quality_reason='low_valid_pixels', "
+                "  last_attempted_scene='scene-A', last_attempted_at=now(), "
+                "  next_eligible_at=now() + interval '1 day' "
+                "WHERE index_code='ndvi'"
+            ),
+            {"run_id": run_id},
+        )
+        self.session.commit()
+        return run_id
+
+    # ─── 1. preserve collector provenance ──────────────────────────────────
+
+    def test_recovery_repairs_state_but_preserves_collector_provenance(self):
+        run_id = self._stage_damaged_row_with_provenance()
+        before = self._row()
+        self.assertEqual(before["status"], "NEVER_COLLECTED")
+
+        code, summary = self._run_command(["--apply"])
+        self.assertEqual(code, 0, summary)
+
+        after = self._row()
+        # Repaired from the persisted observation.
+        self.assertEqual(after["status"], "FRESH")
+        self.assertIsNotNone(after["last_accepted_scene"])
+        self.assertIsNotNone(after["last_accepted_at"])
+        # Provenance the manual command has no authority over.
+        self.assertEqual(after["last_run_id"], run_id)
+        self.assertEqual(after["last_failure_reason"], before["last_failure_reason"])
+        self.assertEqual(after["last_quality_reason"], before["last_quality_reason"])
+        self.assertEqual(after["last_attempted_scene"], before["last_attempted_scene"])
+        self.assertEqual(after["last_attempted_at"], before["last_attempted_at"])
+        self.assertEqual(after["next_eligible_at"], before["next_eligible_at"])
+
+    def test_recovery_invents_no_collection_run(self):
+        self._stage_damaged_row_with_provenance()
+        from sqlalchemy import text
+
+        before = self.session.execute(
+            text("SELECT count(*) FROM satellite_collection_runs")
+        ).scalar_one()
+        code, summary = self._run_command(["--apply"])
+        self.assertEqual(code, 0, summary)
+        self.assertEqual(
+            self.session.execute(
+                text("SELECT count(*) FROM satellite_collection_runs")
+            ).scalar_one(),
+            before,
+        )
+        self.assertEqual(summary["provider_calls"], 0)
+
+    # ─── 2. physical idempotency ───────────────────────────────────────────
+
+    def test_second_apply_writes_no_rows_and_does_not_move_updated_at(self):
+        self._stage_damaged_row_with_provenance()
+        first_code, first = self._run_command(["--apply"])
+        self.assertEqual(first_code, 0, first)
+        self.assertEqual(first["freshness_rows_written"], 1)
+
+        settled = self._row()
+
+        second_code, second = self._run_command(["--apply"])
+        self.assertEqual(second_code, 0, second)
+        self.assertEqual(second["rows_changing"], 0)
+        self.assertEqual(second["freshness_rows_written"], 0)
+
+        again = self._row()
+        # Physically unchanged, not merely logically equivalent.
+        self.assertEqual(again["updated_at"], settled["updated_at"])
+        self.assertEqual(again["last_run_id"], settled["last_run_id"])
+        self.assertEqual(dict(again), dict(settled))
+
+    # ─── 3. absence of evidence is not evidence ────────────────────────────
+
+    def test_recovery_does_not_reclassify_rows_without_an_accepted_observation(self):
+        """A run-derived block must survive a manual recovery untouched."""
+        from sqlalchemy import text
+
+        run_id = self._collection_run()
+        # NDVI has a real observation; the four secondary indices have none.
+        self._insert_ndvi(captured=date.today())
+        self._refresh()
+        self.session.execute(
+            text(
+                "UPDATE satellite_field_freshness SET status='PROVIDER_DEGRADED', "
+                "  last_run_id=:run_id, last_failure_reason='provider_degraded', "
+                "  next_eligible_at=now() + interval '1 day' "
+                "WHERE index_code <> 'ndvi'"
+            ),
+            {"run_id": run_id},
+        )
+        self.session.execute(
+            text(
+                "UPDATE satellite_field_freshness SET status='NEVER_COLLECTED', "
+                "last_accepted_scene=NULL, last_accepted_at=NULL WHERE index_code='ndvi'"
+            )
+        )
+        self.session.commit()
+        blocked_before = {
+            code: dict(self._row(code)) for code in ("savi", "evi", "ndmi", "ndre")
+        }
+
+        code, summary = self._run_command(["--apply"])
+        self.assertEqual(code, 0, summary)
+
+        # Only the row with an accepted observation was touched.
+        self.assertEqual(summary["freshness_rows_written"], 1)
+        self.assertEqual(self._row("ndvi")["status"], "FRESH")
+        for index_code, before in blocked_before.items():
+            with self.subTest(index_code=index_code):
+                self.assertEqual(dict(self._row(index_code)), before)
+
+    def test_blocked_statuses_survive_each_of_the_run_derived_kinds(self):
+        from sqlalchemy import text
+
+        # NDVI carries a real observation; SAVI deliberately carries none, so
+        # only a run could have produced its status.
+        self._insert_ndvi(captured=date.today())
+        self._refresh()
+        for status in ("PROVIDER_DEGRADED", "QUALITY_BLOCKED", "CLOUD_BLOCKED"):
+            with self.subTest(status=status):
+                self.session.execute(
+                    text(
+                        "UPDATE satellite_field_freshness SET status=:status "
+                        "WHERE index_code='savi'"
+                    ),
+                    {"status": status},
+                )
+                self.session.commit()
+                code, summary = self._run_command(["--apply"])
+                self.assertEqual(code, 0, summary)
+                self.assertEqual(self._row("savi")["status"], status)
+
+    # ─── 4. exact mutation count ───────────────────────────────────────────
+
+    def test_preview_and_apply_agree_on_the_exact_write_set(self):
+        """N rows differ => preview rows_changing == N and apply writes N."""
+        from sqlalchemy import text
+
+        self._seed_every_index(captured=date.today())
+        self._refresh()
+        # Damage exactly three of the five rows.
+        damaged = ("ndvi", "savi", "evi")
+        self.session.execute(
+            text(
+                "UPDATE satellite_field_freshness SET status='NEVER_COLLECTED', "
+                "last_accepted_scene=NULL, last_accepted_at=NULL "
+                "WHERE index_code = ANY(:codes)"
+            ),
+            {"codes": list(damaged)},
+        )
+        self.session.commit()
+
+        dry_code, dry = self._run_command([])
+        self.assertEqual(dry_code, 0, dry)
+        self.assertEqual(dry["rows_changing"], len(damaged))
+        self.assertEqual(dry["freshness_rows_written"], 0)
+
+        apply_code, applied = self._run_command(["--apply"])
+        self.assertEqual(apply_code, 0, applied)
+        self.assertEqual(applied["rows_changing"], len(damaged))
+        self.assertEqual(applied["freshness_rows_written"], len(damaged))
+        self.assertEqual(
+            {row["status"] for row in self._freshness().values()}, {"FRESH"}
+        )
+
+    def test_recovery_creates_a_missing_row_for_an_accepted_observation(self):
+        """A pair with observations but no freshness row is still repaired."""
+        from sqlalchemy import text
+
+        self._insert_ndvi(captured=date.today())
+        self.assertEqual(
+            self.session.execute(
+                text("SELECT count(*) FROM satellite_field_freshness")
+            ).scalar_one(),
+            0,
+        )
+        code, summary = self._run_command(["--apply"])
+        self.assertEqual(code, 0, summary)
+        self.assertEqual(summary["freshness_rows_written"], 1)
+        self.assertEqual(self._row("ndvi")["status"], "FRESH")
+        # Absence of evidence stays absent: no rows invented for the other four.
+        self.assertEqual(
+            self.session.execute(
+                text("SELECT count(*) FROM satellite_field_freshness")
+            ).scalar_one(),
+            1,
+        )
+
+    # ─── mutation surface ──────────────────────────────────────────────────
+
+    def test_recovery_writes_no_observation_rows(self):
+        from sqlalchemy import text
+
+        self._stage_damaged_row_with_provenance()
+        counts = lambda: tuple(  # noqa: E731
+            self.session.execute(text(f"SELECT count(*) FROM {table}")).scalar_one()
+            for table in ("ndvi_records", "satellite_index_records")
+        )
+        before = counts()
+        code, summary = self._run_command(["--apply"])
+        self.assertEqual(code, 0, summary)
+        self.assertEqual(counts(), before)
+
+    def test_recovery_refuses_while_a_collection_cycle_is_in_flight(self):
+        from sqlalchemy import text
+
+        self._stage_damaged_row_with_provenance()
+        self.session.execute(
+            text(
+                "INSERT INTO satellite_collection_runs "
+                "(id,run_key,mode,status,release_commit,rule_version,audit_identity,"
+                " started_at,heartbeat_at,provider_status) "
+                "VALUES (gen_random_uuid(),'h0a-inflight','apply','running',"
+                " repeat('b',40),'r3-e-v1','h0a',now(),now(),'pending')"
+            )
+        )
+        self.session.commit()
+
+        code, summary = self._run_command(["--apply"])
+        self.assertEqual(code, 3, summary)
+        self.assertEqual(summary["failure_category"], "lock_contention")
+        # And nothing was written.
+        self.assertEqual(self._row("ndvi")["status"], "NEVER_COLLECTED")
+
+    def test_apply_takes_the_lock_before_inspecting_state(self):
+        """The in-flight check must run under the lock, not before it."""
+        import inspect
+
+        import scripts.recompute_satellite_freshness as command
+
+        source = inspect.getsource(command.run)
+        lock = source.index("pg_try_advisory_xact_lock")
+        in_flight = source.index("satellite_collection_runs")
+        preview = source.index("_transitions(session)", in_flight)
+        write = source.index("apply_freshness_recovery", in_flight)
+        self.assertLess(lock, in_flight, "lock must precede the in-flight check")
+        self.assertLess(in_flight, preview, "in-flight check must precede the preview")
+        self.assertLess(preview, write, "preview must precede the write")
+
+    def test_recovery_does_not_call_the_collector_write_path(self):
+        import ast
+        from pathlib import Path
+
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "scripts/recompute_satellite_freshness.py"
+        ).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        # Prose may name the collector path; code must not import or call it.
+        bound = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                bound.update(alias.asname or alias.name for alias in node.names)
+            elif isinstance(node, ast.Name):
+                bound.add(node.id)
+        self.assertNotIn("refresh_freshness", bound)
+        self.assertNotIn("ApplyRun", bound)
+        self.assertIn("apply_freshness_recovery", bound)
+        # Exactly one commit, in the apply branch.
+        commits = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "commit"
+        ]
+        self.assertEqual(len(commits), 1, "apply must commit exactly once")
+
+    def test_collector_refresh_path_is_unchanged_by_this_review_fix(self):
+        """refresh_freshness still owns run stamping; recovery is separate."""
+        from services.autonomous_monitoring import (
+            _REFRESH_FRESHNESS_SQL,
+            _RECOVERY_APPLY_SQL,
+        )
+
+        self.assertIn("last_run_id=excluded.last_run_id", _REFRESH_FRESHNESS_SQL)
+        self.assertNotIn("last_run_id", _RECOVERY_APPLY_SQL)
+        self.assertNotIn("last_failure_reason", _RECOVERY_APPLY_SQL)
+        self.assertIn("IS DISTINCT FROM", _RECOVERY_APPLY_SQL)
 
 
 class NotificationRecoveryTests(ContractBase):
@@ -532,26 +898,6 @@ class NotificationRecoveryTests(ContractBase):
             ),
             {"source_kind": source_kind},
         ).mappings().all()
-
-    def _seed_every_index(self, *, captured, valid_pixels_pct=100.0, cloud_cover_pct=None):
-        """Seed all five indices, as one real collection cycle does.
-
-        Freshness is tracked per (field, index), so a field seeded with NDVI
-        alone legitimately has four NEVER_COLLECTED rows. Seeding the whole set
-        keeps these assertions about the repair rather than about absent data.
-        """
-        self._insert_ndvi(
-            captured=captured,
-            valid_pixels_pct=valid_pixels_pct,
-            cloud_cover_pct=cloud_cover_pct,
-        )
-        for index_code in ("savi", "evi", "ndmi", "ndre"):
-            self._insert_index(
-                index_code=index_code,
-                captured=captured,
-                valid_pixels_pct=valid_pixels_pct,
-                cloud_cover_pct=cloud_cover_pct,
-            )
 
     def _stage_production_defect(self):
         """Reproduce production: a good observation, an unhealthy freshness row."""
