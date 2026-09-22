@@ -619,3 +619,110 @@ SELECT status, count(*) FROM satellite_field_freshness GROUP BY 1 ORDER BY 1;
 Expected: the overwhelming majority `FRESH`, with `AGING`/`STALE` only where
 observations are genuinely old and `NEVER_COLLECTED` only for
 (field, index) pairs that truly have no observation.
+
+---
+
+## 12. Release blocker: freshness notifications must reconcile by source cycle
+
+Found from the **real production H0-A freshness dry-run**, before any apply.
+Production is still on `dc23f12`; the H0-A candidate has not been deployed.
+
+```
+freshness_before:  NEVER_COLLECTED = 1375
+transitions:       NEVER_COLLECTED -> FRESH = 1372
+                   NEVER_COLLECTED -> AGING = 3
+rows_changing = 1375        provider_calls = 0
+```
+
+### Why the 3 AGING rows mattered
+
+A freshness notification carries a **source cycle** in its provenance:
+
+```
+status:<current freshness status>:accepted:<last accepted epoch, or "never">
+```
+
+Candidate generation derived that cycle, but stale resolution did not consult
+it — it treated an existing notification as still current merely because the
+freshness row was still non-`FRESH`:
+
+```sql
+AND s.status <> 'FRESH'          -- the whole test, before the fix
+```
+
+For the 1,372 rows going to `FRESH` that was harmless: `FRESH` fails the test,
+the old notification resolves, nothing replaces it.
+
+For the 3 rows going to `AGING` it was not. `AGING` is still non-`FRESH`, so the
+old **critical** `NEVER_COLLECTED` notification stayed active, while candidate
+generation saw a new `AGING` cycle and opened a second, **warning** notification
+for the same field and index. Both would have sat in the operator's inbox.
+Reproduced on PostgreSQL against `2671566`:
+
+```
+active freshness notifications: 2   <-- duplicate
+  critical  unread  status:NEVER_COLLECTED:accepted:never
+  warning   unread  status:AGING:accepted:1788774823
+final dry-run: candidates=0 stale_active=0   <-- reports clean while duplicated
+```
+
+That last line is why a final `stale_active == 0` check is not evidence: once
+the duplicate exists, the reconciler considers both rows settled.
+
+### The rule now
+
+An active freshness notification is current only if **both** hold:
+
+1. the `satellite_field_freshness` status is non-`FRESH`; **and**
+2. its persisted `provenance->>'source_cycle'` equals the cycle derived from the
+   current freshness row.
+
+When either fails, the old notification becomes stale and resolves; the ordinary
+candidate path then opens one for the new cycle. Because
+`reconcile_notifications` reads candidates and stale rows *before* it writes,
+both halves happen in **one apply**. `dedupe_key` already hashes the source
+cycle, so the replacement does not collide with the row being retired.
+
+Candidate generation and stale resolution now share one definition,
+`FRESHNESS_SOURCE_CYCLE_SQL`, substituted into both statements through a
+`@freshness_source_cycle@` token — a typo fails as a SQL syntax error rather
+than silently forking the definition again. Only the freshness arm changed; the
+inspection, candidate, alert, work-item, plan and collection-run arms are
+untouched.
+
+### Verified behaviour
+
+| Transition | Old notification | New notification |
+|---|---|---|
+| `NEVER_COLLECTED` → `AGING` | critical → **resolved** | one **warning**, current cycle |
+| `NEVER_COLLECTED` → `FRESH` | **resolved** | none |
+| `AGING` cycle A → cycle B | **resolved** | one warning, cycle B |
+| `AGING` → `STALE` | **resolved** | one warning, current cycle |
+| second apply, state current | unchanged | `created: 0`, `resolved: 0` |
+
+Exactly one active freshness notification per field/index/recipient at every
+step, checked across a six-state walk. Recipient scoping (oversight roles only),
+tenant isolation and the bounded `LIMIT` contract are unchanged and retested.
+
+**No manual cleanup is required.** The 1,375 production rows retire through the
+ordinary reconciler as versioned updates with audit events; nothing is deleted,
+and no one-off cleanup SQL or migration exists or is needed.
+
+### Known limitation, pre-existing and not fixed here
+
+If a field returns to a cycle string it has already used, no new notification is
+raised: `dedupe_key` hashes the source cycle and the candidate filter matches
+existing rows regardless of status, so the earlier resolved row suppresses the
+replacement. This is only reachable by passing through `FRESH` and back to a
+run-derived status, since both carry `accepted:never`. Behaviour is
+byte-identical before and after this change, so it is not a regression. Fixing
+it means changing notification identity, which is out of scope for this blocker
+and would need a data migration for the dedupe keys already stored. A test pins
+the current behaviour so it cannot change unnoticed.
+
+### Status
+
+No Alembic migration; head remains `0016_operational_command_center`. Production
+data untouched. **The production OperationalNotifications task remains disabled**
+and is re-enabled only as a separate, controlled release decision, after the
+freshness repair and the reconciler passes of §7 and §8.

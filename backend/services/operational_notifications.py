@@ -21,6 +21,26 @@ DEFAULT_LIMIT = 200
 MAX_LIMIT = 500
 
 
+# One definition of a freshness notification's source cycle.
+#
+# Candidate generation and stale resolution MUST derive this identically. When
+# they drift, a freshness status change leaves the old notification active
+# (because the row is merely still non-FRESH) while candidate generation opens
+# a second one for the new cycle, and the operator sees both. The H0-A
+# production dry-run surfaced exactly that: three fields moving
+# NEVER_COLLECTED -> AGING would have produced a stale critical alongside a new
+# warning for the same field and index.
+#
+# Substituted into both statements below through @freshness_source_cycle@, so
+# a typo fails loudly as a SQL syntax error rather than silently forking the
+# definition. Both statements alias satellite_field_freshness as `s`.
+FRESHNESS_SOURCE_CYCLE_SQL = (
+    "'status:'||s.status||':accepted:'||"
+    "COALESCE(extract(epoch from s.last_accepted_at)::bigint::text,'never')"
+)
+_FRESHNESS_CYCLE_TOKEN = "@freshness_source_cycle@"
+
+
 NOTIFICATION_CANDIDATES_SQL = r"""
 WITH facts AS (
   SELECT i.enterprise_id,i.field_id,'inspection:'||i.id::text AS case_key,
@@ -150,7 +170,7 @@ WITH facts AS (
     'freshness',s.field_id::text||':'||s.index_code,'external_source_unavailable',
     CASE WHEN s.status IN ('AGING','STALE') THEN 'warning' ELSE 'critical' END,
     'oversight',NULL::integer,
-    'status:'||s.status||':accepted:'||COALESCE(extract(epoch from s.last_accepted_at)::bigint::text,'never'),
+    @freshness_source_cycle@,
     NULL::timestamptz,'Спутниковый контекст ограничен: '||f.name,
     'Актуальность спутниковых данных требует внимания; это состояние источника, а не агрономический диагноз.',
     jsonb_build_object('freshness_status',s.status,'index_code',s.index_code,
@@ -198,7 +218,7 @@ WHERE NOT EXISTS (
 )
 ORDER BY enterprise_id,notification_type,source_kind,source_id,recipient_user_id
 LIMIT :limit
-"""
+""".replace(_FRESHNESS_CYCLE_TOKEN, FRESHNESS_SOURCE_CYCLE_SQL)
 
 
 STALE_ACTIVE_SQL = r"""
@@ -253,7 +273,8 @@ WHERE n.status IN ('unread','read') AND NOT (
   (n.notification_type='external_source_unavailable' AND n.source_kind='freshness' AND EXISTS (
     SELECT 1 FROM satellite_field_freshness s
     WHERE s.enterprise_id=n.enterprise_id
-      AND s.field_id::text||':'||s.index_code=n.source_id AND s.status<>'FRESH')) OR
+      AND s.field_id::text||':'||s.index_code=n.source_id AND s.status<>'FRESH'
+      AND n.provenance->>'source_cycle'=@freshness_source_cycle@)) OR
   (n.notification_type='external_source_unavailable' AND n.source_kind='collection_run' AND EXISTS (
     SELECT 1 FROM satellite_collection_runs r
     WHERE r.id::text=n.source_id AND (r.status IN ('degraded','failed') OR
@@ -264,7 +285,7 @@ WHERE n.status IN ('unread','read') AND NOT (
 ORDER BY n.id
 LIMIT :limit
 FOR UPDATE SKIP LOCKED
-"""
+""".replace(_FRESHNESS_CYCLE_TOKEN, FRESHNESS_SOURCE_CYCLE_SQL)
 
 
 def _row(result):
