@@ -15,7 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from api.dependencies import ALLOWED_ROLES, TENANT_ROLES
-from database import SessionLocal
+from database import SessionLocal, engine
 from services import observation_quality
 from services.autonomous_anomaly_engine import RulePolicy, freshness_status, plan_automatic_inspections
 
@@ -167,6 +167,10 @@ class ApplyRun:
     session: object
     run_id: uuid.UUID
     run_key: str
+    # The connection the run's advisory lock is held on. Kept checked out for
+    # the whole cycle; see begin_apply_run for why the run cannot use a pooled
+    # session. Optional so a caller that supplies its own session still works.
+    connection: object = None
 
 
 def _row(result):
@@ -202,7 +206,15 @@ def _tenant(role: str, enterprise_id: int | None, alias: str) -> tuple[str, dict
 def begin_apply_run(*, run_key: str, release_commit: str, audit_identity: str) -> ApplyRun:
     if not SHA40.fullmatch(release_commit):
         raise RuntimeError("apply requires an exact 40-character release commit")
-    session = SessionLocal()
+    # A session-scoped advisory lock belongs to the PostgreSQL backend that took
+    # it, not to the SQLAlchemy Session. A pooled Session releases its
+    # connection on every commit, and this run commits many times, so the lock
+    # would be stranded on a backend the run no longer uses: the pool hands that
+    # backend to unrelated callers, a second cycle given the same connection
+    # re-acquires the lock re-entrantly and sees no contention, and the run's
+    # own unlock releases nothing. Hold one connection for the whole cycle.
+    connection = engine.connect()
+    session = SessionLocal(bind=connection)
     try:
         acquired = session.execute(
             text("SELECT pg_try_advisory_lock(:key)"), {"key": ADVISORY_LOCK_KEY}
@@ -227,14 +239,21 @@ def begin_apply_run(*, run_key: str, release_commit: str, audit_identity: str) -
         if existing["id"] != run_id and existing["status"] == "running":
             raise RuntimeError("collection run identity is already active")
         session.commit()
-        return ApplyRun(session=session, run_id=existing["id"], run_key=run_key)
+        return ApplyRun(
+            session=session,
+            run_id=existing["id"],
+            run_key=run_key,
+            connection=connection,
+        )
     except Exception:
         session.rollback()
         try:
             session.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": ADVISORY_LOCK_KEY})
+            session.commit()
         except Exception:
             pass
         session.close()
+        connection.close()
         raise
 
 
@@ -391,8 +410,39 @@ def reconcile_pixel_candidates(run: ApplyRun) -> dict[str, int | bool]:
             "cooldown_or_open_suppressed": len(plan.suppressed_duplicate_ids)}
 
 
+def release_apply_run(run: ApplyRun) -> Exception | None:
+    """Release the run's advisory lock and connection.
+
+    Returns the first failure instead of raising it: a release failure must
+    never replace the caller's original exception, which is the only record of
+    why the cycle ended. The rollback is what makes the unlock reachable after
+    a failed write — an aborted transaction rejects every further statement,
+    including the unlock itself.
+    """
+    failure: Exception | None = None
+    try:
+        run.session.rollback()
+        run.session.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": ADVISORY_LOCK_KEY})
+        run.session.commit()
+    except Exception as exc:
+        failure = exc
+    finally:
+        try:
+            run.session.close()
+        except Exception as exc:
+            failure = failure if failure is not None else exc
+        connection = getattr(run, "connection", None)
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception as exc:
+                failure = failure if failure is not None else exc
+    return failure
+
+
 def finish_apply_run(run: ApplyRun, *, exit_code: int, provider_status: str, counters: dict, failure_category: str | None) -> None:
     status = "succeeded" if exit_code == 0 and provider_status != "degraded" else "degraded" if exit_code in {0, 1} else "failed"
+    primary_error: Exception | None = None
     try:
         run.session.execute(text("""
             UPDATE satellite_collection_runs SET status=:status,provider_status=:provider,
@@ -401,11 +451,33 @@ def finish_apply_run(run: ApplyRun, *, exit_code: int, provider_status: str, cou
         """), {"id": run.run_id, "status": status, "provider": provider_status,
                "failure": failure_category, "counters": json.dumps(counters)})
         run.session.commit()
-    finally:
+    except Exception as exc:
+        primary_error = exc
+        # A row left 'running' is read as an in-flight cycle: the reconciler
+        # raises an external-source alert on it six hours later and the next
+        # cycle refuses to start against the same run key. Record the terminal
+        # status without the counters payload, which may itself be why the
+        # write failed.
         try:
-            run.session.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": ADVISORY_LOCK_KEY})
-        finally:
-            run.session.close()
+            run.session.rollback()
+            run.session.execute(text("""
+                UPDATE satellite_collection_runs SET status=:status,provider_status=:provider,
+                  failure_category=:failure,heartbeat_at=now(),finished_at=now(),updated_at=now()
+                 WHERE id=:id AND status='running'
+            """), {"id": run.run_id, "status": status, "provider": provider_status,
+                   "failure": failure_category})
+            run.session.commit()
+        except Exception:
+            try:
+                run.session.rollback()
+            except Exception:
+                pass
+    finally:
+        release_error = release_apply_run(run)
+    if primary_error is not None:
+        raise primary_error
+    if release_error is not None:
+        raise release_error
 
 
 def status_summary(db, user):
