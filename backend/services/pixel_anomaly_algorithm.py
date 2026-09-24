@@ -100,6 +100,12 @@ class AnomalyZone:
     pixel_count: int
     median_drop: float
     median_deficit: float
+    # Zone statistics of the paired scenes over exactly this zone's pixels.
+    # They make the zone's own value part of the persisted evidence, so an
+    # inspection opened from the zone carries a real sampled value instead of
+    # a field mean standing in for it (TASK_225).
+    median_current_value: float | None = None
+    median_comparison_value: float | None = None
 
 
 @dataclass(frozen=True)
@@ -414,6 +420,8 @@ def analyze_pixel_scenes(
         ]
         median_drop = median(drops)
         median_deficit = median(deficits)
+        median_current_value = median(current.values[row][column] for row, column in component)
+        median_comparison_value = median(comparison.values[row][column] for row, column in component)
         score = _bounded(
             0.5 * median_drop / max(thresholds.comparison_drop * 3, 0.001)
             + 0.5
@@ -456,6 +464,8 @@ def analyze_pixel_scenes(
                 pixel_count=len(component),
                 median_drop=round(median_drop, 6),
                 median_deficit=round(median_deficit, 6),
+                median_current_value=round(median_current_value, 6),
+                median_comparison_value=round(median_comparison_value, 6),
             )
         )
         if len(zones) >= MAX_ANOMALY_ZONES:

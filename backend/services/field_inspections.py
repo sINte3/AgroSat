@@ -1,13 +1,16 @@
-"""Explicit-SQL field-inspection workflow with tenant and race safety."""
+"""Read model for legacy TASK_209 field inspections (source_kind='legacy').
+
+The legacy write workflow is retired (TASK_225): creation, edits and
+transitions answer 410 Gone at the API. The canonical lifecycle lives in
+services/anomaly_inspections.py, which is also the only path that can close
+out a still-active legacy row.
+"""
 from dataclasses import dataclass
-import hashlib
-import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
 
 from api.dependencies import ALLOWED_ROLES, TENANT_ROLES
 
@@ -78,31 +81,6 @@ def _item(row):
     }
 
 
-def fingerprint(user_id, payload, assigned_to_id):
-    data = payload.model_dump(mode="json")
-    data["assigned_to_id"] = assigned_to_id
-    data["current_user_id"] = user_id
-    data["source_reason_codes"] = sorted(set(data["source_reason_codes"]))
-    encoded = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _due(value):
-    if value is not None and value < datetime.now(TASHKENT).date():
-        raise HTTPException(422, "due_date cannot be in the past")
-
-
-def _assignee(db, assignee_id, enterprise_id):
-    if assignee_id is None:
-        return
-    row = _one(db.execute(text(
-        "SELECT id FROM users WHERE id=:uid AND enterprise_id=:eid "
-        "AND role='agronomist' AND is_active=true"
-    ), {"uid": assignee_id, "eid": enterprise_id}))
-    if not row:
-        raise HTTPException(422, "Assignee is not an eligible agronomist")
-
-
 def _tenant_clause(actor, alias="i"):
     return f" AND {alias}.enterprise_id=:eid" if actor.role in TENANT_ROLES else ""
 
@@ -116,102 +94,6 @@ def _reload(db, inspection_id, actor):
     if not row:
         raise HTTPException(404, "Inspection not found")
     return _item(row)
-
-
-def _idempotency_row(db, actor, key):
-    tenant = _tenant_clause(actor, "field_inspections")
-    params = {"key": key}
-    if tenant:
-        params["eid"] = actor.enterprise_id
-    return _one(db.execute(text(
-        "SELECT id, request_fingerprint FROM field_inspections "
-        "WHERE client_request_id=:key AND source_kind='legacy'" + tenant
-    ), params))
-
-
-def _active_row(db, actor, field_id):
-    tenant = _tenant_clause(actor, "field_inspections")
-    params = {"fid": field_id}
-    if tenant:
-        params["eid"] = actor.enterprise_id
-    return _one(db.execute(text(
-        "SELECT id FROM field_inspections WHERE field_id=:fid AND source_kind='legacy' "
-        "AND status IN ('pending','in_progress')" + tenant
-    ), params))
-
-
-def _recover_create_integrity(db, actor, payload, key, request_fingerprint):
-    same = _idempotency_row(db, actor, key)
-    if same:
-        if same["request_fingerprint"] != request_fingerprint:
-            raise HTTPException(409, "Idempotency key payload conflict")
-        return False, _reload(db, same["id"], actor)
-    active = _active_row(db, actor, payload.field_id)
-    if active:
-        raise HTTPException(409, f"Active inspection exists: {active['id']}")
-    raise HTTPException(409, "Concurrent inspection conflict")
-
-
-def create(db, user, payload, key):
-    actor = None
-    request_fingerprint = None
-    try:
-        actor = _actor(user, True)
-        _due(payload.due_date)
-        assigned = actor.user_id if actor.role == "agronomist" and payload.assigned_to_id is None else payload.assigned_to_id
-        if actor.role == "agronomist" and assigned != actor.user_id:
-            raise HTTPException(403, "Agronomists may assign only themselves")
-        request_fingerprint = fingerprint(actor.user_id, payload, assigned)
-        existing = _idempotency_row(db, actor, key)
-        if existing:
-            if existing["request_fingerprint"] != request_fingerprint:
-                raise HTTPException(409, "Idempotency key payload conflict")
-            return False, _reload(db, existing["id"], actor)
-
-        tenant = " AND f.enterprise_id=:eid" if actor.role in TENANT_ROLES else ""
-        params = {"fid": payload.field_id}
-        if tenant:
-            params["eid"] = actor.enterprise_id
-        field = _one(db.execute(text(
-            "SELECT f.id, f.enterprise_id FROM fields f "
-            "WHERE f.id=:fid AND f.is_active=true" + tenant
-        ), params))
-        if not field:
-            raise HTTPException(404, "Field not found")
-        _assignee(db, assigned, field["enterprise_id"])
-        active = _active_row(db, actor, payload.field_id)
-        if active:
-            raise HTTPException(409, f"Active inspection exists: {active['id']}")
-        values = payload.model_dump()
-        values.update({"eid": field["enterprise_id"], "uid": actor.user_id, "assigned": assigned,
-                       "key": key, "fp": request_fingerprint})
-        result = db.execute(text("""INSERT INTO field_inspections
-          (field_id,enterprise_id,created_by_id,updated_by_id,assigned_to_id,client_request_id,
-           request_fingerprint,source,source_priority,source_attention_score,source_observation_date,
-           source_reason_codes,title,instructions,due_date,source_kind,source_reason,priority,due_at)
-          VALUES (:field_id,:eid,:uid,:uid,:assigned,:key,:fp,:source,:source_priority,
-           :source_attention_score,:source_observation_date,CAST(:reason_json AS jsonb),:title,
-           :instructions,:due_date,'legacy',COALESCE(:instructions,:title),:priority,
-           CASE WHEN :due_date IS NULL THEN NULL ELSE
-             (CAST(:due_date AS date) + time '23:59') AT TIME ZONE 'Asia/Tashkent' END) RETURNING id"""), {
-              **values, "source": payload.source.value,
-              "source_priority": payload.source_priority.value if payload.source_priority else None,
-              "priority": ({"medium": "normal", "critical": "urgent"}.get(payload.source_priority.value, payload.source_priority.value)
-                           if payload.source_priority else "normal"),
-              "reason_json": json.dumps(payload.source_reason_codes),
-          })
-        inserted = _one(result)
-        db.commit()
-        return True, _reload(db, inserted["id"], actor)
-    except IntegrityError:
-        db.rollback()
-        return _recover_create_integrity(db, actor, payload, key, request_fingerprint)
-    except HTTPException:
-        db.rollback()
-        raise
-    except Exception:
-        db.rollback()
-        raise
 
 
 def _list_items(db, actor, filters):
@@ -277,104 +159,6 @@ def list_items(db, user, filters):
 def get(db, user, inspection_id):
     try:
         actor = _actor(user)
-        return _reload(db, inspection_id, actor)
-    except HTTPException:
-        db.rollback()
-        raise
-    except Exception:
-        db.rollback()
-        raise
-
-
-def _classify(db, actor, inspection_id, version, ownership=None):
-    clauses = ["id=:id", "source_kind='legacy'"]
-    params = {"id": inspection_id, "uid": actor.user_id}
-    if actor.role in TENANT_ROLES:
-        clauses.append("enterprise_id=:eid")
-        params["eid"] = actor.enterprise_id
-    if actor.role == "agronomist" and ownership == "assigned":
-        clauses.append("assigned_to_id=:uid")
-    if actor.role == "agronomist" and ownership == "created":
-        clauses.append("created_by_id=:uid")
-    row = _one(db.execute(text(
-        "SELECT id, version, status FROM field_inspections WHERE " + " AND ".join(clauses)
-    ), params))
-    if not row:
-        raise HTTPException(404, "Inspection not found")
-    raise HTTPException(409, "Version or state conflict")
-
-
-def update(db, user, inspection_id, payload):
-    try:
-        actor = _actor(user, True)
-        if "due_date" in payload.model_fields_set:
-            _due(payload.due_date)
-        if actor.role == "agronomist" and "assigned_to_id" in payload.model_fields_set:
-            raise HTTPException(403, "Agronomists cannot reassign")
-        tenant = " AND enterprise_id=:eid" if actor.role in TENANT_ROLES else ""
-        owner = " AND assigned_to_id=:uid" if actor.role == "agronomist" else ""
-        data = {"id": inspection_id, "ver": payload.expected_version, "uid": actor.user_id}
-        if tenant:
-            data["eid"] = actor.enterprise_id
-        if "assigned_to_id" in payload.model_fields_set:
-            base = _one(db.execute(text(
-                "SELECT enterprise_id FROM field_inspections WHERE id=:id AND source_kind='legacy'" + tenant
-            ), data))
-            if not base:
-                raise HTTPException(404, "Inspection not found")
-            _assignee(db, payload.assigned_to_id, base["enterprise_id"])
-        fields = []
-        for key in ("assigned_to_id", "title", "instructions", "due_date"):
-            if key in payload.model_fields_set:
-                fields.append(f"{key}=:{key}")
-                data[key] = getattr(payload, key)
-        result = db.execute(text(
-            "UPDATE field_inspections SET " + ", ".join(fields) +
-            ", version=version+1, updated_at=now() WHERE id=:id AND version=:ver "
-            "AND source_kind='legacy' AND status IN ('pending','in_progress')" + tenant + owner + " RETURNING id"
-        ), data)
-        row = _one(result)
-        if not row:
-            _classify(db, actor, inspection_id, payload.expected_version, "assigned")
-        db.commit()
-        return _reload(db, inspection_id, actor)
-    except HTTPException:
-        db.rollback()
-        raise
-    except Exception:
-        db.rollback()
-        raise
-
-
-def transition(db, user, inspection_id, payload, action):
-    try:
-        actor = _actor(user, True)
-        if action == "cancel":
-            state, target = "status IN ('pending','in_progress')", "cancelled"
-            extra = "cancellation_reason=:value, cancelled_at=now()"
-        elif action == "complete":
-            state, target = "status='in_progress'", "completed"
-            extra = "completion_summary=:value, completed_at=now()"
-        else:
-            state, target, extra = "status='pending'", "in_progress", "started_at=now()"
-        tenant = " AND enterprise_id=:eid" if actor.role in TENANT_ROLES else ""
-        ownership = ""
-        if actor.role == "agronomist":
-            ownership = " AND assigned_to_id=:uid" if action != "cancel" else " AND created_by_id=:uid AND status='pending'"
-        if action == "start":
-            ownership += " AND assigned_to_id IS NOT NULL"
-        params = {"id": inspection_id, "ver": payload.expected_version, "uid": actor.user_id,
-                  "value": getattr(payload, "completion_summary", getattr(payload, "cancellation_reason", None))}
-        if tenant:
-            params["eid"] = actor.enterprise_id
-        row = _one(db.execute(text(
-            f"UPDATE field_inspections SET status='{target}', {extra}, version=version+1, updated_at=now() "
-            f"WHERE id=:id AND version=:ver AND source_kind='legacy' AND {state}{tenant}{ownership} RETURNING id"
-        ), params))
-        if not row:
-            classification = "created" if action == "cancel" else "assigned"
-            _classify(db, actor, inspection_id, payload.expected_version, classification)
-        db.commit()
         return _reload(db, inspection_id, actor)
     except HTTPException:
         db.rollback()

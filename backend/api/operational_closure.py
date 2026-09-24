@@ -1,27 +1,18 @@
-"""Authenticated APIs for results, evidence, actions, and verification."""
+"""Retired TASK_209 closure APIs: historical reads stay, every write is 410.
 
-import re
+Findings and photos belong to the canonical inspection workflow
+(/api/anomaly-inspections); corrective work, execution evidence and satellite
+verification belong to the TASK_220 agronomy lifecycle (/api/agronomy-plans).
+"""
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query
+from fastapi import APIRouter, Depends, Path, Query
 from sqlalchemy.orm import Session
 
 from api.auth import get_current_active_user
+from api.lifecycle_retirement import retired
 from database import get_db
-from schemas.operational_closure import (
-    ActionStatus,
-    CloseCorrectiveActionRequest,
-    CreateCorrectiveActionRequest,
-    EvidenceMetadataRequest,
-    RecordInspectionResultRequest,
-    ReopenCorrectiveActionRequest,
-    RequestVerificationRequest,
-    ResolveVerificationRequest,
-    UpdateCorrectiveActionRequest,
-)
+from schemas.operational_closure import ActionStatus
 from services import operational_closure as service
-
-
-KEY = re.compile(r"^[A-Za-z0-9._:-]{8,64}$")
 
 
 inspection_router = APIRouter(
@@ -37,46 +28,40 @@ verification_router = APIRouter(
     tags=["operational_closure"],
 )
 
+FINDING = "PUT /api/anomaly-inspections/{inspection_id}/finding, then POST /api/anomaly-inspections/{inspection_id}/submit"
+PHOTOS = "POST /api/anomaly-inspections/{inspection_id}/photos"
+PLAN = "POST /api/agronomy-plans (from a submitted or confirmed canonical inspection)"
+WORK = "POST /api/agronomy-plans/{plan_id}/work/{item_id}/transition"
+RESOLUTION = "POST /api/agronomy-plans/{plan_id}/transition (close, rework, reopen)"
+VERIFICATION = (
+    "Satellite verification runs in the standalone collector; "
+    "POST /api/agronomy-plans/{plan_id}/reevaluate re-reads an eligible observation"
+)
+RETIRED = "The TASK_209 corrective-action lifecycle is retired; history stays readable."
 
-def idempotency_key(
-    value: str = Header(..., alias="Idempotency-Key"),
-) -> str:
-    if not KEY.fullmatch(value):
-        raise HTTPException(422, "Invalid Idempotency-Key")
-    return value
 
-
-@inspection_router.post("/{inspection_id}/result")
+@inspection_router.post("/{inspection_id}/result", status_code=410)
 def record_inspection_result(
-    payload: RecordInspectionResultRequest,
     inspection_id: int = Path(..., gt=0),
-    key: str = Depends(idempotency_key),
-    db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
-    return service.record_result(db, current_user, inspection_id, payload, key)
+    raise retired("POST /api/field-inspections/{inspection_id}/result", FINDING, RETIRED)
 
 
-@inspection_router.post("/{inspection_id}/evidence")
+@inspection_router.post("/{inspection_id}/evidence", status_code=410)
 def attach_inspection_evidence(
-    payload: EvidenceMetadataRequest,
     inspection_id: int = Path(..., gt=0),
-    key: str = Depends(idempotency_key),
-    db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
-    return service.attach_evidence(db, current_user, inspection_id, payload, key)
+    raise retired("POST /api/field-inspections/{inspection_id}/evidence", PHOTOS, RETIRED)
 
 
-@inspection_router.post("/{inspection_id}/actions")
+@inspection_router.post("/{inspection_id}/actions", status_code=410)
 def create_corrective_action(
-    payload: CreateCorrectiveActionRequest,
     inspection_id: int = Path(..., gt=0),
-    key: str = Depends(idempotency_key),
-    db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
-    return service.create_action(db, current_user, inspection_id, payload, key)
+    raise retired("POST /api/field-inspections/{inspection_id}/actions", PLAN, RETIRED)
 
 
 @inspection_router.get("/{inspection_id}/timeline")
@@ -140,68 +125,45 @@ def list_corrective_actions(
     )
 
 
-@action_router.patch("/{action_id}")
+@action_router.patch("/{action_id}", status_code=410)
 def update_corrective_action(
-    payload: UpdateCorrectiveActionRequest,
     action_id: int = Path(..., gt=0),
-    key: str = Depends(idempotency_key),
-    db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
-    return service.update_action(db, current_user, action_id, payload, key)
+    raise retired("PATCH /api/operational-actions/{action_id}", WORK, RETIRED)
 
 
-@action_router.post("/{action_id}/close")
+@action_router.post("/{action_id}/close", status_code=410)
 def close_corrective_action(
-    payload: CloseCorrectiveActionRequest,
     action_id: int = Path(..., gt=0),
-    key: str = Depends(idempotency_key),
-    db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
-    return service.close_action(db, current_user, action_id, payload, key)
+    raise retired("POST /api/operational-actions/{action_id}/close", RESOLUTION, RETIRED)
 
 
-@action_router.post("/{action_id}/reopen")
+@action_router.post("/{action_id}/reopen", status_code=410)
 def reopen_corrective_action(
-    payload: ReopenCorrectiveActionRequest,
     action_id: int = Path(..., gt=0),
-    key: str = Depends(idempotency_key),
-    db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
-    return service.reopen_action(db, current_user, action_id, payload, key)
+    raise retired("POST /api/operational-actions/{action_id}/reopen", RESOLUTION, RETIRED)
 
 
-@action_router.post("/{action_id}/verification-requests")
+@action_router.post("/{action_id}/verification-requests", status_code=410)
 def request_action_verification(
-    payload: RequestVerificationRequest,
     action_id: int = Path(..., gt=0),
-    key: str = Depends(idempotency_key),
-    db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
-    return service.request_verification(
-        db,
-        current_user,
-        action_id,
-        payload,
-        key,
+    raise retired(
+        "POST /api/operational-actions/{action_id}/verification-requests", VERIFICATION, RETIRED,
     )
 
 
-@verification_router.post("/{verification_id}/resolve")
+@verification_router.post("/{verification_id}/resolve", status_code=410)
 def resolve_action_verification(
-    payload: ResolveVerificationRequest,
     verification_id: int = Path(..., gt=0),
-    key: str = Depends(idempotency_key),
-    db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
-    return service.resolve_verification(
-        db,
-        current_user,
-        verification_id,
-        payload,
-        key,
+    raise retired(
+        "POST /api/verification-requests/{verification_id}/resolve", VERIFICATION, RETIRED,
     )

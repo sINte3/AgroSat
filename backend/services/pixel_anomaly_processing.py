@@ -274,6 +274,8 @@ def persist_anomaly_result(
                         {
                             "median_drop": zone.median_drop,
                             "median_deficit": zone.median_deficit,
+                            "median_current_value": zone.median_current_value,
+                            "median_comparison_value": zone.median_comparison_value,
                             "pixel_count": zone.pixel_count,
                             "contract": "non_diagnostic",
                         },

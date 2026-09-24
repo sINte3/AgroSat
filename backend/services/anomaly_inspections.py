@@ -1,17 +1,35 @@
-"""Tenant-safe anomaly inspection workflow using explicit bounded SQL."""
+"""Tenant-safe anomaly inspection workflow using explicit bounded SQL.
+
+This module owns the canonical inspection lifecycle (TASK_217, migration 0013)
+and the one canonical ``field_inspections`` INSERT, :func:`insert_inspection`.
+Every production path that opens an inspection -- the HTTP API, pixel-anomaly
+promotion, autonomous-candidate promotion and plan re-inspection -- goes
+through it, so the 0013 contract (``source_kind``, ``source_reason``,
+``priority``, the source snapshot and the audit trail) is written in exactly
+one place. Remediation after a confirmed inspection belongs to the TASK_220
+agronomy lifecycle (services/closed_loop_agronomy.py).
+
+Rows written before migration 0013 carry ``source_kind='legacy'`` and follow the
+retired TASK_209 state vocabulary. The canonical workflow never moves them
+through its own states; the only transition it offers them is a reasoned
+close-out (:func:`cancel`), so an active legacy row can be drained without a
+second live state machine.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import uuid
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.exc import IntegrityError
 
 from api.dependencies import ALLOWED_ROLES, TENANT_ROLES
@@ -29,6 +47,105 @@ MEDIA_TYPES = {
     "image/webp": (b"RIFF", ".webp"),
 }
 STORAGE_KEY = re.compile(r"^[0-9a-f]{2}/[0-9a-f-]{36}\.(?:jpg|png|webp)$")
+TASHKENT = ZoneInfo("Asia/Tashkent")
+
+# Source kinds a new inspection may carry. 'legacy' is reserved for rows that
+# predate migration 0013 and is never written again.
+CREATABLE_SOURCE_KINDS = frozenset({"manual", "alert", "pixel_ndvi"})
+PRIORITIES = frozenset({"low", "normal", "high", "urgent"})
+CANONICAL_OPEN_STATUSES = ("new", "assigned", "in_progress", "submitted")
+LEGACY_OPEN_STATUSES = ("pending", "in_progress")
+LEGACY_INSPECTION_DETAIL = (
+    "This inspection predates the canonical workflow (source_kind=legacy). "
+    "It cannot enter the canonical lifecycle; close it out with "
+    "POST /api/anomaly-inspections/{id}/cancel and open a canonical inspection "
+    "with POST /api/anomaly-inspections."
+)
+UNIQUE_VIOLATION = "23505"
+
+
+class InspectionSourceError(ValueError):
+    """A source snapshot does not satisfy the migration 0013 contract."""
+
+
+def is_unique_violation(error: IntegrityError) -> bool:
+    """Return whether an IntegrityError is a uniqueness race, not a contract bug.
+
+    Only a unique violation can be a concurrent duplicate or an idempotent
+    replay. NOT NULL, CHECK and foreign-key violations mean the code wrote a
+    row the schema forbids; reporting those as a 409 "conflict" is the defect
+    TASK_225 removes, so callers re-raise them.
+    """
+    return getattr(getattr(error, "orig", None), "pgcode", None) == UNIQUE_VIOLATION
+
+
+@dataclass(frozen=True, slots=True)
+class InspectionSource:
+    """Immutable source snapshot of one canonical inspection (0013 contract).
+
+    ``zone_geojson`` and ``zone_ewkb`` are alternatives: GeoJSON for a zone a
+    client drew, hex EWKB to copy a stored geometry (a pixel anomaly or an
+    autonomous candidate) bit-for-bit, so later spatial comparisons are exact.
+    """
+
+    kind: str
+    reason: str
+    alert_id: int | None = None
+    provider: str | None = None
+    item_id: str | None = None
+    acquired_at: datetime | None = None
+    index_name: str | None = None
+    sampled_value: float | None = None
+    comparison_value: float | None = None
+    delta: float | None = None
+    geometry_hash: str | None = None
+    point: tuple[float, float] | None = None
+    zone_geojson: str | None = None
+    zone_ewkb: str | None = None
+
+    def validate(self) -> None:
+        if self.kind not in CREATABLE_SOURCE_KINDS:
+            raise InspectionSourceError(f"source kind {self.kind!r} cannot be created")
+        reason = (self.reason or "").strip()
+        if not 5 <= len(reason) <= 2000:
+            raise InspectionSourceError("source reason must contain 5..2000 characters")
+        zones = [value for value in (self.zone_geojson, self.zone_ewkb) if value is not None]
+        if len(zones) > 1 or (zones and self.point is not None):
+            raise InspectionSourceError("point and zone are mutually exclusive")
+        for name, value, lower, upper in (
+            ("sampled_value", self.sampled_value, -1.0, 1.0),
+            ("comparison_value", self.comparison_value, -1.0, 1.0),
+            ("delta", self.delta, -2.0, 2.0),
+        ):
+            if value is not None and (not math.isfinite(value) or not lower <= value <= upper):
+                raise InspectionSourceError(f"{name} is outside {lower}..{upper}")
+        if self.acquired_at is not None and (
+            self.acquired_at.tzinfo is None or self.acquired_at.utcoffset() is None
+        ):
+            raise InspectionSourceError("acquired_at must be timezone-aware")
+        snapshot = (
+            self.provider, self.item_id, self.acquired_at, self.index_name,
+            self.sampled_value, self.geometry_hash,
+        )
+        if self.kind == "pixel_ndvi":
+            if any(value is None for value in snapshot) or (self.point is None and not zones):
+                raise InspectionSourceError(
+                    "pixel_ndvi requires a complete scene, value, geometry and location snapshot"
+                )
+            if self.alert_id is not None:
+                raise InspectionSourceError("pixel_ndvi forbids an alert identity")
+        elif self.kind == "alert":
+            if self.alert_id is None:
+                raise InspectionSourceError("alert source requires an alert identity")
+        elif self.alert_id is not None:
+            raise InspectionSourceError("manual source forbids an alert identity")
+
+
+def end_of_local_day(value: date | None) -> datetime | None:
+    """Deadline for a date-only due date: 23:59 in the operating timezone."""
+    if value is None:
+        return None
+    return datetime.combine(value, time(23, 59), tzinfo=TASHKENT)
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,25 +226,6 @@ def _eligible_user(db, enterprise_id: int, user_id: int, *, agronomist_only: boo
     return row
 
 
-def _location_sql(payload) -> tuple[str, str, dict]:
-    params: dict = {}
-    if payload.point is not None:
-        params.update(longitude=payload.point.longitude, latitude=payload.point.latitude)
-        return (
-            "ST_SetSRID(ST_MakePoint(:longitude,:latitude),4326)",
-            "NULL",
-            params,
-        )
-    if payload.zone is not None:
-        params["zone_json"] = json.dumps(payload.zone, separators=(",", ":"))
-        return (
-            "NULL",
-            "ST_SetSRID(ST_GeomFromGeoJSON(:zone_json),4326)",
-            params,
-        )
-    return "NULL", "NULL", params
-
-
 def _validate_source(db, user, actor: Actor, field, payload) -> None:
     if payload.point is not None:
         covered = _one(db.execute(text(
@@ -170,7 +268,8 @@ def _audit(db, actor: Actor, base, event_type: str, version: int, metadata: dict
     safe = {
         key: value for key, value in metadata.items()
         if key in {"from_status", "to_status", "reason", "assignee_id", "photo_id",
-                   "action_type", "result", "follow_up_inspection_id"}
+                   "action_type", "result", "follow_up_inspection_id", "origin",
+                   "source_kind", "source_reference"}
     }
     key = f"wf-{uuid.uuid4()}"
     db.execute(text(
@@ -214,6 +313,19 @@ def _inspection_row(db, actor: Actor, inspection_id: int, *, assigned_only: bool
     return row
 
 
+def _canonical_row(db, actor: Actor, inspection_id: int, *, assigned_only: bool = False):
+    """Load an inspection that may take a canonical transition.
+
+    Tenant scoping stays non-enumerating (404 comes first). A legacy row is
+    visible but never enters the canonical state machine, so every mutation
+    except :func:`cancel` refuses it with a 409 that names the replacement.
+    """
+    row = _inspection_row(db, actor, inspection_id, assigned_only=assigned_only)
+    if row["source_kind"] == "legacy":
+        raise HTTPException(409, LEGACY_INSPECTION_DETAIL)
+    return row
+
+
 def _inspection_item(row) -> dict:
     return {
         "id": row["id"], "enterprise_id": row["enterprise_id"],
@@ -245,57 +357,147 @@ def _invalidate(base) -> None:
     cache_delete_patterns(alert_mutation_cache_patterns(base["enterprise_id"], base["field_id"]))
 
 
+def insert_inspection(
+    db,
+    *,
+    actor: Actor,
+    field_id: int,
+    enterprise_id: int,
+    source: InspectionSource,
+    client_request_id: str,
+    request_fingerprint: str,
+    title: str,
+    priority: str = "normal",
+    due_at: datetime | None = None,
+    assigned_to_id: int | None = None,
+    follow_up_of_id: int | None = None,
+    origin: str | None = None,
+):
+    """The single canonical ``field_inspections`` INSERT.
+
+    Writes every column the migration 0013 contract requires, then the audit
+    trail, inside the caller's transaction: nothing is committed here, so a
+    caller that links the new inspection to its source (a pixel anomaly, an
+    autonomous candidate, a plan) commits both or neither. Tenant ownership is
+    the caller's responsibility and is always derived server-side from the
+    field or source row, never from client input.
+
+    Raises :class:`InspectionSourceError` for a snapshot the schema would
+    reject, before any SQL runs.
+    """
+    source.validate()
+    if priority not in PRIORITIES:
+        raise InspectionSourceError(f"priority {priority!r} is not canonical")
+    if due_at is not None and (due_at.tzinfo is None or due_at.utcoffset() is None):
+        raise InspectionSourceError("due_at must be timezone-aware")
+    reason = source.reason.strip()
+    status = "assigned" if assigned_to_id is not None else "new"
+    params = {
+        "field_id": field_id, "enterprise_id": enterprise_id, "actor_id": actor.user_id,
+        "assignee_id": assigned_to_id, "key": client_request_id,
+        "fingerprint": request_fingerprint, "source_kind": source.kind,
+        "priority": priority, "title": (title or reason).strip()[:255], "reason": reason,
+        "due_at": due_at, "due_date": due_at.astimezone(TASHKENT).date() if due_at else None,
+        "status": status, "alert_id": source.alert_id, "provider": source.provider,
+        "item_id": source.item_id, "acquired_at": source.acquired_at,
+        "index_name": source.index_name, "sampled_value": source.sampled_value,
+        "comparison_value": source.comparison_value, "delta": source.delta,
+        "geometry_hash": source.geometry_hash, "follow_up_of_id": follow_up_of_id,
+    }
+    point_sql = zone_sql = "NULL"
+    if source.point is not None:
+        point_sql = "ST_SetSRID(ST_MakePoint(:longitude,:latitude),4326)"
+        params.update(longitude=source.point[0], latitude=source.point[1])
+    elif source.zone_geojson is not None:
+        zone_sql = "ST_SetSRID(ST_GeomFromGeoJSON(:zone_json),4326)"
+        params["zone_json"] = source.zone_geojson
+    elif source.zone_ewkb is not None:
+        zone_sql = "ST_SetSRID(ST_GeomFromEWKB(decode(:zone_ewkb,'hex')),4326)"
+        params["zone_ewkb"] = source.zone_ewkb
+    result = _one(db.execute(text(f"""
+        INSERT INTO field_inspections
+        (field_id,enterprise_id,created_by_id,updated_by_id,assigned_to_id,client_request_id,
+         request_fingerprint,source,source_priority,source_reason_codes,title,instructions,due_date,
+         status,source_kind,source_alert_id,source_provider,source_item_id,source_acquired_at,
+         source_index_name,source_sampled_value,source_comparison_value,source_delta,
+         source_geometry_hash,source_point,source_zone,source_reason,priority,due_at,
+         follow_up_of_id,source_snapshot_locked)
+        VALUES (:field_id,:enterprise_id,:actor_id,:actor_id,:assignee_id,:key,:fingerprint,
+         :source_kind,:priority,'[]'::jsonb,:title,:reason,:due_date,
+         :status,:source_kind,:alert_id,:provider,:item_id,:acquired_at,:index_name,:sampled_value,
+         :comparison_value,:delta,:geometry_hash,{point_sql},{zone_sql},:reason,:priority,:due_at,
+         :follow_up_of_id,true)
+        RETURNING id,field_id,enterprise_id,version,status
+    """), params))
+    metadata = {"to_status": status, "source_kind": source.kind}
+    if origin:
+        metadata["origin"] = origin
+    if source.item_id:
+        metadata["source_reference"] = source.item_id
+    _audit(db, actor, result, "inspection_created", result["version"], metadata)
+    if assigned_to_id is not None:
+        _audit(db, actor, result, "inspection_assigned", result["version"],
+               {"to_status": status, "assignee_id": assigned_to_id})
+    return result
+
+
+def _payload_source(payload) -> InspectionSource:
+    point = None
+    if payload.point is not None:
+        point = (payload.point.longitude, payload.point.latitude)
+    zone = json.dumps(payload.zone, separators=(",", ":")) if payload.zone is not None else None
+    return InspectionSource(
+        kind=_enum(payload.source_kind), reason=payload.reason, alert_id=payload.source_alert_id,
+        provider=payload.provider, item_id=payload.item_id, acquired_at=payload.acquired_at,
+        index_name=payload.index_name, sampled_value=payload.sampled_value,
+        comparison_value=payload.comparison_value, delta=payload.delta,
+        geometry_hash=payload.geometry_hash, point=point, zone_geojson=zone,
+    )
+
+
 def create(db, user, payload, idempotency_key: str):
     actor = _actor(user, write=True)
     _write_roles(actor, {"admin", "manager"})
-    try:
+    fingerprint = _fingerprint({"actor": actor.user_id, **payload.model_dump(mode="json")})
+
+    def replay():
         existing = _one(db.execute(text(
             "SELECT id,request_fingerprint FROM field_inspections WHERE client_request_id=:key"
         ), {"key": idempotency_key}))
-        fingerprint = _fingerprint({"actor": actor.user_id, **payload.model_dump(mode="json")})
-        if existing:
-            if existing["request_fingerprint"] != fingerprint:
-                raise HTTPException(409, "Idempotency key payload conflict")
-            return {"created": False, "inspection": _inspection_item(_inspection_row(db, actor, existing["id"]))}
+        if not existing:
+            return None
+        if existing["request_fingerprint"] != fingerprint:
+            raise HTTPException(409, "Idempotency key payload conflict")
+        return {"created": False, "inspection": _inspection_item(_inspection_row(db, actor, existing["id"]))}
+
+    try:
+        prior = replay()
+        if prior:
+            return prior
         field = _field(db, actor, payload.field_id)
         if payload.assigned_to_id is not None:
             _eligible_user(db, field["enterprise_id"], payload.assigned_to_id, agronomist_only=True)
         _validate_source(db, user, actor, field, payload)
-        point_sql, zone_sql, location_params = _location_sql(payload)
-        status = "assigned" if payload.assigned_to_id is not None else "new"
-        result = _one(db.execute(text(f"""
-            INSERT INTO field_inspections
-            (field_id,enterprise_id,created_by_id,updated_by_id,assigned_to_id,client_request_id,
-             request_fingerprint,source,source_priority,source_reason_codes,title,instructions,due_date,
-             status,source_kind,source_alert_id,source_provider,source_item_id,source_acquired_at,
-             source_index_name,source_sampled_value,source_comparison_value,source_delta,
-             source_geometry_hash,source_point,source_zone,source_reason,priority,due_at)
-            VALUES (:field_id,:enterprise_id,:actor_id,:actor_id,:assignee_id,:key,:fingerprint,
-             :source_kind,:priority,'[]'::jsonb,:title,:reason,(:due_at AT TIME ZONE 'Asia/Tashkent')::date,
-             :status,:source_kind,:alert_id,:provider,:item_id,:acquired_at,:index_name,:sampled_value,
-             :comparison_value,:delta,:geometry_hash,{point_sql},{zone_sql},:reason,:priority,:due_at)
-            RETURNING id,field_id,enterprise_id,version,status
-        """), {
-            "field_id": field["id"], "enterprise_id": field["enterprise_id"],
-            "actor_id": actor.user_id, "assignee_id": payload.assigned_to_id,
-            "key": idempotency_key, "fingerprint": fingerprint,
-            "source_kind": _enum(payload.source_kind), "priority": _enum(payload.priority),
-            "title": payload.reason[:255], "reason": payload.reason, "due_at": payload.due_at,
-            "status": status, "alert_id": payload.source_alert_id, "provider": payload.provider,
-            "item_id": payload.item_id, "acquired_at": payload.acquired_at,
-            "index_name": payload.index_name, "sampled_value": payload.sampled_value,
-            "comparison_value": payload.comparison_value, "delta": payload.delta,
-            "geometry_hash": payload.geometry_hash, **location_params,
-        }))
-        _audit(db, actor, result, "inspection_created", result["version"], {"to_status": status})
-        if payload.assigned_to_id is not None:
-            _audit(db, actor, result, "inspection_assigned", result["version"],
-                   {"to_status": status, "assignee_id": payload.assigned_to_id})
+        try:
+            result = insert_inspection(
+                db, actor=actor, field_id=field["id"], enterprise_id=field["enterprise_id"],
+                source=_payload_source(payload), client_request_id=idempotency_key,
+                request_fingerprint=fingerprint, title=payload.reason,
+                priority=_enum(payload.priority), due_at=payload.due_at,
+                assigned_to_id=payload.assigned_to_id, origin="api",
+            )
+        except InspectionSourceError as error:
+            raise HTTPException(422, str(error)) from None
         db.commit()
         _invalidate(result)
         return {"created": True, "inspection": _inspection_item(_inspection_row(db, actor, result["id"]))}
-    except IntegrityError:
+    except IntegrityError as error:
         db.rollback()
+        if not is_unique_violation(error):
+            raise
+        prior = replay()
+        if prior:
+            return prior
         raise HTTPException(409, "Concurrent inspection conflict") from None
     except HTTPException:
         db.rollback()
@@ -344,15 +546,19 @@ def list_queue(db, user, filters: dict):
     rows = _all(db.execute(text(
         INSPECTION_SELECT + f" WHERE {where} ORDER BY {order_by} LIMIT :limit OFFSET :offset"
     ), params))
+    # Remediation counts come from the canonical TASK_220 plans, never from the
+    # retired corrective_actions lifecycle: an inspection has at most one
+    # non-terminal plan (uq_agronomy_plan_active_inspection).
     summary = _one(db.execute(text(f"""
         SELECT count(*) AS total,
           count(*) FILTER (WHERE i.status IN ('new','assigned','in_progress','submitted')) AS open,
           count(*) FILTER (WHERE i.status IN ('new','assigned','in_progress','submitted') AND i.due_at < now()) AS overdue,
           count(*) FILTER (WHERE i.status='submitted') AS awaiting_review,
-          count(DISTINCT a.id) FILTER (WHERE a.status IN ('planned','in_progress')) AS active_actions,
-          count(DISTINCT a.id) FILTER (WHERE a.status='completed') AS verification_due
+          count(DISTINCT p.id) FILTER (WHERE p.status IN ('draft','approved','in_progress','rework')) AS active_actions,
+          count(DISTINCT p.id) FILTER (WHERE p.status='pending_verification') AS verification_due
         FROM field_inspections i JOIN fields f ON f.id=i.field_id
-        LEFT JOIN corrective_actions a ON a.inspection_id=i.id
+        LEFT JOIN agronomy_plans p ON p.inspection_id=i.id AND p.enterprise_id=i.enterprise_id
+          AND p.status NOT IN ('closed','cancelled','superseded')
         WHERE {where}
     """), params))
     return {
@@ -417,7 +623,7 @@ def detail(db, user, inspection_id: int):
 def assign(db, user, inspection_id: int, payload):
     actor = _actor(user)
     try:
-        base = _inspection_row(db, actor, inspection_id)
+        base = _canonical_row(db, actor, inspection_id)
         _write_roles(actor, {"admin", "manager"})
         if base["status"] not in {"new", "assigned"}:
             raise HTTPException(409, "Inspection cannot be assigned in its current state")
@@ -427,7 +633,8 @@ def assign(db, user, inspection_id: int, payload):
         result = _one(db.execute(text(
             "UPDATE field_inspections SET assigned_to_id=:assignee,status='assigned',"
             "reassignment_reason=:reason,updated_by_id=:actor,updated_at=now(),version=version+1 "
-            "WHERE id=:id AND version=:version AND status IN ('new','assigned') RETURNING id,field_id,enterprise_id,version"
+            "WHERE id=:id AND version=:version AND status IN ('new','assigned') "
+            "AND source_kind<>'legacy' RETURNING id,field_id,enterprise_id,version"
         ), {"assignee": payload.assigned_to_id, "reason": payload.reason, "actor": actor.user_id,
             "id": inspection_id, "version": payload.expected_version}))
         if not result:
@@ -448,12 +655,13 @@ def assign(db, user, inspection_id: int, payload):
 def start(db, user, inspection_id: int, payload):
     actor = _actor(user)
     try:
-        base = _inspection_row(db, actor, inspection_id, assigned_only=True)
+        base = _canonical_row(db, actor, inspection_id, assigned_only=True)
         _write_roles(actor, {"agronomist"})
         result = _one(db.execute(text(
             "UPDATE field_inspections SET status='in_progress',started_at=now(),updated_by_id=:actor,"
             "updated_at=now(),version=version+1 WHERE id=:id AND assigned_to_id=:actor "
-            "AND version=:version AND status='assigned' RETURNING id,field_id,enterprise_id,version"
+            "AND version=:version AND status='assigned' AND source_kind<>'legacy' "
+            "RETURNING id,field_id,enterprise_id,version"
         ), {"actor": actor.user_id, "id": inspection_id, "version": payload.expected_version}))
         if not result:
             raise HTTPException(409, "Version or state conflict")
@@ -470,7 +678,7 @@ def start(db, user, inspection_id: int, payload):
 def save_finding(db, user, inspection_id: int, payload):
     actor = _actor(user)
     try:
-        base = _inspection_row(db, actor, inspection_id, assigned_only=True)
+        base = _canonical_row(db, actor, inspection_id, assigned_only=True)
         _write_roles(actor, {"agronomist"})
         if base["status"] != "in_progress":
             raise HTTPException(409, "Finding can be saved only while inspection is in progress")
@@ -514,7 +722,7 @@ def save_finding(db, user, inspection_id: int, payload):
         result = _one(db.execute(text(
             "UPDATE field_inspections SET updated_by_id=:actor,updated_at=now(),version=version+1 "
             "WHERE id=:id AND assigned_to_id=:actor AND version=:version AND status='in_progress' "
-            "RETURNING id,field_id,enterprise_id,version"
+            "AND source_kind<>'legacy' RETURNING id,field_id,enterprise_id,version"
         ), {"actor": actor.user_id, "id": inspection_id, "version": payload.expected_version}))
         if not result:
             raise HTTPException(409, "Version or state conflict")
@@ -530,7 +738,7 @@ def save_finding(db, user, inspection_id: int, payload):
 def submit(db, user, inspection_id: int, payload):
     actor = _actor(user)
     try:
-        base = _inspection_row(db, actor, inspection_id, assigned_only=True)
+        base = _canonical_row(db, actor, inspection_id, assigned_only=True)
         _write_roles(actor, {"agronomist"})
         finding = _one(db.execute(text(
             "SELECT id,observations,recommended_action,severity,actual_inspected_at "
@@ -542,7 +750,8 @@ def submit(db, user, inspection_id: int, payload):
         result = _one(db.execute(text(
             "UPDATE field_inspections SET status='submitted',submitted_at=now(),updated_by_id=:actor,"
             "updated_at=now(),version=version+1 WHERE id=:id AND assigned_to_id=:actor "
-            "AND version=:version AND status='in_progress' RETURNING id,field_id,enterprise_id,version"
+            "AND version=:version AND status='in_progress' AND source_kind<>'legacy' "
+            "RETURNING id,field_id,enterprise_id,version"
         ), {"actor": actor.user_id, "id": inspection_id, "version": payload.expected_version}))
         if not result:
             raise HTTPException(409, "Version or state conflict")
@@ -556,17 +765,35 @@ def submit(db, user, inspection_id: int, payload):
         db.rollback(); raise
 
 
+def _refuse_with_active_plan(db, base) -> None:
+    """An inspection that roots a live plan cannot be rejected or cancelled.
+
+    The plan's work, evidence and verification hang off the inspection; ending
+    the inspection underneath it would leave an active remediation whose root
+    is terminal. The plan must be cancelled or resolved first.
+    """
+    active = _one(db.execute(text(
+        "SELECT id FROM agronomy_plans WHERE inspection_id=:id AND enterprise_id=:enterprise_id "
+        "AND status NOT IN ('closed','cancelled','superseded') FOR UPDATE"
+    ), {"id": base["id"], "enterprise_id": base["enterprise_id"]}))
+    if active:
+        raise HTTPException(409, "The inspection roots an active agronomy plan; resolve the plan first")
+
+
 def review(db, user, inspection_id: int, payload):
     actor = _actor(user)
     try:
-        base = _inspection_row(db, actor, inspection_id)
+        base = _canonical_row(db, actor, inspection_id)
         _write_roles(actor, {"admin", "manager"})
         decision = payload.decision
+        if decision == "rejected":
+            _refuse_with_active_plan(db, base)
         timestamp_column = "confirmed_at" if decision == "confirmed" else "rejected_at"
         result = _one(db.execute(text(f"""
             UPDATE field_inspections SET status=:decision,reviewed_by_id=:actor,reviewed_at=now(),
             review_reason=:reason,{timestamp_column}=now(),updated_by_id=:actor,updated_at=now(),
             version=version+1 WHERE id=:id AND version=:version AND status='submitted'
+            AND source_kind<>'legacy'
             RETURNING id,field_id,enterprise_id,version
         """), {"decision": decision, "actor": actor.user_id, "reason": payload.reason,
             "id": inspection_id, "version": payload.expected_version}))
@@ -583,21 +810,38 @@ def review(db, user, inspection_id: int, payload):
 
 
 def cancel(db, user, inspection_id: int, payload):
+    """Cancel an open inspection, or close out an active legacy one.
+
+    Canonical rows cancel from any open canonical state. A legacy row
+    (source_kind='legacy', TASK_209 vocabulary) may only be closed out from its
+    own open states; that is the single transition the canonical workflow
+    offers it, recorded with ``origin=legacy_closeout`` so the drain is
+    auditable. Nothing else ever moves a legacy row.
+    """
     actor = _actor(user)
     try:
         base = _inspection_row(db, actor, inspection_id)
         _write_roles(actor, {"admin", "manager"})
+        legacy = base["source_kind"] == "legacy"
+        allowed = LEGACY_OPEN_STATUSES if legacy else CANONICAL_OPEN_STATUSES
+        if not legacy:
+            _refuse_with_active_plan(db, base)
         result = _one(db.execute(text(
             "UPDATE field_inspections SET status='cancelled',cancellation_reason=:reason,cancelled_at=now(),"
             "updated_by_id=:actor,updated_at=now(),version=version+1 WHERE id=:id AND version=:version "
-            "AND status IN ('new','assigned','in_progress','submitted') "
+            "AND status IN :allowed AND source_kind=:source_kind "
             "RETURNING id,field_id,enterprise_id,version"
-        ), {"reason": payload.reason, "actor": actor.user_id, "id": inspection_id,
-            "version": payload.expected_version}))
+        ).bindparams(bindparam("allowed", expanding=True)), {
+            "reason": payload.reason, "actor": actor.user_id, "id": inspection_id,
+            "version": payload.expected_version, "allowed": list(allowed),
+            "source_kind": base["source_kind"],
+        }))
         if not result:
             raise HTTPException(409, "Version or state conflict")
-        _audit(db, actor, result, "inspection_cancelled", result["version"],
-               {"from_status": base["status"], "to_status": "cancelled", "reason": payload.reason})
+        metadata = {"from_status": base["status"], "to_status": "cancelled", "reason": payload.reason}
+        if legacy:
+            metadata["origin"] = "legacy_closeout"
+        _audit(db, actor, result, "inspection_cancelled", result["version"], metadata)
         db.commit(); _invalidate(result)
         return {"inspection": _inspection_item(_inspection_row(db, actor, inspection_id))}
     except HTTPException:
@@ -639,7 +883,7 @@ def upload_photo(db, user, inspection_id: int, expected_version: int, filename: 
                  content_type: str, data: bytes, captured_at: datetime | None):
     actor = _actor(user)
     try:
-        base = _inspection_row(db, actor, inspection_id, assigned_only=True)
+        base = _canonical_row(db, actor, inspection_id, assigned_only=True)
         _write_roles(actor, {"agronomist"})
         if not data or len(data) > MAX_PHOTO_BYTES:
             raise HTTPException(413, "Photo exceeds the 8 MiB limit")
@@ -681,7 +925,7 @@ def upload_photo(db, user, inspection_id: int, expected_version: int, filename: 
             result = _one(db.execute(text(
                 "UPDATE field_inspections SET updated_by_id=:actor,updated_at=now(),version=version+1 "
                 "WHERE id=:id AND assigned_to_id=:actor AND version=:version AND status='in_progress' "
-                "RETURNING id,field_id,enterprise_id,version"
+                "AND source_kind<>'legacy' RETURNING id,field_id,enterprise_id,version"
             ), {"actor": actor.user_id, "id": inspection_id, "version": expected_version}))
             if not result:
                 raise HTTPException(409, "Version or state conflict")
@@ -717,7 +961,7 @@ def photo_download(db, user, inspection_id: int, photo_id: int):
 def delete_photo(db, user, inspection_id: int, photo_id: int, expected_version: int):
     actor = _actor(user)
     try:
-        base = _inspection_row(db, actor, inspection_id, assigned_only=True)
+        base = _canonical_row(db, actor, inspection_id, assigned_only=True)
         _write_roles(actor, {"agronomist", "admin", "manager"})
         if base["status"] not in {"in_progress", "submitted"}:
             raise HTTPException(409, "Photo cannot be deleted in the current state")
@@ -730,7 +974,8 @@ def delete_photo(db, user, inspection_id: int, photo_id: int, expected_version: 
             raise HTTPException(404, "Photo not found")
         result = _one(db.execute(text(
             "UPDATE field_inspections SET updated_by_id=:actor,updated_at=now(),version=version+1 "
-            "WHERE id=:id AND version=:version RETURNING id,field_id,enterprise_id,version"
+            "WHERE id=:id AND version=:version AND source_kind<>'legacy' "
+            "RETURNING id,field_id,enterprise_id,version"
         ), {"actor": actor.user_id, "id": inspection_id, "version": expected_version}))
         if not result:
             raise HTTPException(409, "Version conflict")
@@ -741,154 +986,6 @@ def delete_photo(db, user, inspection_id: int, photo_id: int, expected_version: 
             if root in target.parents:
                 target.unlink(missing_ok=True)
         return {"inspection": _inspection_item(_inspection_row(db, actor, inspection_id))}
-    except HTTPException:
-        db.rollback(); raise
-    except Exception:
-        db.rollback(); raise
-
-
-def create_action(db, user, inspection_id: int, payload):
-    actor = _actor(user)
-    try:
-        base = _inspection_row(db, actor, inspection_id)
-        _write_roles(actor, {"admin", "manager"})
-        if base["status"] != "confirmed":
-            raise HTTPException(409, "Actions require a confirmed inspection")
-        owner = _eligible_user(db, base["enterprise_id"], payload.owner_id)
-        result_id = _one(db.execute(text(
-            "SELECT id FROM inspection_results WHERE inspection_id=:id"
-        ), {"id": inspection_id}))
-        if not result_id:
-            raise HTTPException(422, "Inspection finding is missing")
-        action = _one(db.execute(text(
-            """INSERT INTO corrective_actions
-            (inspection_id,result_id,field_id,enterprise_id,created_by_id,owner_id,description,due_date,
-             status,action_type,planned_start_at,due_at)
-            VALUES (:inspection_id,:result_id,:field_id,:enterprise_id,:actor,:owner,:instructions,
-             (:due_at AT TIME ZONE 'Asia/Tashkent')::date,'planned',:action_type,:planned_start,:due_at)
-            RETURNING *"""
-        ), {"inspection_id": inspection_id, "result_id": result_id["id"], "field_id": base["field_id"],
-            "enterprise_id": base["enterprise_id"], "actor": actor.user_id, "owner": owner["id"],
-            "instructions": payload.instructions, "due_at": payload.due_at,
-            "action_type": payload.action_type, "planned_start": payload.planned_start_at}))
-        updated = _one(db.execute(text(
-            "UPDATE field_inspections SET updated_by_id=:actor,updated_at=now(),version=version+1 "
-            "WHERE id=:id AND version=:version AND status='confirmed' "
-            "RETURNING id,field_id,enterprise_id,version"
-        ), {"actor": actor.user_id, "id": inspection_id, "version": payload.expected_inspection_version}))
-        if not updated:
-            raise HTTPException(409, "Version or state conflict")
-        _audit(db, actor, updated, "action_created", action["version"],
-               {"to_status": "planned", "action_type": payload.action_type}, action_id=action["id"])
-        db.commit(); _invalidate(updated)
-        return {"inspection": _inspection_item(_inspection_row(db, actor, inspection_id)),
-                "action": dict(action)}
-    except HTTPException:
-        db.rollback(); raise
-    except Exception:
-        db.rollback(); raise
-
-
-def action_transition(db, user, action_id: int, payload):
-    actor = _actor(user)
-    try:
-        tenant, params = _tenant_clause(actor, "a")
-        action = _one(db.execute(text(
-            "SELECT a.*,i.id AS inspection_object_id FROM corrective_actions a "
-            "JOIN field_inspections i ON i.id=a.inspection_id WHERE a.id=:action_id" + tenant
-        ), {"action_id": action_id, **params}))
-        if not action:
-            raise HTTPException(404, "Action not found")
-        if actor.role == "viewer":
-            raise HTTPException(403, "Viewer is read-only")
-        if actor.role not in {"admin", "manager"} and not (
-            actor.role == "agronomist" and action["owner_id"] == actor.user_id
-        ):
-            raise HTTPException(404, "Action not found")
-        transitions = {
-            "start": ("planned", "in_progress", "started_at=now()", "action_started"),
-            "complete": ("in_progress", "completed", "completion_note=:note,completed_at=now()", "action_completed"),
-            "cancel": ("planned", "cancelled", "cancelled_reason=:note,cancelled_at=now()", "action_cancelled"),
-        }
-        source, target, extra, event = transitions[payload.transition]
-        if payload.transition == "cancel" and action["status"] == "in_progress":
-            source = "in_progress"
-        updated = _one(db.execute(text(f"""
-            UPDATE corrective_actions SET status=:target,{extra},updated_at=now(),version=version+1
-            WHERE id=:action_id AND version=:version AND status=:source RETURNING *
-        """), {"target": target, "note": payload.note, "action_id": action_id,
-            "version": payload.expected_version, "source": source}))
-        if not updated:
-            raise HTTPException(409, "Version or state conflict")
-        base = {"id": action["inspection_id"], "field_id": action["field_id"],
-                "enterprise_id": action["enterprise_id"]}
-        _audit(db, actor, base, event, updated["version"],
-               {"from_status": action["status"], "to_status": target, "reason": payload.note},
-               action_id=action_id)
-        db.commit(); _invalidate(base)
-        return {"action": dict(updated)}
-    except HTTPException:
-        db.rollback(); raise
-    except Exception:
-        db.rollback(); raise
-
-
-def verify_action(db, user, action_id: int, payload):
-    actor = _actor(user)
-    try:
-        tenant, params = _tenant_clause(actor, "a")
-        action = _one(db.execute(text(
-            "SELECT a.*,i.source_reason,i.priority FROM corrective_actions a "
-            "JOIN field_inspections i ON i.id=a.inspection_id WHERE a.id=:action_id" + tenant
-        ), {"action_id": action_id, **params}))
-        if not action:
-            raise HTTPException(404, "Action not found")
-        _write_roles(actor, {"admin", "manager"})
-        target = "verified_effective" if _enum(payload.result) == "effective" else "verified_ineffective"
-        follow_up = None
-        if payload.create_follow_up:
-            _eligible_user(db, action["enterprise_id"], payload.follow_up_assignee_id, agronomist_only=True)
-            key = f"follow-up-{uuid.uuid4()}"
-            follow_up = _one(db.execute(text(
-                """INSERT INTO field_inspections
-                (field_id,enterprise_id,created_by_id,updated_by_id,assigned_to_id,client_request_id,
-                 request_fingerprint,source,source_priority,source_reason_codes,title,instructions,due_date,
-                 status,source_kind,source_reason,priority,due_at,follow_up_of_id)
-                VALUES (:field_id,:enterprise_id,:actor,:actor,:assignee,:key,:fingerprint,'manual',
-                 :priority,'[]'::jsonb,:title,:reason,(:due_at AT TIME ZONE 'Asia/Tashkent')::date,
-                 'assigned','manual',:reason,:priority,:due_at,:parent)
-                RETURNING id,field_id,enterprise_id,version,status"""
-            ), {"field_id": action["field_id"], "enterprise_id": action["enterprise_id"],
-                "actor": actor.user_id, "assignee": payload.follow_up_assignee_id, "key": key,
-                "fingerprint": _fingerprint({"action": action_id, "key": key}),
-                "priority": action["priority"], "title": f"Повторный осмотр: {action['source_reason']}"[:255],
-                "reason": f"Повторный цикл после действия #{action_id}: {payload.notes}"[:2000],
-                "due_at": payload.follow_up_due_at, "parent": action["inspection_id"]}))
-        updated = _one(db.execute(text(
-            """UPDATE corrective_actions SET status=:status,verified_by_id=:actor,verified_at=now(),
-            verification_result=:result,verification_notes=:notes,verification_index_name=:index_name,
-            verification_sample_value=:sample,follow_up_inspection_id=:follow_up,updated_at=now(),
-            version=version+1 WHERE id=:action_id AND version=:version AND status='completed'
-            RETURNING *"""
-        ), {"status": target, "actor": actor.user_id, "result": _enum(payload.result),
-            "notes": payload.notes, "index_name": payload.index_name, "sample": payload.sampled_value,
-            "follow_up": follow_up["id"] if follow_up else None, "action_id": action_id,
-            "version": payload.expected_version}))
-        if not updated:
-            raise HTTPException(409, "Version or state conflict")
-        base = {"id": action["inspection_id"], "field_id": action["field_id"],
-                "enterprise_id": action["enterprise_id"]}
-        event = "action_verified_effective" if target == "verified_effective" else "action_verified_ineffective"
-        _audit(db, actor, base, event, updated["version"],
-               {"from_status": "completed", "to_status": target, "result": _enum(payload.result),
-                "follow_up_inspection_id": follow_up["id"] if follow_up else None}, action_id=action_id)
-        if follow_up:
-            _audit(db, actor, follow_up, "follow_up_created", follow_up["version"],
-                   {"to_status": follow_up["status"], "follow_up_inspection_id": follow_up["id"]})
-        db.commit(); _invalidate(base)
-        return {"action": dict(updated),
-                "follow_up_inspection": (_inspection_item(_inspection_row(db, actor, follow_up["id"]))
-                                         if follow_up else None)}
     except HTTPException:
         db.rollback(); raise
     except Exception:

@@ -278,11 +278,13 @@ class LegacyVerificationEngine(unittest.TestCase):
 class SingleSourceOfTruth(unittest.TestCase):
     """No consumer may reintroduce a hand-written cloud acceptance predicate."""
 
+    # services/operational_closure.py left this list in TASK_225: its legacy
+    # verification writes were retired, so it no longer reads observations at
+    # all (pinned by test_retired_closure_reads_no_observations).
     CONSUMERS = (
         "services/autonomous_monitoring.py",
         "services/closed_loop_agronomy.py",
         "services/executive_accountability.py",
-        "services/operational_closure.py",
         "services/agronomy_policy.py",
         "services/operational_verification.py",
     )
@@ -302,6 +304,15 @@ class SingleSourceOfTruth(unittest.TestCase):
             for fragment in self.FORBIDDEN:
                 with self.subTest(module=relative, fragment=fragment):
                     self.assertNotIn(fragment, source)
+
+    def test_retired_closure_reads_no_observations(self):
+        from pathlib import Path
+
+        backend = Path(__file__).resolve().parents[1]
+        source = (backend / "services/operational_closure.py").read_text(encoding="utf-8")
+        for table in ("ndvi_records", "satellite_index_records", "cloud_cover_pct"):
+            with self.subTest(table=table):
+                self.assertNotIn(table, source)
 
     def test_consumers_use_the_canonical_module(self):
         from pathlib import Path

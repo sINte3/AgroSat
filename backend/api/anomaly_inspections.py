@@ -1,4 +1,8 @@
-"""API for anomaly source, inspection, action, photo, and verification workflow."""
+"""API for the canonical inspection lifecycle: source, assignment, finding, review, photos.
+
+Remediation after review is the TASK_220 agronomy lifecycle (/api/agronomy-plans).
+The TASK_217 corrective-action writes that competed with it are retired (410).
+"""
 
 from datetime import datetime
 import re
@@ -8,12 +12,11 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from api.auth import get_current_active_user
+from api.lifecycle_retirement import retired
 from database import get_db
 from schemas.anomaly_inspection import (
-    ActionTransitionRequest,
     AssignInspectionRequest,
     CancelInspectionRequest,
-    CreateActionRequest,
     CreateInspectionRequest,
     FindingRequest,
     InspectionPriority,
@@ -21,7 +24,6 @@ from schemas.anomaly_inspection import (
     QueueResponse,
     ReviewInspectionRequest,
     SourceKind,
-    VerifyActionRequest,
     VersionRequest,
     WorkflowMutationResponse,
 )
@@ -158,7 +160,7 @@ def cancel_inspection(
 
 
 @router.post("/{inspection_id}/photos", response_model=WorkflowMutationResponse, status_code=201)
-async def upload_photo(
+def upload_photo(
     inspection_id: int = Path(..., gt=0),
     expected_version: int = Form(..., gt=0),
     captured_at: datetime | None = Form(None),
@@ -166,8 +168,12 @@ async def upload_photo(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
-    content = await photo.read(service.MAX_PHOTO_BYTES + 1)
-    await photo.close()
+    # A plain def runs in the threadpool: the synchronous Session and file
+    # write below must not block the event loop.
+    try:
+        content = photo.file.read(service.MAX_PHOTO_BYTES + 1)
+    finally:
+        photo.file.close()
     return service.upload_photo(
         db, current_user, inspection_id, expected_version,
         photo.filename or "photo", photo.content_type or "application/octet-stream", content, captured_at,
@@ -199,31 +205,36 @@ def delete_photo(
     return service.delete_photo(db, current_user, inspection_id, photo_id, payload.expected_version)
 
 
-@router.post("/{inspection_id}/actions", response_model=WorkflowMutationResponse, status_code=201)
+PLAN_REPLACEMENT = "POST /api/agronomy-plans (from a submitted or confirmed inspection)"
+RETIRED = "TASK_217 corrective actions are retired; remediation is the TASK_220 agronomy lifecycle."
+
+
+@router.post("/{inspection_id}/actions", status_code=410)
 def create_action(
-    payload: CreateActionRequest,
     inspection_id: int = Path(..., gt=0),
-    db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
-    return service.create_action(db, current_user, inspection_id, payload)
+    raise retired("POST /api/anomaly-inspections/{inspection_id}/actions", PLAN_REPLACEMENT, RETIRED)
 
 
-@router.post("/actions/{action_id}/transition", response_model=WorkflowMutationResponse)
+@router.post("/actions/{action_id}/transition", status_code=410)
 def transition_action(
-    payload: ActionTransitionRequest,
     action_id: int = Path(..., gt=0),
-    db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
-    return service.action_transition(db, current_user, action_id, payload)
+    raise retired(
+        "POST /api/anomaly-inspections/actions/{action_id}/transition",
+        "POST /api/agronomy-plans/{plan_id}/work/{item_id}/transition", RETIRED,
+    )
 
 
-@router.post("/actions/{action_id}/verify", response_model=WorkflowMutationResponse)
+@router.post("/actions/{action_id}/verify", status_code=410)
 def verify_action(
-    payload: VerifyActionRequest,
     action_id: int = Path(..., gt=0),
-    db: Session = Depends(get_db),
     current_user=Depends(get_current_active_user),
 ):
-    return service.verify_action(db, current_user, action_id, payload)
+    raise retired(
+        "POST /api/anomaly-inspections/actions/{action_id}/verify",
+        "Satellite verification runs in the standalone collector; resolve with "
+        "POST /api/agronomy-plans/{plan_id}/transition", RETIRED,
+    )

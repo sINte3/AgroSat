@@ -1,4 +1,8 @@
-"""Offline behavioral coverage for the field-inspection workflow."""
+"""Offline coverage for the legacy TASK_209 field-inspection API.
+
+Since TASK_225 the legacy workflow is read-only: rows stay readable and every
+write answers 410 Gone without touching the database.
+"""
 import importlib.util
 import sys
 import unittest
@@ -12,23 +16,14 @@ if str(BACKEND) not in sys.path:
 
 from fastapi import Depends, FastAPI, HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
-from sqlalchemy.exc import IntegrityError  # noqa: E402
 
 from api.field_inspections import router  # noqa: E402
-from schemas.field_inspection import (CancelInspectionRequest, CompleteInspectionRequest,
-    CreateInspectionRequest, TransitionRequest, UpdateInspectionRequest)  # noqa: E402
-from services.field_inspections import (ITEM_SELECT, ActorScope, create, fingerprint, get, list_items,
-                                        transition, update)  # noqa: E402
+from services import field_inspections as service  # noqa: E402
+from services.field_inspections import ITEM_SELECT, ActorScope, get, list_items  # noqa: E402
 
 
 def user(role="admin", identifier=7, enterprise=None):
     return SimpleNamespace(role=role, id=identifier, enterprise_id=enterprise)
-
-
-def payload(**changes):
-    values = {"field_id": 3, "title": "Inspect crop", "source": "manual"}
-    values.update(changes)
-    return CreateInspectionRequest(**values)
 
 
 def item_row(identifier=11, status="pending", **changes):
@@ -72,24 +67,6 @@ class Session:
     def rollback(self):
         self.rollbacks += 1; self.active = False
         if self.actor: self.actor.expire()
-
-
-class ExpiringUser:
-    """ORM-user double that rejects attribute access after a boundary."""
-    def __init__(self, role="admin", identifier=7, enterprise=None):
-        self._values = {"role": role, "id": identifier, "enterprise_id": enterprise}
-        self._expired = False
-    def expire(self): self._expired = True
-    def __getattr__(self, name):
-        if name in self._values:
-            if self._expired:
-                raise AssertionError(f"expired ORM actor attribute read: {name}")
-            return self._values[name]
-        raise AttributeError(name)
-
-
-def integrity_error():
-    return IntegrityError("INSERT", {}, Exception("constraint"))
 
 
 class ContractTests(unittest.TestCase):
@@ -147,159 +124,40 @@ class ContractTests(unittest.TestCase):
             self.assertNotIn(token, source)
 
 
-class CreateTests(unittest.TestCase):
-    def successful(self, actor=None, request=None):
-        actor, request = actor or user(), request or payload(assigned_to_id=8)
-        db = Session([[], [{"id": 3, "enterprise_id": 5}], [{"id": 8}], [], [{"id": 11}], [item_row()]])
-        result = create(db, actor, request, "request-key-0001")
-        return db, result
+class RetirementTests(unittest.TestCase):
+    """TASK_225: no second inspection state machine accepts new work."""
 
-    def test_active_autobegun_session_create_commits_once_and_tenant_is_in_sql(self):
-        db, result = self.successful(user("agronomist", 8, 5), payload())
-        self.assertTrue(result[0]); self.assertEqual(11, result[1]["id"])
-        self.assertEqual((1, 0, 0), (db.commits, db.rollbacks, db.begins))
-        field_sql, field_params = db.calls[1]
-        self.assertIn("f.enterprise_id=:eid", field_sql); self.assertEqual(5, field_params["eid"])
-        insert_sql, insert_params = db.calls[4]
-        self.assertEqual(8, insert_params["assigned"])
-        self.assertIn("field_id,enterprise_id,created_by_id", insert_sql)
+    WRITES = (("post", ""), ("patch", "/11"), ("post", "/11/start"),
+              ("post", "/11/complete"), ("post", "/11/cancel"))
 
-    def test_failed_create_viewer_and_ineligible_assignee_roll_back(self):
-        db = Session([])
-        with self.assertRaises(HTTPException) as caught: create(db, user("viewer", 9, 5), payload(), "request-key-0002")
-        self.assertEqual(403, caught.exception.status_code); self.assertEqual(1, db.rollbacks)
-        db = Session([[], [{"id": 3, "enterprise_id": 5}], []])
-        with self.assertRaises(HTTPException) as caught: create(db, user(), payload(assigned_to_id=99), "request-key-0003")
-        self.assertEqual(422, caught.exception.status_code); self.assertEqual(1, db.rollbacks)
+    def test_every_legacy_write_is_410_with_a_canonical_replacement_and_no_sql(self):
+        from api.auth import get_current_active_user
+        from database import get_db
+        untouched = Session([])
+        app = FastAPI(); app.include_router(router)
+        app.dependency_overrides[get_db] = lambda: untouched
+        app.dependency_overrides[get_current_active_user] = lambda: user("manager", 7, 5)
+        client = TestClient(app)
+        for method, suffix in self.WRITES:
+            with self.subTest(method=method, suffix=suffix):
+                response = getattr(client, method)(
+                    "/api/field-inspections" + suffix,
+                    json={"expected_version": 1, "field_id": 3, "title": "Inspect crop", "source": "manual"},
+                    headers={"Idempotency-Key": "task225-legacy-write"},
+                )
+                self.assertEqual(410, response.status_code, response.text)
+                detail = response.json()["detail"]
+                self.assertEqual("lifecycle_endpoint_retired", detail["code"])
+                self.assertIn("/api/anomaly-inspections", detail["replacement"])
+        self.assertEqual([], untouched.calls)
+        self.assertEqual((0, 0), (untouched.commits, untouched.rollbacks))
 
-    def test_cross_enterprise_field_and_unexpected_create_error_roll_back(self):
-        db = Session([[], []])
-        with self.assertRaises(HTTPException) as caught:
-            create(db, user("agronomist", 8, 5), payload(), "request-key-0010")
-        self.assertEqual(404, caught.exception.status_code); self.assertEqual(1, db.rollbacks)
-        self.assertIn("f.enterprise_id=:eid", db.calls[1][0])
-        db = Session([RuntimeError("offline failure")])
-        with self.assertRaises(RuntimeError): create(db, user(), payload(), "request-key-0011")
-        self.assertEqual(1, db.rollbacks)
-
-    def test_agronomist_defaults_self_and_cannot_assign_another(self):
-        db, _ = self.successful(user("agronomist", 8, 5), payload())
-        self.assertEqual(8, db.calls[4][1]["assigned"])
-        rejected = Session([])
-        with self.assertRaises(HTTPException) as caught: create(rejected, user("agronomist", 8, 5), payload(assigned_to_id=9), "request-key-0004")
-        self.assertEqual(403, caught.exception.status_code); self.assertEqual(1, rejected.rollbacks)
-
-    def test_idempotent_replay_returns_existing_without_commit(self):
-        request = payload(); fp = fingerprint(7, request, None)
-        db = Session([[{"id": 11, "request_fingerprint": fp}], [item_row(11)]])
-        created, result = create(db, user(), request, "request-key-0005")
-        self.assertFalse(created); self.assertEqual(11, result["id"])
-        self.assertEqual((0, 0), (db.commits, db.rollbacks))
-
-    def test_same_key_different_payload_and_active_duplicate_return_409(self):
-        db = Session([[{"id": 11, "request_fingerprint": "different"}]])
-        with self.assertRaises(HTTPException) as caught: create(db, user(), payload(), "request-key-0006")
-        self.assertEqual(409, caught.exception.status_code); self.assertEqual(1, db.rollbacks)
-        db = Session([[], [{"id": 3, "enterprise_id": 5}], [{"id": 12}]])
-        with self.assertRaises(HTTPException) as caught: create(db, user(), payload(), "request-key-0007")
-        self.assertEqual(409, caught.exception.status_code); self.assertEqual(1, db.rollbacks)
-
-    def test_integrity_race_classifies_same_key_and_active_field(self):
-        request = payload(); fp = fingerprint(7, request, None)
-        prefix = [[], [{"id": 3, "enterprise_id": 5}], [], integrity_error()]
-        db = Session(prefix + [[{"id": 13, "request_fingerprint": fp}], [item_row(13)]])
-        created, result = create(db, user(), request, "request-key-0008")
-        self.assertFalse(created); self.assertEqual(13, result["id"]); self.assertEqual(0, db.commits)
-        self.assertEqual(1, db.rollbacks)
-        db = Session(prefix + [[], [{"id": 14}]])
-        with self.assertRaises(HTTPException) as caught: create(db, user(), request, "request-key-0009")
-        self.assertEqual(409, caught.exception.status_code); self.assertIn("Active", caught.exception.detail)
-        self.assertEqual(1, db.rollbacks)
-
-    def test_expired_actor_is_never_read_after_create_or_integrity_rollback(self):
-        actor = ExpiringUser()
-        db = Session([[], [{"id": 3, "enterprise_id": 5}], [], [{"id": 11}], [item_row()]], actor=actor)
-        self.assertTrue(create(db, actor, payload(), "request-key-0012")[0])
-
-        request = payload(); fp = fingerprint(7, request, None)
-        actor = ExpiringUser()
-        db = Session([[], [{"id": 3, "enterprise_id": 5}], [], integrity_error(),
-                      [{"id": 13, "request_fingerprint": fp}], [item_row(13)]], actor=actor)
-        self.assertFalse(create(db, actor, request, "request-key-0013")[0])
-        self.assertEqual(1, db.rollbacks)
-
-        actor = ExpiringUser()
-        db = Session([[], [{"id": 3, "enterprise_id": 5}], [], integrity_error(), [], [{"id": 14}]], actor=actor)
-        with self.assertRaises(HTTPException) as caught:
-            create(db, actor, request, "request-key-0014")
-        self.assertIn("14", caught.exception.detail)
-        self.assertEqual(1, db.rollbacks)
-
-
-class UpdateAndTransitionTests(unittest.TestCase):
-    def test_update_validation_failure_rolls_back(self):
-        db = Session([[{"enterprise_id": 5}], []])
-        request = UpdateInspectionRequest(expected_version=1, assigned_to_id=99)
-        with self.assertRaises(HTTPException) as caught: update(db, user(), 11, request)
-        self.assertEqual(422, caught.exception.status_code); self.assertEqual(1, db.rollbacks)
-
-    def test_update_atomic_predicates_conflict_and_success(self):
-        request = UpdateInspectionRequest(expected_version=4, title="Updated title")
-        db = Session([[], [{"id": 11, "version": 5, "status": "pending"}]])
-        with self.assertRaises(HTTPException) as caught: update(db, user("agronomist", 8, 5), 11, request)
-        self.assertEqual(409, caught.exception.status_code); self.assertEqual(1, db.rollbacks)
-        sql, params = db.calls[0]
-        for clause in ("version=:ver", "enterprise_id=:eid", "assigned_to_id=:uid"):
-            self.assertIn(clause, sql)
-        self.assertEqual({"id": 11, "ver": 4, "uid": 8, "eid": 5, "title": "Updated title"}, params)
-        db = Session([[{"id": 11}], [item_row(11, version=5, title="Updated title")]])
-        result = update(db, user(), 11, request)
-        self.assertEqual("Updated title", result["title"]); self.assertEqual((1, 0), (db.commits, db.rollbacks))
-
-    def test_start_complete_and_cancel_sql_rules(self):
-        cases = [
-            ("start", TransitionRequest(expected_version=2), "status='pending'", "assigned_to_id IS NOT NULL"),
-            ("complete", CompleteInspectionRequest(expected_version=3, completion_summary="Work completed"), "status='in_progress'", "assigned_to_id=:uid"),
-            ("cancel", CancelInspectionRequest(expected_version=4, cancellation_reason="No longer needed"), "created_by_id=:uid AND status='pending'", "status IN ('pending','in_progress')"),
-        ]
-        for action, request, first, second in cases:
-            with self.subTest(action=action):
-                db = Session([[{"id": 11}], [item_row()]])
-                transition(db, user("agronomist", 8, 5), 11, request, action)
-                sql, params = db.calls[0]
-                self.assertIn(first, sql); self.assertIn(second, sql)
-                self.assertEqual(request.expected_version, params["ver"])
-                self.assertEqual((1, 0), (db.commits, db.rollbacks))
-
-    def test_illegal_transition_returns_409_and_rolls_back(self):
-        db = Session([[], [{"id": 11, "version": 2, "status": "completed"}]])
-        with self.assertRaises(HTTPException) as caught:
-            transition(db, user(), 11, TransitionRequest(expected_version=1), "start")
-        self.assertEqual(409, caught.exception.status_code); self.assertEqual(1, db.rollbacks)
-
-    def test_transition_unexpected_failure_rolls_back(self):
-        db = Session([RuntimeError("offline failure")])
-        with self.assertRaises(RuntimeError):
-            transition(db, user(), 11, TransitionRequest(expected_version=1), "start")
-        self.assertEqual((0, 1), (db.commits, db.rollbacks))
-
-    def test_expired_actor_is_never_read_after_update_and_all_transitions(self):
-        update_actor = ExpiringUser()
-        db = Session([[{"id": 11}], [item_row(title="Updated title")]], actor=update_actor)
-        update(db, update_actor, 11, UpdateInspectionRequest(expected_version=1, title="Updated title"))
-        self.assertEqual(1, db.commits)
-
-        cases = [
-            ("start", TransitionRequest(expected_version=1)),
-            ("complete", CompleteInspectionRequest(expected_version=1, completion_summary="Work completed")),
-            ("cancel", CancelInspectionRequest(expected_version=1, cancellation_reason="No longer needed")),
-        ]
-        for action, request in cases:
-            with self.subTest(action=action):
-                actor = ExpiringUser()
-                db = Session([[{"id": 11}], [item_row()]], actor=actor)
-                transition(db, actor, 11, request, action)
-                self.assertEqual((1, 0), (db.commits, db.rollbacks))
+    def test_legacy_service_has_no_write_path(self):
+        source = (BACKEND / "services/field_inspections.py").read_text(encoding="utf-8")
+        for fragment in ("INSERT INTO", "UPDATE field_inspections", ".commit("):
+            self.assertNotIn(fragment, source)
+        for name in ("create", "update", "transition"):
+            self.assertFalse(hasattr(service, name))
 
 
 class ReadTests(unittest.TestCase):

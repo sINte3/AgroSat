@@ -228,30 +228,44 @@ def test_viewer_and_foreign_agronomist_assignment_fail_before_sql():
     assert agronomist_db.calls == []
 
 
-def test_create_inspection_links_and_updates_in_one_commit():
+def locked_anomaly(**changes):
+    values = {
+        "id": 91,
+        "field_id": 11,
+        "enterprise_id": 7,
+        "status": "open",
+        "severity": "high",
+        "area_ha": 2.5,
+        "index_code": "ndvi",
+        "provenance": {"median_current_value": 0.31, "median_comparison_value": 0.52},
+        "geometry_ewkb": "0106000020e6100000",
+        "current_observation_date": date(2026, 6, 20),
+        "current_record_type": "ndvi_record",
+        "current_record_id": 55,
+        "provider": "sentinel_numeric_pixels",
+        "field_geometry": {"type": "Polygon", "coordinates": [[[64.0, 40.0], [64.1, 40.0], [64.1, 40.1], [64.0, 40.0]]]},
+    }
+    values.update(changes)
+    return values
+
+
+def test_create_inspection_delegates_to_the_canonical_insert_in_one_commit():
+    """TASK_225 (C2): the anomaly path writes the full migration-0013 row.
+
+    The INSERT is the canonical one from services.anomaly_inspections, so
+    source_kind, source_reason, priority and the pixel snapshot are populated;
+    this fake session only pins ordering and tenant binding. The real INSERT
+    is exercised against PostgreSQL in test_task225_closed_loop_postgres.py.
+    """
     db = RecordingDB(
         [
             [],
-            [
-                {
-                    "id": 91,
-                    "field_id": 11,
-                    "enterprise_id": 7,
-                    "status": "open",
-                    "severity": "high",
-                    "current_observation_date": date(2026, 6, 20),
-                }
-            ],
+            [locked_anomaly()],
             [{"id": 6}],
             [],
-            [
-                {
-                    "id": 301,
-                    "status": "pending",
-                    "assigned_to_id": 6,
-                    "due_date": None,
-                }
-            ],
+            [{"id": 301, "field_id": 11, "enterprise_id": 7, "version": 1, "status": "assigned"}],
+            [],
+            [],
             [],
             [{"id": 91}],
         ]
@@ -267,19 +281,40 @@ def test_create_inspection_links_and_updates_in_one_commit():
     )
     assert response["created"] is True
     assert response["inspection"]["id"] == 301
+    assert response["inspection"]["status"] == "assigned"
     assert response["inspection"]["assigned_to_id"] == 6
     assert db.commits == 1
     assert db.rollbacks == 0
-    assert len(db.calls) == 7
     statements = [sql for sql, _ in db.calls]
-    assert "FOR UPDATE" in statements[1]
-    assert "INSERT INTO field_inspections" in statements[4]
-    assert "INSERT INTO pixel_anomaly_inspections" in statements[5]
-    assert "UPDATE pixel_anomalies" in statements[6]
-    assert all(
-        db.calls[index][1]["enterprise_id"] == 7
-        for index in (3, 4, 5, 6)
-    )
+    assert "FOR UPDATE OF a" in statements[1]
+    insert_sql, insert = db.calls[4]
+    assert "INSERT INTO field_inspections" in insert_sql
+    for column in ("source_kind", "source_reason", "priority", "source_zone", "source_item_id"):
+        assert column in insert_sql
+    assert insert["source_kind"] == "pixel_ndvi"
+    assert insert["reason"] == "Inspect the measured anomaly zone"
+    assert insert["sampled_value"] == 0.31 and insert["comparison_value"] == 0.52
+    assert insert["item_id"] == "ndvi_record:55"
+    assert insert["priority"] == "high"
+    assert insert["zone_ewkb"] == "0106000020e6100000"
+    assert insert["enterprise_id"] == 7 and insert["status"] == "assigned"
+    assert "INSERT INTO operational_audit_events" in statements[5]
+    assert "INSERT INTO pixel_anomaly_inspections" in statements[7]
+    assert "UPDATE pixel_anomalies" in statements[8]
+    assert all(db.calls[index][1]["enterprise_id"] == 7 for index in (4, 5, 7, 8))
+
+
+def test_zone_without_value_snapshot_is_refused_not_filled_with_field_mean():
+    db = RecordingDB([[], [locked_anomaly(provenance={"median_drop": 0.2})], [{"id": 6}], []])
+    with pytest.raises(HTTPException) as refused:
+        service.create_inspection(
+            db, user("agronomist", user_id=6), 91,
+            CreateInspectionFromAnomalyRequest(), "fixture-key-005",
+        )
+    assert refused.value.status_code == 409
+    assert "zone value snapshot" in refused.value.detail
+    assert not any("INSERT" in sql for sql, _ in db.calls)
+    assert db.commits == 0 and db.rollbacks == 1
 
 
 def test_create_replay_is_read_only_and_payload_conflict_is_409():

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 import hashlib
 import json
 from zoneinfo import ZoneInfo
@@ -13,6 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from api.dependencies import ALLOWED_ROLES, TENANT_ROLES
+from services import anomaly_inspections as inspections
 
 
 TASHKENT = ZoneInfo("Asia/Tashkent")
@@ -417,7 +418,57 @@ def _link_replay(db, actor: ActorScope, anomaly_id: int, key: str, fingerprint: 
     }
 
 
+SEVERITY_PRIORITY = {"critical": "urgent", "high": "high", "medium": "normal", "low": "low"}
+PIXEL_REASON = (
+    "Pixel anomaly zone: {area:.2f} ha, median {index} {current:.3f} against "
+    "{comparison:.3f} on the paired scene. Observational satellite evidence only; "
+    "the cause is established by field inspection."
+)
+
+
+def _pixel_source(anomaly, instructions: str | None):
+    """Build the canonical 0013 snapshot for an inspection opened from a zone.
+
+    The sampled value is the zone's own median, persisted by the anomaly
+    processor. A zone recorded before that value existed has no honest sampled
+    value; it is refused rather than substituting the field mean.
+    """
+    provenance = anomaly["provenance"] or {}
+    current = provenance.get("median_current_value")
+    comparison = provenance.get("median_comparison_value")
+    if current is None or comparison is None or not anomaly["provider"]:
+        raise HTTPException(
+            409,
+            "Pixel anomaly has no zone value snapshot; re-run anomaly processing "
+            "for this scene before opening an inspection",
+        )
+    acquired = anomaly["current_observation_date"]
+    reason = instructions or PIXEL_REASON.format(
+        area=float(anomaly["area_ha"]), index=anomaly["index_code"].upper(),
+        current=float(current), comparison=float(comparison),
+    )
+    return inspections.InspectionSource(
+        kind="pixel_ndvi",
+        reason=reason,
+        provider=str(anomaly["provider"])[:40],
+        item_id=f"{anomaly['current_record_type']}:{anomaly['current_record_id']}",
+        acquired_at=datetime(acquired.year, acquired.month, acquired.day, tzinfo=timezone.utc),
+        index_name=anomaly["index_code"],
+        sampled_value=float(current),
+        comparison_value=float(comparison),
+        delta=round(float(current) - float(comparison), 6),
+        geometry_hash=inspections.geometry_hash(anomaly["field_geometry"]),
+        zone_ewkb=anomaly["geometry_ewkb"],
+    )
+
+
 def create_inspection(db, user, anomaly_id: int, payload, idempotency_key: str):
+    """Open one canonical inspection for a pixel anomaly zone.
+
+    Delegates the INSERT to the canonical inspection service, so the row
+    carries the full 0013 source snapshot and audit trail; this function owns
+    only the anomaly link and the anomaly's own state.
+    """
     actor = _actor(user, write=True)
     _due(payload.due_date)
     assigned_to_id = (
@@ -445,11 +496,18 @@ def create_inspection(db, user, anomaly_id: int, payload, idempotency_key: str):
                 text(
                     f"""
                     SELECT a.id,a.field_id,a.enterprise_id,a.status,a.severity,
-                           r.current_observation_date
+                           a.area_ha,a.index_code,a.provenance,
+                           encode(ST_AsEWKB(a.geometry),'hex') AS geometry_ewkb,
+                           r.current_observation_date,r.current_record_type,
+                           COALESCE(r.current_ndvi_record_id,r.current_satellite_index_record_id)
+                             AS current_record_id,
+                           r.provenance->>'provider' AS provider,
+                           ST_AsGeoJSON(f.geometry)::json AS field_geometry
                       FROM pixel_anomalies a
                       JOIN pixel_anomaly_runs r ON r.id=a.run_id
+                      JOIN fields f ON f.id=a.field_id AND f.enterprise_id=a.enterprise_id
                      WHERE a.id=:anomaly_id AND {tenant}
-                     FOR UPDATE
+                     FOR UPDATE OF a
                     """
                 ),
                 params,
@@ -460,51 +518,52 @@ def create_inspection(db, user, anomaly_id: int, payload, idempotency_key: str):
         if anomaly["status"] != "open":
             raise HTTPException(409, "Pixel anomaly is not open")
         _assignee(db, assigned_to_id, anomaly["enterprise_id"])
-        active = _one(
+        promoted = _one(
             db.execute(
                 text(
-                    "SELECT id FROM field_inspections "
-                    "WHERE field_id=:field_id AND enterprise_id=:enterprise_id "
-                    "AND status IN ('pending','in_progress')"
+                    "SELECT id,inspection_id FROM autonomous_anomaly_candidates "
+                    "WHERE enterprise_id=:enterprise_id AND field_id=:field_id "
+                    "AND evidence->>'pixel_anomaly_id'=:anomaly_ref "
+                    "AND inspection_id IS NOT NULL LIMIT 1"
                 ),
                 {
-                    "field_id": anomaly["field_id"],
                     "enterprise_id": anomaly["enterprise_id"],
+                    "field_id": anomaly["field_id"],
+                    "anomaly_ref": str(anomaly_id),
                 },
             )
         )
-        if active:
-            raise HTTPException(409, f"Active inspection exists: {active['id']}")
-        inspection_key = _inspection_key(actor, idempotency_key)
-        title = payload.title or "Inspect satellite anomaly"
-        inserted = _one(
-            db.execute(
-                text(
-                    """
-                    INSERT INTO field_inspections (
-                      field_id,enterprise_id,created_by_id,assigned_to_id,
-                      client_request_id,request_fingerprint,source,
-                      source_reason_codes,title,instructions,due_date
-                    ) VALUES (
-                      :field_id,:enterprise_id,:actor_id,:assigned_to_id,
-                      :inspection_key,:fingerprint,'manual','[]'::jsonb,
-                      :title,:instructions,:due_date
-                    ) RETURNING id,status,assigned_to_id,due_date
-                    """
-                ),
-                {
-                    "field_id": anomaly["field_id"],
-                    "enterprise_id": anomaly["enterprise_id"],
-                    "actor_id": actor.user_id,
-                    "assigned_to_id": assigned_to_id,
-                    "inspection_key": inspection_key,
-                    "fingerprint": fingerprint,
-                    "title": title,
-                    "instructions": payload.instructions,
-                    "due_date": payload.due_date,
-                },
+        if promoted:
+            raise HTTPException(
+                409,
+                f"Inspection {promoted['inspection_id']} already covers this zone "
+                "through autonomous monitoring",
             )
-        )
+        source = _pixel_source(anomaly, payload.instructions)
+        due_at = inspections.end_of_local_day(payload.due_date)
+        try:
+            created = inspections.insert_inspection(
+                db,
+                actor=inspections.Actor(actor.user_id, actor.role, actor.enterprise_id),
+                field_id=anomaly["field_id"],
+                enterprise_id=anomaly["enterprise_id"],
+                source=source,
+                client_request_id=_inspection_key(actor, idempotency_key),
+                request_fingerprint=fingerprint,
+                title=payload.title or "Inspect satellite anomaly",
+                priority=SEVERITY_PRIORITY.get(anomaly["severity"], "normal"),
+                due_at=due_at,
+                assigned_to_id=assigned_to_id,
+                origin=f"pixel_anomaly:{anomaly_id}",
+            )
+        except inspections.InspectionSourceError as error:
+            raise HTTPException(409, f"Pixel anomaly snapshot is invalid: {error}") from None
+        inserted = {
+            "id": created["id"],
+            "status": created["status"],
+            "assigned_to_id": assigned_to_id,
+            "due_date": payload.due_date,
+        }
         db.execute(
             text(
                 """
@@ -555,8 +614,13 @@ def create_inspection(db, user, anomaly_id: int, payload, idempotency_key: str):
                 "due_date": inserted["due_date"],
             },
         }
-    except IntegrityError:
+    except IntegrityError as error:
         db.rollback()
+        # Only a uniqueness race is a concurrency outcome. Any other integrity
+        # error means a row the schema forbids was written: re-raise it rather
+        # than disguise a contract defect as a 409 conflict.
+        if not inspections.is_unique_violation(error):
+            raise
         replay = _link_replay(
             db,
             actor,
