@@ -28,6 +28,7 @@ REPO_ROOT = BACKEND.parent
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
+from services.collection_failure import canonical_failure_category
 from services.collector_locking import acquire_lock, release_lock
 
 
@@ -194,6 +195,16 @@ def atomic_json(path: Path, value: dict[str, Any]) -> None:
 
 
 def classify_failure(summary: dict[str, Any]) -> str | None:
+    """Name why the cycle failed, in the vocabulary the database stores.
+
+    The condition is recognised below in the collector's own terms; the label
+    is then resolved through services.collection_failure, which is the only
+    place that knows what satellite_collection_runs will accept.
+    """
+    return canonical_failure_category(_failure_condition(summary))
+
+
+def _failure_condition(summary: dict[str, Any]) -> str | None:
     exit_code = summary.get("exit_code")
     if exit_code == 0:
         return None

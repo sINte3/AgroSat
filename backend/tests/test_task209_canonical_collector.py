@@ -7,6 +7,7 @@ import tempfile
 import pytest
 
 from scripts import collect_satellite as collector
+from services.collection_failure import RUN_FAILURE_CATEGORIES
 
 
 def invocation(root: Path, *extra: str):
@@ -215,21 +216,27 @@ def test_failure_categories_are_bounded_labels():
         "duration_seconds": 1,
         "diagnostics": [],
     }
+    # The bound is ck_collection_runs_failure, not a list local to the
+    # collector. Two cases below asserted labels the database rejects —
+    # 'cloud' and 'cancelled' — and so specified the defect that terminated
+    # the 2026-09-23 cycle; see docs/TASK_223_*.md. They now assert the
+    # durable category each condition maps to.
     cases = (
         ({"exit_code": 4, "children": [{"stderr": "HTTP 401"}]}, "auth"),
         ({"exit_code": 4, "children": [{"stderr": "HTTP 429"}]}, "quota"),
-        ({"exit_code": 1, "children": [{"stderr": "cloud"}]}, "cloud"),
+        ({"exit_code": 1, "children": [{"stderr": "cloud"}]}, "quality"),
         (
             {"exit_code": 1, "children": [{"timed_out": True}]},
             "network",
         ),
         ({"exit_code": 2, "children": []}, "contract"),
         ({"exit_code": 3, "children": []}, "lock_contention"),
-        ({"exit_code": 130, "children": []}, "cancelled"),
+        ({"exit_code": 130, "children": []}, "operational"),
     )
     for updates, expected in cases:
         snapshot = collector.operational_snapshot({**base, **updates})
         assert snapshot["failure_category"] == expected
+        assert snapshot["failure_category"] in RUN_FAILURE_CATEGORIES
 
 
 def test_failure_preserves_separate_last_failure_snapshot():

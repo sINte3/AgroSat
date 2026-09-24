@@ -309,5 +309,102 @@ class CollectionRunReleasesItsLock(CollectionRunLockBase):
         self.assertIsNotNone(row["finished_at"])
 
 
+class FailureCategoriesMatchTheConstraint(CollectionRunLockBase):
+    """C3: the vocabulary in code must be the vocabulary in the schema."""
+
+    def _constraint_labels(self) -> set[str]:
+        import re
+
+        from sqlalchemy import text
+
+        with self.engine.connect() as connection:
+            definition = connection.execute(
+                text(
+                    "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                    "WHERE conrelid='satellite_collection_runs'::regclass "
+                    "AND conname='ck_collection_runs_failure'"
+                )
+            ).scalar_one()
+        return set(re.findall(r"'([a-z_]+)'::character varying", definition))
+
+    def test_the_code_vocabulary_is_the_schema_vocabulary(self):
+        from services.collection_failure import RUN_FAILURE_CATEGORIES
+
+        self.assertEqual(
+            set(RUN_FAILURE_CATEGORIES),
+            self._constraint_labels(),
+            "services/collection_failure.py has drifted from "
+            "ck_collection_runs_failure; widening it needs a migration",
+        )
+
+    def test_every_category_can_actually_be_written(self):
+        from sqlalchemy import text
+
+        from services.collection_failure import RUN_FAILURE_CATEGORIES
+
+        run = self._begin("task223-categories")
+        for category in sorted(RUN_FAILURE_CATEGORIES):
+            with self.subTest(category=category):
+                with self.engine.begin() as connection:
+                    connection.execute(
+                        text(
+                            "UPDATE satellite_collection_runs SET failure_category=:c "
+                            "WHERE id=:id"
+                        ),
+                        {"c": category, "id": run.run_id},
+                    )
+
+    def test_an_ordinary_partial_cycle_can_record_its_outcome(self):
+        """The 2026-09-23 shape: the cycle ran, some fields failed, exit 1.
+
+        On the original code this classified as 'partial' and the finish write
+        was rejected by the constraint, which is how the run row was left
+        'running' and the real error destroyed.
+        """
+        from sqlalchemy import text
+
+        from scripts import collect_satellite as collector
+
+        summary = {
+            "run_id": "0" * 32,
+            "mode": "apply",
+            "started_at": "2026-09-23T06:35:06+00:00",
+            "finished_at": "2026-09-23T07:11:45+00:00",
+            "duration_seconds": 2198.791,
+            "diagnostics": [],
+            "children": [
+                {"provider": "ndvi", "exit_code": 0, "timed_out": False, "stdout": "", "stderr": ""},
+                {"provider": "multi", "exit_code": 1, "timed_out": False, "stdout": "", "stderr": ""},
+            ],
+            "exit_code": 1,
+        }
+        category = collector.classify_failure(summary)
+        self.assertIn(category, self._constraint_labels())
+
+        run = self._begin("task223-partial-cycle")
+        self.monitoring.finish_apply_run(
+            run,
+            exit_code=1,
+            provider_status="degraded",
+            counters={"failure_count": 5, "success_count": 545},
+            failure_category=category,
+        )
+
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                text(
+                    "SELECT status, failure_category, finished_at "
+                    "FROM satellite_collection_runs WHERE run_key=:key"
+                ),
+                {"key": "task223-partial-cycle"},
+            ).mappings().one()
+        self.assertEqual(row["status"], "degraded")
+        self.assertEqual(row["failure_category"], category)
+        self.assertIsNotNone(row["finished_at"])
+        self.assertEqual(
+            self._lock_holder_pids(), [], "the lock must not survive the finish"
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

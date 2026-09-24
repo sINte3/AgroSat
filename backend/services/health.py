@@ -12,6 +12,7 @@ from typing import Any, Callable
 from sqlalchemy import text
 
 from config import settings
+from services.collection_failure import RUN_FAILURE_CATEGORIES
 
 
 MAX_STATUS_FILE_BYTES = 64 * 1024
@@ -25,17 +26,10 @@ STATUS_FILES = {
 RUN_ID_PATTERN = re.compile(r"^[a-f0-9]{32}$")
 REVISION_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 ALLOWED_COLLECTOR_STATUSES = {"running", "succeeded", "failed", "cancelled"}
-ALLOWED_FAILURE_CATEGORIES = {
-    "auth",
-    "quota",
-    "cloud",
-    "network",
-    "contract",
-    "partial",
-    "operational",
-    "lock_contention",
-    "cancelled",
-}
+# The reader accepts exactly what the collector can write and the database can
+# store. Any second list here is a third vocabulary, which is the defect this
+# indirection exists to prevent; see services/collection_failure.py.
+ALLOWED_FAILURE_CATEGORIES = RUN_FAILURE_CATEGORIES
 PROVIDER_COUNTER_FIELDS = {
     "success_count",
     "failure_count",
