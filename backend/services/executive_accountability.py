@@ -31,7 +31,17 @@ _ACCEPTED_INDEX_OBSERVATION = observation_quality.accepted_observation_sql(
     cloud_column="s.cloud_cover_pct",
     minimum_valid_pixels_pct=observation_quality.MIN_VALID_PIXELS_ANALYSIS_PCT,
 )
-DEFINITIONS_VERSION = "task209_executive_v1"
+DEFINITIONS_VERSION = "task225_canonical_backlog_v1"
+
+# Current-status definitions (TASK_225). Open inspections use the canonical
+# TASK_217 open states plus still-open legacy rows; open actions are the
+# current-cycle work of a live TASK_220 plan; awaiting verification is a plan in
+# pending_verification. The retired corrective_actions lifecycle no longer
+# feeds any current-status count.
+OPEN_INSPECTION_STATUSES = "('pending','new','assigned','in_progress','submitted')"
+LIVE_PLAN = "p.status NOT IN ('closed','cancelled','superseded')"
+ACTIVE_WORK = "w.status IN ('planned','in_progress')"
+WORK_DUE_DATE = "(w.due_at AT TIME ZONE 'Asia/Tashkent')::date"
 MANAGEMENT_ROLES = frozenset({"admin", "manager"})
 ACCOUNTABILITY_KINDS = frozenset(
     {
@@ -55,6 +65,12 @@ LIMITATIONS = [
     (
         "No-data, stale-data, and low-confidence counts are operational data "
         "quality warnings, not agronomic diagnoses."
+    ),
+    (
+        "Backlog, owner and accountability counts read the canonical inspection "
+        "and agronomy-plan lifecycles. Cycle-time and verification-outcome "
+        "metrics still describe the retired TASK_209 corrective-action history "
+        "until the management analytics definitions are re-baselined."
     ),
 ]
 
@@ -159,37 +175,38 @@ def _overview_sql(tenant_clause):
         inspection_snapshot AS (
           SELECT
             count(*) FILTER (
-              WHERE i.status IN ('pending','in_progress')
+              WHERE i.status IN {OPEN_INSPECTION_STATUSES}
             ) AS open_inspections,
             count(*) FILTER (
-              WHERE i.status IN ('pending','in_progress')
+              WHERE i.status IN {OPEN_INSPECTION_STATUSES}
                 AND i.assigned_to_id IS NULL
             ) AS unassigned_inspections,
             count(*) FILTER (
-              WHERE i.status IN ('pending','in_progress')
+              WHERE i.status IN {OPEN_INSPECTION_STATUSES}
                 AND i.due_date < :as_of_date
             ) AS overdue_inspections
           FROM field_inspections i
           JOIN scope_fields sf ON sf.field_id=i.field_id
         ),
+        live_work AS (
+          SELECT w.id,w.field_id,w.assigned_to_id,{WORK_DUE_DATE} AS due_date
+          FROM agronomy_work_items w
+          JOIN agronomy_plans p ON p.id=w.plan_id AND p.enterprise_id=w.enterprise_id
+            AND p.cycle=w.cycle
+          JOIN scope_fields sf ON sf.field_id=w.field_id
+          WHERE {LIVE_PLAN} AND {ACTIVE_WORK}
+        ),
         action_snapshot AS (
           SELECT
-            count(*) FILTER (
-              WHERE a.status IN ('open','in_progress','blocked')
-            ) AS open_actions,
-            count(*) FILTER (
-              WHERE a.status IN ('open','in_progress','blocked')
-                AND a.due_date < :as_of_date
-            ) AS overdue_actions
-          FROM corrective_actions a
-          JOIN scope_fields sf ON sf.field_id=a.field_id
+            count(*) AS open_actions,
+            count(*) FILTER (WHERE due_date < :as_of_date) AS overdue_actions
+          FROM live_work
         ),
         verification_snapshot AS (
-          SELECT count(*) FILTER (
-            WHERE v.status='awaiting_observation'
-          ) AS awaiting_verification
-          FROM action_verification_requests v
-          JOIN scope_fields sf ON sf.field_id=v.field_id
+          SELECT count(*) AS awaiting_verification
+          FROM agronomy_plans p
+          JOIN scope_fields sf ON sf.field_id=p.field_id
+          WHERE p.status='pending_verification'
         ),
         attention_durations AS (
           SELECT extract(
@@ -281,14 +298,14 @@ def _overview_sql(tenant_clause):
         enterprise_inspections AS (
           SELECT sf.enterprise_id,
             count(*) FILTER (
-              WHERE i.status IN ('pending','in_progress')
+              WHERE i.status IN {OPEN_INSPECTION_STATUSES}
             ) AS open_inspections,
             count(*) FILTER (
-              WHERE i.status IN ('pending','in_progress')
+              WHERE i.status IN {OPEN_INSPECTION_STATUSES}
                 AND i.assigned_to_id IS NULL
             ) AS unassigned_inspections,
             count(*) FILTER (
-              WHERE i.status IN ('pending','in_progress')
+              WHERE i.status IN {OPEN_INSPECTION_STATUSES}
                 AND i.due_date < :as_of_date
             ) AS overdue_inspections
           FROM scope_fields sf
@@ -297,22 +314,22 @@ def _overview_sql(tenant_clause):
         ),
         enterprise_actions AS (
           SELECT sf.enterprise_id,
-            count(*) FILTER (
-              WHERE a.status IN ('open','in_progress','blocked')
-            ) AS open_actions,
-            count(*) FILTER (
-              WHERE a.status IN ('open','in_progress','blocked')
-                AND a.due_date < :as_of_date
-            ) AS overdue_actions
+            count(lw.id) AS open_actions,
+            count(lw.id) FILTER (WHERE lw.due_date < :as_of_date) AS overdue_actions
           FROM scope_fields sf
-          LEFT JOIN corrective_actions a ON a.field_id=sf.field_id
+          LEFT JOIN live_work lw ON lw.field_id=sf.field_id
+          GROUP BY sf.enterprise_id
+        ),
+        enterprise_awaiting AS (
+          SELECT sf.enterprise_id,
+            count(p.id) AS awaiting_verification
+          FROM scope_fields sf
+          LEFT JOIN agronomy_plans p ON p.field_id=sf.field_id
+            AND p.status='pending_verification'
           GROUP BY sf.enterprise_id
         ),
         enterprise_verifications AS (
           SELECT sf.enterprise_id,
-            count(*) FILTER (
-              WHERE v.status='awaiting_observation'
-            ) AS awaiting_verification,
             count(*) FILTER (
               WHERE v.status='resolved' AND v.result='improved'
                 AND v.resolved_at >= :from_timestamp
@@ -344,7 +361,7 @@ def _overview_sql(tenant_clause):
             max(ei.overdue_inspections) AS overdue_inspections,
             max(ea.open_actions) AS open_actions,
             max(ea.overdue_actions) AS overdue_actions,
-            max(ev.awaiting_verification) AS awaiting_verification,
+            max(aw.awaiting_verification) AS awaiting_verification,
             max(ev.improved) AS improved,
             max(ev.unchanged) AS unchanged,
             max(ev.worsened) AS worsened,
@@ -356,27 +373,18 @@ def _overview_sql(tenant_clause):
             ON ea.enterprise_id=sf.enterprise_id
           LEFT JOIN enterprise_verifications ev
             ON ev.enterprise_id=sf.enterprise_id
+          LEFT JOIN enterprise_awaiting aw
+            ON aw.enterprise_id=sf.enterprise_id
           GROUP BY sf.enterprise_id
         ),
         owner_rows AS (
-          SELECT a.owner_id, u.full_name AS owner_name,
-            count(*) FILTER (
-              WHERE a.status IN ('open','in_progress','blocked')
-            ) AS unresolved_actions,
-            count(*) FILTER (
-              WHERE a.status IN ('open','in_progress','blocked')
-                AND a.due_date < :as_of_date
-            ) AS overdue_actions,
-            min(a.due_date) FILTER (
-              WHERE a.status IN ('open','in_progress','blocked')
-            ) AS next_due_date
-          FROM corrective_actions a
-          JOIN scope_fields sf ON sf.field_id=a.field_id
-          JOIN users u ON u.id=a.owner_id
-          GROUP BY a.owner_id,u.full_name
-          HAVING count(*) FILTER (
-            WHERE a.status IN ('open','in_progress','blocked')
-          ) > 0
+          SELECT lw.assigned_to_id AS owner_id, u.full_name AS owner_name,
+            count(*) AS unresolved_actions,
+            count(*) FILTER (WHERE lw.due_date < :as_of_date) AS overdue_actions,
+            min(lw.due_date) AS next_due_date
+          FROM live_work lw
+          JOIN users u ON u.id=lw.assigned_to_id
+          GROUP BY lw.assigned_to_id,u.full_name
         )
         SELECT ins.open_inspections, ins.unassigned_inspections,
           ins.overdue_inspections, act.open_actions, act.overdue_actions,
@@ -603,10 +611,10 @@ def _accountability_query(
     pagination = "" if count_only else " LIMIT :limit OFFSET :offset"
     if kind in {"unassigned_inspections", "overdue_inspections"}:
         condition = (
-            "i.status IN ('pending','in_progress') AND i.assigned_to_id IS NULL"
+            f"i.status IN {OPEN_INSPECTION_STATUSES} AND i.assigned_to_id IS NULL"
             if kind == "unassigned_inspections"
             else (
-                "i.status IN ('pending','in_progress') "
+                f"i.status IN {OPEN_INSPECTION_STATUSES} "
                 "AND i.due_date < :as_of_date"
             )
         )
@@ -618,6 +626,7 @@ def _accountability_query(
             )
         return text(
             "SELECT i.id,i.id AS inspection_id,NULL::integer AS action_id,"
+            "NULL::bigint AS plan_id,"
             "i.field_id,f.name AS field_name,f.enterprise_id,"
             "e.name AS enterprise_name,i.assigned_to_id AS owner_id,"
             "u.full_name AS owner_name,i.title AS description,i.due_date,"
@@ -630,40 +639,58 @@ def _accountability_query(
             "ORDER BY i.due_date ASC NULLS LAST,i.created_at ASC,i.id ASC"
             + pagination
         )
-    owner = " AND a.owner_id=:owner_id" if owner_filtered else ""
     if kind in {"open_actions", "overdue_actions"}:
-        condition = "a.status IN ('open','in_progress','blocked')"
+        condition = f"{LIVE_PLAN} AND {ACTIVE_WORK}"
         if kind == "overdue_actions":
-            condition += " AND a.due_date < :as_of_date"
-        verification_join = (
-            "LEFT JOIN LATERAL (SELECT v.id,v.status "
-            "FROM action_verification_requests v WHERE v.action_id=a.id "
-            "ORDER BY v.requested_at DESC,v.id DESC LIMIT 1) v ON true "
+            condition += f" AND {WORK_DUE_DATE} < :as_of_date"
+        owner = " AND w.assigned_to_id=:owner_id" if owner_filtered else ""
+        source = (
+            "FROM agronomy_work_items w "
+            "JOIN agronomy_plans p ON p.id=w.plan_id AND p.enterprise_id=w.enterprise_id "
+            "AND p.cycle=w.cycle "
+            "JOIN fields f ON f.id=w.field_id AND f.enterprise_id=w.enterprise_id "
         )
-    else:
-        condition = "v.status='awaiting_observation'"
-        verification_join = (
-            "JOIN action_verification_requests v ON v.action_id=a.id "
-        )
-    if count_only:
+        if count_only:
+            return text(f"SELECT count(*) AS total {source}WHERE {condition}{tenant}{owner}")
         return text(
-            "SELECT count(*) AS total FROM corrective_actions a "
-            "JOIN fields f ON f.id=a.field_id "
-            + verification_join
-            + f"WHERE {condition}{tenant}{owner}"
+            "SELECT w.id,w.inspection_id,w.id AS action_id,w.plan_id,w.field_id,"
+            "f.name AS field_name,f.enterprise_id,e.name AS enterprise_name,"
+            "w.assigned_to_id AS owner_id,u.full_name AS owner_name,"
+            f"w.instruction AS description,{WORK_DUE_DATE} AS due_date,"
+            "w.status,w.version,NULL::bigint AS verification_id,"
+            "p.verification_status "
+            + source
+            + "JOIN enterprises e ON e.id=f.enterprise_id "
+            "LEFT JOIN users u ON u.id=w.assigned_to_id "
+            f"WHERE {condition}{tenant}{owner} "
+            "ORDER BY w.due_at ASC NULLS LAST,w.created_at ASC,w.id ASC"
+            + pagination
         )
+    owner = (
+        " AND EXISTS (SELECT 1 FROM agronomy_work_items ow WHERE ow.plan_id=p.id "
+        "AND ow.cycle=p.cycle AND ow.assigned_to_id=:owner_id)"
+        if owner_filtered else ""
+    )
+    source = (
+        "FROM agronomy_plans p "
+        "JOIN fields f ON f.id=p.field_id AND f.enterprise_id=p.enterprise_id "
+    )
+    condition = "p.status='pending_verification'"
+    if count_only:
+        return text(f"SELECT count(*) AS total {source}WHERE {condition}{tenant}{owner}")
     return text(
-        "SELECT a.id,a.inspection_id,a.id AS action_id,a.field_id,"
+        "SELECT p.id,p.inspection_id,NULL::bigint AS action_id,p.id AS plan_id,p.field_id,"
         "f.name AS field_name,f.enterprise_id,e.name AS enterprise_name,"
-        "a.owner_id,u.full_name AS owner_name,a.description,a.due_date,"
-        "a.status,a.version,v.id AS verification_id,"
-        "v.status AS verification_status "
-        "FROM corrective_actions a JOIN fields f ON f.id=a.field_id "
-        "JOIN enterprises e ON e.id=f.enterprise_id "
-        "JOIN users u ON u.id=a.owner_id "
-        + verification_join
-        + f"WHERE {condition}{tenant}{owner} "
-        "ORDER BY a.due_date ASC,a.updated_at ASC,a.id ASC"
+        "p.approved_by_id AS owner_id,u.full_name AS owner_name,"
+        "p.decision AS description,NULL::date AS due_date,p.status,p.version,"
+        "(SELECT v.id FROM agronomy_verifications v WHERE v.plan_id=p.id "
+        "ORDER BY v.id DESC LIMIT 1) AS verification_id,"
+        "p.verification_status "
+        + source
+        + "JOIN enterprises e ON e.id=f.enterprise_id "
+        "LEFT JOIN users u ON u.id=p.approved_by_id "
+        f"WHERE {condition}{tenant}{owner} "
+        "ORDER BY p.completed_at ASC NULLS LAST,p.id ASC"
         + pagination
     )
 

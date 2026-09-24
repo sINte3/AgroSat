@@ -16,6 +16,17 @@ OperationalStatus = Literal[
     "stale",
     "external_unavailable",
     "improved_closed",
+    # TASK_225: a plan closed without an IMPROVED verification is not "improved".
+    "closed_without_improvement",
+]
+# Canonical remediation state (services/remediation_status.py), one vocabulary
+# for every case; operational_status above is the published compatibility view.
+RemediationStatus = Literal[
+    "needs_inspection", "inspection_active", "awaiting_review", "awaiting_decision",
+    "plan_active", "work_active", "awaiting_satellite_verification", "verification_blocked",
+    "improved_awaiting_closure", "not_improved", "reopened", "improved_closed",
+    "closed_without_improvement", "rejected", "cancelled", "inspection_closed",
+    "data_unavailable",
 ]
 RootSource = Literal["inspection", "candidate", "alert", "freshness", "external"]
 NotificationStatus = Literal["unread", "read", "dismissed", "resolved"]
@@ -38,6 +49,7 @@ class QueueItem(StrictModel):
     title: str
     priority: str
     operational_status: OperationalStatus
+    remediation_status: RemediationStatus
     assignee_id: int | None = None
     assignee_name: str | None = None
     due_at: datetime | None = None
@@ -74,6 +86,10 @@ class SummaryResponse(StrictModel):
     awaiting_evidence: int
     awaiting_satellite_verification: int
     improved_or_closed_recent: int
+    closed_without_improvement_recent: int
+    not_improved: int
+    reopened: int
+    verification_blocked: int
 
 
 class FilterOption(StrictModel):

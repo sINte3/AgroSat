@@ -14,6 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from api.dependencies import ALLOWED_ROLES, TENANT_ROLES
+from services import remediation_status
 from services.irrigation_context import CAUSALITY_LIMITATION, weather_context
 from services.telematics import UnsupportedTelematicsProvider, read_field_telematics
 from services.weather import get_field_weather
@@ -75,14 +76,8 @@ WITH inspection_cases AS (
       WHEN 'critical' THEN 0 WHEN 'extreme' THEN 0 WHEN 'urgent' THEN 0
       WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'moderate' THEN 2
       WHEN 'normal' THEN 2 WHEN 'warning' THEN 2 ELSE 3 END AS priority_rank,
-    CASE
-      WHEN p.status='closed' AND p.closed_at >= :as_of - interval '30 days' THEN 'improved_closed'
-      WHEN p.status='pending_verification' THEN 'awaiting_verification'
-      WHEN work.status='in_progress' THEN 'awaiting_evidence'
-      WHEN p.status IN ('draft','rework') OR work.status='planned' OR i.status='confirmed' THEN 'awaiting_work'
-      WHEN i.status='submitted' THEN 'awaiting_review'
-      ELSE 'awaiting_inspection'
-    END AS operational_status,
+    @operational_status@ AS operational_status,
+    @remediation_status@ AS remediation_status,
     COALESCE(work.assigned_to_id, i.assigned_to_id) AS assignee_id,
     assignee.full_name AS assignee_name,
     COALESCE(work.due_at, CASE WHEN p.id IS NULL THEN COALESCE(i.due_at,i.due_date) END) AS due_at,
@@ -92,10 +87,7 @@ WITH inspection_cases AS (
         AND i.status IN ('pending','new','assigned','in_progress','submitted')
       ELSE false
     END AS is_overdue,
-    (EXISTS (
-       SELECT 1 FROM corrective_actions ca
-       WHERE ca.inspection_id=i.id AND ca.enterprise_id=i.enterprise_id AND ca.status='blocked'
-     ) OR p.verification_status IN ('CLOUD_BLOCKED','QUALITY_BLOCKED','PROVIDER_DEGRADED')) AS blocked,
+    @blocked@ AS blocked,
     (p.status='pending_verification') AS awaiting_verification,
     CASE WHEN p.verification_status IN ('CLOUD_BLOCKED','QUALITY_BLOCKED','PROVIDER_DEGRADED')
       THEN lower(p.verification_status) ELSE NULL END AS external_state,
@@ -159,7 +151,7 @@ candidate_cases AS (
     a.enterprise_id,e.name,a.field_id,f.name,crop.crop_type_id,crop.crop_name,
     lower(a.severity),
     CASE a.severity WHEN 'EXTREME' THEN 0 WHEN 'HIGH' THEN 1 WHEN 'MODERATE' THEN 2 ELSE 3 END,
-    'needs_review'::text,NULL::integer,NULL::text,NULL::timestamptz,false,false,false,NULL::text,
+    'needs_review'::text,'needs_inspection'::text,NULL::integer,NULL::text,NULL::timestamptz,false,false,false,NULL::text,
     a.acquired_at,NULL::integer,NULL::bigint,a.id,NULL::integer,
     'Спутниковая аномалия ' || upper(a.index_code),
     jsonb_build_object('state',a.state,'severity',a.severity,'confidence',a.confidence,
@@ -182,7 +174,7 @@ alert_cases AS (
     f.enterprise_id,e.name,a.field_id,f.name,crop.crop_type_id,crop.crop_name,
     lower(a.severity),
     CASE lower(a.severity) WHEN 'critical' THEN 0 WHEN 'warning' THEN 2 ELSE 3 END,
-    'needs_review'::text,NULL::integer,NULL::text,NULL::timestamptz,false,false,false,NULL::text,
+    'needs_review'::text,'needs_inspection'::text,NULL::integer,NULL::text,NULL::timestamptz,false,false,false,NULL::text,
     a.triggered_at,NULL::integer,NULL::bigint,NULL::bigint,a.id,
     a.title,
     jsonb_build_object('alert_type',a.alert_type,'severity',a.severity,'source',a.source)
@@ -210,6 +202,7 @@ freshness_cases AS (
     CASE WHEN s.status='AGING' THEN 'info' ELSE 'warning' END,
     CASE WHEN s.status='AGING' THEN 3 ELSE 2 END,
     CASE WHEN s.status IN ('AGING','STALE') THEN 'stale' ELSE 'external_unavailable' END,
+    'data_unavailable'::text,
     NULL::integer,NULL::text,NULL::timestamptz,false,
     (s.status NOT IN ('AGING','STALE')),
     false,lower(s.status),s.updated_at,
@@ -274,7 +267,7 @@ external_cases AS (
     NULL::integer,NULL::text,NULL::integer,NULL::text,
     CASE WHEN r.status='failed' THEN 'critical' ELSE 'warning' END,
     CASE WHEN r.status='failed' THEN 0 ELSE 2 END,
-    'external_unavailable'::text,
+    'external_unavailable'::text,'data_unavailable'::text,
     NULL::integer,NULL::text,NULL::timestamptz,false,true,false,
     COALESCE(r.failure_category,r.provider_status,r.status),
     COALESCE(r.finished_at,r.heartbeat_at,r.started_at),
@@ -307,6 +300,16 @@ notification_counts AS (
   GROUP BY enterprise_id,case_key
 )
 """
+# Current operational truth comes from one projection (services/remediation_status.py)
+# over the canonical inspection and its current plan; corrective_actions never
+# contributes. Substituted as tokens so a typo fails loudly as SQL.
+_STATE_SQL = remediation_status.inspection_status_sql("i", "p")
+CASES_CTE = (
+    CASES_CTE
+    .replace("@remediation_status@", _STATE_SQL)
+    .replace("@operational_status@", remediation_status.operational_status_sql(_STATE_SQL))
+    .replace("@blocked@", remediation_status.blocked_sql("p"))
+)
 
 
 def _scope_conditions(actor: dict[str, Any], filters: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
@@ -411,6 +414,7 @@ def _case_item(row: dict[str, Any], as_of: datetime) -> dict[str, Any]:
         "title": row["title"],
         "priority": row["source_priority"],
         "operational_status": row["operational_status"],
+        "remediation_status": row["remediation_status"],
         "assignee_id": row["assignee_id"],
         "assignee_name": row["assignee_name"],
         "due_at": row["due_at"],
@@ -474,14 +478,18 @@ def summary(db, user, filters: dict[str, Any]) -> dict[str, Any]:
             text(
                 CASES_CTE
                 + "SELECT "
-                "count(*) FILTER (WHERE c.operational_status<>'improved_closed')::integer AS active_situations,"
+                "count(*) FILTER (WHERE c.operational_status NOT IN ('improved_closed','closed_without_improvement'))::integer AS active_situations,"
                 "count(*) FILTER (WHERE c.is_overdue)::integer AS overdue_work,"
                 "count(*) FILTER (WHERE c.blocked OR c.operational_status='external_unavailable')::integer AS blocked_or_external_unavailable,"
                 "count(*) FILTER (WHERE c.operational_status IN ('awaiting_inspection','awaiting_review'))::integer AS awaiting_field_inspection,"
                 "count(*) FILTER (WHERE c.operational_status='awaiting_work')::integer AS awaiting_work,"
                 "count(*) FILTER (WHERE c.operational_status='awaiting_evidence')::integer AS awaiting_evidence,"
                 "count(*) FILTER (WHERE c.operational_status='awaiting_verification')::integer AS awaiting_satellite_verification,"
-                "count(*) FILTER (WHERE c.operational_status='improved_closed')::integer AS improved_or_closed_recent "
+                "count(*) FILTER (WHERE c.operational_status='improved_closed')::integer AS improved_or_closed_recent,"
+                "count(*) FILTER (WHERE c.remediation_status='closed_without_improvement')::integer AS closed_without_improvement_recent,"
+                "count(*) FILTER (WHERE c.remediation_status='not_improved')::integer AS not_improved,"
+                "count(*) FILTER (WHERE c.remediation_status='reopened')::integer AS reopened,"
+                "count(*) FILTER (WHERE c.remediation_status='verification_blocked')::integer AS verification_blocked "
                 "FROM cases c LEFT JOIN notification_counts n USING (enterprise_id,case_key) WHERE "
                 + where
             ),
@@ -561,7 +569,7 @@ def _source_snapshot(db, case: dict[str, Any]) -> tuple[dict[str, Any], dict[str
         row = _row(db.execute(text("""
           SELECT id,state,provider,scene_id,acquired_at,index_code,score,confidence,severity,
             magnitude,robust_deviation,affected_area_ha,affected_area_fraction,
-            persistence_scenes,multi_index_agreement,data_quality,evidence,explanation,provenance,
+            persistence_scenes,multi_index_agreement,data_quality,evidence,explanation,
             rule_version,version,created_at,updated_at
           FROM autonomous_anomaly_candidates
           WHERE id=:id AND enterprise_id=:enterprise_id

@@ -82,7 +82,7 @@ class ExecutiveOwnerRow(BaseModel):
 
 
 class ExecutiveOverviewResponse(BaseModel):
-    definitions_version: Literal["task209_executive_v1"]
+    definitions_version: Literal["task225_canonical_backlog_v1"]
     generated_at: datetime
     timezone: Literal["Asia/Tashkent"]
     scope: ExecutiveScopeResponse
@@ -99,7 +99,10 @@ class ExecutiveOverviewResponse(BaseModel):
 class AccountabilityItem(BaseModel):
     id: int
     inspection_id: int
+    # For action kinds the id is an agronomy work item (TASK_225); plan_id
+    # names its plan. Both are NULL for inspection kinds.
     action_id: int | None
+    plan_id: int | None = None
     field_id: int
     field_name: str
     enterprise_id: int
@@ -115,7 +118,7 @@ class AccountabilityItem(BaseModel):
 
 
 class AccountabilityResponse(BaseModel):
-    definitions_version: Literal["task209_executive_v1"]
+    definitions_version: Literal["task225_canonical_backlog_v1"]
     generated_at: datetime
     timezone: Literal["Asia/Tashkent"]
     scope: ExecutiveScopeResponse

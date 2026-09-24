@@ -337,7 +337,9 @@ def field_context(db, user, field, *, limit: int, weather_loader):
                 "source_observation_date, source_reason_codes "
                 "FROM field_inspections "
                 "WHERE enterprise_id=:enterprise_id AND field_id=:field_id "
-                "AND status IN ('pending','in_progress') "
+                # Open in either vocabulary: canonical TASK_217 states and
+                # still-open legacy rows (TASK_225).
+                "AND status IN ('pending','new','assigned','in_progress','submitted') "
                 "ORDER BY created_at DESC, id DESC LIMIT 1"
             ),
             {

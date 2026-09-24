@@ -197,6 +197,12 @@ def test_overview_has_one_operational_query_and_reuses_attention_contract():
     assert params["enterprise_id"] == 5
     assert "percentile_cont(0.5)" in sql
     assert "percentile_cont(0.9)" in sql
+    # Current status reads the canonical lifecycles (TASK_225); the windowed
+    # cycle-time and outcome analytics still describe the retired history.
+    assert "FROM agronomy_work_items w" in sql
+    assert "p.status='pending_verification'" in sql
+    assert "a.status IN ('open','in_progress','blocked')" not in sql
+    assert "v.status='awaiting_observation'" not in sql
     assert "action_verification_requests" in sql
     assert "source_observation_date::timestamp AT TIME ZONE 'Asia/Tashkent'" in sql
     attention.assert_called_once()
@@ -246,9 +252,9 @@ def accountability_row():
     [
         ("unassigned_inspections", "i.assigned_to_id IS NULL"),
         ("overdue_inspections", "i.due_date < :as_of_date"),
-        ("open_actions", "a.status IN ('open','in_progress','blocked')"),
-        ("overdue_actions", "a.due_date < :as_of_date"),
-        ("awaiting_verification", "v.status='awaiting_observation'"),
+        ("open_actions", "w.status IN ('planned','in_progress')"),
+        ("overdue_actions", "(w.due_at AT TIME ZONE 'Asia/Tashkent')::date < :as_of_date"),
+        ("awaiting_verification", "p.status='pending_verification'"),
     ],
 )
 def test_accountability_is_exactly_two_bounded_queries(kind, required):
@@ -307,7 +313,8 @@ def test_owner_filter_is_action_only_and_inside_both_queries():
         kind="overdue_actions",
         owner_id=8,
     )
-    assert all("a.owner_id=:owner_id" in sql for sql, _ in db.calls)
+    assert all("w.assigned_to_id=:owner_id" in sql for sql, _ in db.calls)
+    assert all("corrective_actions" not in sql for sql, _ in db.calls)
 
 
 def test_workbook_reconciles_with_overview_totals():
