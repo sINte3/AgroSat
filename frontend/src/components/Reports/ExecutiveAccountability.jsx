@@ -13,14 +13,35 @@ import {
   safeString,
   todayTashkentDate,
 } from '../Inspections/inspectionPresentation';
+import {
+  INSPECTION_STATUS_LABELS,
+  PLAN_STATUS_LABELS,
+  VERIFICATION_STATUS,
+  WORK_STATUS_LABELS,
+} from '../../config/canonicalLifecycle';
+
+// Backlog and accountability definitions published by the TASK_225 backend:
+// open/overdue "actions" are the current work items of live agronomy plans and
+// "awaiting verification" is a plan waiting for a satellite observation.
+export const EXPECTED_DEFINITIONS_VERSION = 'task225_canonical_backlog_v1';
 
 const QUEUE_LABELS = {
   unassigned_inspections: 'Неназначенные осмотры',
   overdue_inspections: 'Просроченные осмотры',
-  open_actions: 'Незакрытые действия',
-  overdue_actions: 'Просроченные действия',
-  awaiting_verification: 'Ожидают спутниковой проверки',
+  open_actions: 'Незавершённые работы по планам мер',
+  overdue_actions: 'Просроченные работы по планам мер',
+  awaiting_verification: 'Планы мер ждут спутниковой проверки',
 };
+
+const PLAN_QUEUES = new Set(['open_actions', 'overdue_actions', 'awaiting_verification']);
+
+function accountabilityStatus(kind, item) {
+  if (kind === 'awaiting_verification') {
+    return VERIFICATION_STATUS[item.verification_status]?.label || PLAN_STATUS_LABELS[item.status] || safeString(item.status);
+  }
+  if (PLAN_QUEUES.has(kind)) return WORK_STATUS_LABELS[item.status] || safeString(item.status);
+  return INSPECTION_STATUS_LABELS[item.status] || safeString(item.status);
+}
 
 const OUTCOME_LABELS = {
   improved: 'Улучшилось',
@@ -112,13 +133,18 @@ function QueuePanel({ queue, state, error, onClose, onRetry, onNavigate, onPage 
             </thead>
             <tbody>
               {items.map((item) => (
-                <tr key={`${item.action_id || 'inspection'}-${item.id}`} className="border-b border-agro-border/60 align-top">
+                <tr key={`${queue?.kind || 'queue'}-${item.id}`} className="border-b border-agro-border/60 align-top">
                   <td className="p-2"><strong>{safeString(item.field_name)}</strong><span className="block text-xs text-agro-muted">{safeString(item.enterprise_name)}</span></td>
                   <td className="p-2">{safeString(item.owner_name, 'Не назначен')}</td>
                   <td className="max-w-xs p-2">{safeString(item.description)}</td>
                   <td className="p-2 whitespace-nowrap">{formatDate(item.due_date)}</td>
-                  <td className="p-2">{safeString(item.verification_status || item.status)}</td>
-                  <td className="p-2"><button type="button" onClick={() => onNavigate('field-inspection-detail', item.inspection_id)} className="text-agro-accent underline">Осмотр #{item.inspection_id}</button></td>
+                  <td className="p-2">{accountabilityStatus(queue?.kind, item)}</td>
+                  <td className="p-2">
+                    <span className="flex flex-col items-start gap-1">
+                      {positiveId(item.plan_id) && <button type="button" onClick={() => onNavigate('agronomy-plans', item.plan_id)} className="min-h-11 text-agro-accent underline">План мер #{item.plan_id}</button>}
+                      {positiveId(item.inspection_id) && <button type="button" onClick={() => onNavigate('field-inspection-detail', item.inspection_id)} className="min-h-11 text-agro-accent underline">Осмотр #{item.inspection_id}</button>}
+                    </span>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -334,6 +360,7 @@ export default function ExecutiveAccountability({
         {state === 'loading' && <div className="rounded-xl bg-white p-5" role="status">Загружаем операционную сводку…</div>}
         {state === 'error' && <div className="rounded-xl bg-white p-5" role="alert"><p className="text-red-700">{error}</p><button type="button" onClick={() => setReloadToken((value) => value + 1)} className="btn-primary mt-3 px-3 py-2">Повторить</button></div>}
         {state === 'ready' && data && <>
+          {data.definitions_version !== EXPECTED_DEFINITIONS_VERSION && <p role="status" className="mb-4 rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">Сервер вернул другую версию определений показателей ({safeString(data.definitions_version, 'не указана')}). Подписи ниже рассчитаны на {EXPECTED_DEFINITIONS_VERSION} и могут не соответствовать данным.</p>}
           <div className={`rounded-xl border p-4 ${qualityWarnings ? 'border-amber-200 bg-amber-50' : 'border-emerald-200 bg-emerald-50'}`}>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="font-semibold">{qualityWarnings ? 'Есть ограничения качества данных' : 'Критичных ограничений данных не выявлено'}</h3>
@@ -349,29 +376,30 @@ export default function ExecutiveAccountability({
             <BacklogButton value={backlog.attention_fields_now} label="Поля требуют внимания" tone={backlog.attention_critical ? 'danger' : 'warning'} onClick={() => onNavigate('field-attention')} />
             <BacklogButton value={backlog.unassigned_inspections} label="Осмотры без исполнителя" tone={backlog.unassigned_inspections ? 'warning' : 'neutral'} onClick={() => openQueue('unassigned_inspections')} />
             <BacklogButton value={backlog.overdue_inspections} label="Просроченные осмотры" tone={backlog.overdue_inspections ? 'danger' : 'neutral'} onClick={() => openQueue('overdue_inspections')} />
-            <BacklogButton value={backlog.overdue_actions} label="Просроченные действия" tone={backlog.overdue_actions ? 'danger' : 'neutral'} onClick={() => openQueue('overdue_actions')} />
-            <BacklogButton value={backlog.awaiting_verification} label="Ожидают проверки" tone={backlog.awaiting_verification ? 'warning' : 'neutral'} onClick={() => openQueue('awaiting_verification')} />
+            <BacklogButton value={backlog.overdue_actions} label="Просроченные работы по планам" tone={backlog.overdue_actions ? 'danger' : 'neutral'} onClick={() => openQueue('overdue_actions')} />
+            <BacklogButton value={backlog.awaiting_verification} label="Планы ждут спутниковой проверки" tone={backlog.awaiting_verification ? 'warning' : 'neutral'} onClick={() => openQueue('awaiting_verification')} />
           </div>
 
           {queueKind && <QueuePanel queue={queue || { kind: queueKind, owner_id: queueOwnerId ? Number(queueOwnerId) : null }} state={queueState} error={queueError} onClose={closeQueue} onRetry={() => setQueueReloadToken((value) => value + 1)} onNavigate={onNavigate} onPage={setQueueOffset} />}
 
           <div className="mt-5 grid grid-cols-1 gap-4 xl:grid-cols-2">
-            <article className="rounded-xl bg-white p-4">
-              <h3 className="font-semibold">Скорость операционного цикла</h3>
+            <article className="rounded-xl bg-white p-4" aria-describedby="executive-history-note">
+              <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-semibold">Скорость операционного цикла</h3><span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700">Историческая метрика</span></div>
               <dl className="mt-3 space-y-3 text-sm">
                 <div><dt className="text-agro-muted">Сигнал внимания → создан осмотр</dt><dd className="font-medium">{duration(data.cycle_times?.attention_signal_to_inspection_hours)}</dd></div>
-                <div><dt className="text-agro-muted">Завершён осмотр → создано действие</dt><dd className="font-medium">{duration(data.cycle_times?.inspection_to_action_hours)}</dd></div>
-                <div><dt className="text-agro-muted">Создано действие → закрыто</dt><dd className="font-medium">{duration(data.cycle_times?.action_to_close_hours)}</dd></div>
+                <div><dt className="text-agro-muted">Завершён осмотр → создано действие (прежний контур)</dt><dd className="font-medium">{duration(data.cycle_times?.inspection_to_action_hours)}</dd></div>
+                <div><dt className="text-agro-muted">Создано действие → закрыто (прежний контур)</dt><dd className="font-medium">{duration(data.cycle_times?.action_to_close_hours)}</dd></div>
               </dl>
               <p className="mt-3 text-xs text-agro-muted">Первый интервал — proxy от даты исходного наблюдения: точного времени постановки в очередь текущая схема не хранит.</p>
             </article>
-            <article className="rounded-xl bg-white p-4">
-              <h3 className="font-semibold">Результат следующего наблюдения</h3>
+            <article className="rounded-xl bg-white p-4" aria-describedby="executive-history-note">
+              <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-semibold">Результат следующего наблюдения</h3><span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700">Историческая метрика</span></div>
               <div className="mt-3 grid grid-cols-2 gap-3">
                 {Object.entries(OUTCOME_LABELS).map(([code, label]) => <div key={code} className="rounded-lg bg-agro-surface2 p-3"><strong className="block text-xl">{metric(data.verification_outcomes?.[code])}</strong><span className="text-xs text-agro-muted">{label}</span></div>)}
               </div>
               <p className="mt-3 text-xs text-agro-muted">Изменение индекса не доказывает агрономическую причинность.</p>
             </article>
+            <p id="executive-history-note" className="text-xs leading-5 text-agro-muted xl:col-span-2">Эти две метрики пока описывают историю прежнего контура корректирующих действий (TASK_209) и будут пересчитаны по планам мер отдельно. Очереди, владельцы и счётчики выше уже считаются по каноническим осмотрам и планам мер.</p>
           </div>
 
           <div className="mt-5 grid grid-cols-1 gap-4 xl:grid-cols-2">
@@ -380,16 +408,16 @@ export default function ExecutiveAccountability({
               {!safeArray(data.enterprises).length && <p className="mt-3 text-sm text-agro-muted">Нет предприятий в выбранной области.</p>}
               <div className="mt-3 overflow-x-auto">
                 <table className="w-full min-w-[560px] text-sm">
-                  <thead><tr className="border-b border-agro-border text-left text-xs text-agro-muted"><th className="p-2 font-medium">Предприятие</th><th className="p-2 font-medium">Внимание</th><th className="p-2 font-medium">Осмотры</th><th className="p-2 font-medium">Действия</th><th className="p-2 font-medium">Просрочено</th></tr></thead>
+                  <thead><tr className="border-b border-agro-border text-left text-xs text-agro-muted"><th className="p-2 font-medium">Предприятие</th><th className="p-2 font-medium">Внимание</th><th className="p-2 font-medium">Осмотры</th><th className="p-2 font-medium">Работы по планам</th><th className="p-2 font-medium">Просрочено</th></tr></thead>
                   <tbody>{safeArray(data.enterprises).map((item) => <tr key={item.enterprise_id} className="border-b border-agro-border/60"><td className="p-2"><button type="button" disabled={role !== 'admin'} onClick={() => drillEnterprise(item.enterprise_id)} className="font-medium text-left enabled:text-agro-accent enabled:underline disabled:text-agro-text">{safeString(item.enterprise_name)}</button></td><td className="p-2">{metric(item.attention_fields_now)}</td><td className="p-2">{metric(item.open_inspections)}</td><td className="p-2">{metric(item.open_actions)}</td><td className="p-2 font-medium text-red-700">{metric(Number(item.overdue_inspections || 0) + Number(item.overdue_actions || 0))}</td></tr>)}</tbody>
                 </table>
               </div>
             </article>
             <article className="rounded-xl bg-white p-4">
-              <h3 className="font-semibold">Владельцы незакрытых действий</h3>
-              {!safeArray(data.owners).length && <p className="mt-3 text-sm text-agro-muted">Незакрытых действий нет.</p>}
+              <h3 className="font-semibold">Исполнители незавершённых работ по планам</h3>
+              {!safeArray(data.owners).length && <p className="mt-3 text-sm text-agro-muted">Незавершённых работ по планам мер нет.</p>}
               <ul className="mt-3 divide-y divide-agro-border">
-                {safeArray(data.owners).map((item) => <li key={item.owner_id} className="flex flex-wrap items-center justify-between gap-3 py-3"><div><strong>{safeString(item.owner_name)}</strong><p className="text-xs text-agro-muted">Ближайший срок: {formatDate(item.next_due_date)}</p></div><button type="button" onClick={() => openQueue('open_actions', item.owner_id)} className="btn-secondary px-3 py-2 text-sm">{metric(item.unresolved_actions)} незакрыто · {metric(item.overdue_actions)} просрочено</button></li>)}
+                {safeArray(data.owners).map((item) => <li key={item.owner_id} className="flex flex-wrap items-center justify-between gap-3 py-3"><div><strong>{safeString(item.owner_name)}</strong><p className="text-xs text-agro-muted">Ближайший срок: {formatDate(item.next_due_date)}</p></div><button type="button" onClick={() => openQueue('open_actions', item.owner_id)} className="btn-secondary min-h-11 px-3 py-2 text-sm">{metric(item.unresolved_actions)} в работе · {metric(item.overdue_actions)} просрочено</button></li>)}
               </ul>
             </article>
           </div>
