@@ -22,6 +22,9 @@ import { getEnterprise, getAlerts } from '../api/client';
 import client from '../api/client';
 import { useAuth } from '../context/AuthContext';
 
+// Maximum page size of GET /api/alerts/; a full page means the list may be truncated.
+const ENTERPRISE_ALERT_LIMIT = 200;
+
 // ─── Alert formatting helpers (TASK_019) ─────────────────────────────────
 function formatAlertTitle(alert) {
   let title = alert.title || 'Алерт';
@@ -274,7 +277,7 @@ function ErrorState({ message, onRetry }) {
 }
 
 // ─── Вкладка "Рекомендации" ────────────────────────────────────────────────
-function RecommendationsTab({ alerts, loading, aiResults, aiLoading, onAIRecommend }) {
+function RecommendationsTab({ alerts, alertsState = 'available', alertsTruncated = false, onRetry, loading, aiResults, aiLoading, onAIRecommend }) {
   const [visibleCount, setVisibleCount] = useState(10);
   const [tgSending, setTgSending] = useState({});  // keyed by alert.id
   const [tgSent, setTgSent] = useState({});        // keyed by alert.id
@@ -292,10 +295,20 @@ function RecommendationsTab({ alerts, loading, aiResults, aiLoading, onAIRecomme
     }
   }
 
-  if (loading) {
+  if (loading || alertsState === 'loading') {
     return (
       <div style={{ padding: 20, textAlign: 'center', color: '#6b8578' }}>
         Загрузка рекомендаций...
+      </div>
+    );
+  }
+
+  if (alertsState === 'failed') {
+    return (
+      <div role="alert" style={{ padding: '32px 20px', textAlign: 'center', color: '#991b1b', fontSize: 14 }}>
+        <p style={{ margin: 0, fontWeight: 600 }}>Не удалось загрузить предупреждения предприятия.</p>
+        <p style={{ margin: '6px 0 0', color: '#6b8578' }}>Отсутствие данных не означает, что активных предупреждений нет.</p>
+        {onRetry && <button type="button" onClick={onRetry} className="btn-secondary mt-3 min-h-11 px-4">Повторить</button>}
       </div>
     );
   }
@@ -318,13 +331,18 @@ function RecommendationsTab({ alerts, loading, aiResults, aiLoading, onAIRecomme
         color: '#16a34a',
         fontSize: 14,
       }}>
-        ✅ Нет активных алертов. Все поля в норме.
+        ✅ Активных критических предупреждений и предупреждений высокого риска нет.
       </div>
     );
   }
 
   return (
     <div>
+      {alertsTruncated && (
+        <p role="note" style={{ margin: '0 0 8px', fontSize: 12, color: '#92400e' }}>
+          Показаны первые {ENTERPRISE_ALERT_LIMIT} активных предупреждений; полный список — в разделе «Предупреждения».
+        </p>
+      )}
       {visibleItems.map(alertItem => (
         <div
           key={alertItem.id}
@@ -498,6 +516,9 @@ export default function EnterpriseDetailPage({ enterpriseId, onBack }) {
   const [enterprise, setEnterprise] = useState(null);
   const [fields, setFields] = useState([]);
   const [alerts, setAlerts] = useState([]);
+  // 'loading' | 'available' | 'failed' — a failed alert request is never shown as "zero alerts".
+  const [alertsState, setAlertsState] = useState('loading');
+  const [alertsTruncated, setAlertsTruncated] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [activeTab, setActiveTab] = useState('fields');
@@ -510,14 +531,25 @@ export default function EnterpriseDetailPage({ enterpriseId, onBack }) {
     if (!enterpriseId) return;
     setLoading(true);
     setError(null);
+    setAlertsState('loading');
     try {
-      const [entData, alertData] = await Promise.all([
+      const [entData, alertResult] = await Promise.all([
         getEnterprise(enterpriseId),
-        getAlerts({ enterprise_id: enterpriseId }).catch(() => []),
+        getAlerts({ enterprise_id: enterpriseId, is_active: true, limit: ENTERPRISE_ALERT_LIMIT })
+          .then(value => ({ ok: true, value }), () => ({ ok: false, value: null })),
       ]);
       setEnterprise(entData);
       setFields(entData.fields || []);
-      setAlerts(alertData?.length ? alertData : alertData?.items || []);
+      const alertItems = Array.isArray(alertResult.value) ? alertResult.value : alertResult.value?.items;
+      if (alertResult.ok && Array.isArray(alertItems)) {
+        setAlerts(alertItems);
+        setAlertsTruncated(alertItems.length >= ENTERPRISE_ALERT_LIMIT);
+        setAlertsState('available');
+      } else {
+        setAlerts([]);
+        setAlertsTruncated(false);
+        setAlertsState('failed');
+      }
     } catch (err) {
       console.error('EnterpriseDetailPage error:', err);
       if (err.response?.status === 404) {
@@ -705,6 +737,8 @@ export default function EnterpriseDetailPage({ enterpriseId, onBack }) {
           enterprise={enterprise}
           fields={fields}
           alerts={alerts}
+          alertsState={alertsState}
+          alertsTruncated={alertsTruncated}
         />
 
         {/* Tab Bar */}
@@ -749,6 +783,9 @@ export default function EnterpriseDetailPage({ enterpriseId, onBack }) {
         {activeTab === 'recommendations' && (
           <RecommendationsTab
             alerts={alerts}
+            alertsState={alertsState}
+            alertsTruncated={alertsTruncated}
+            onRetry={fetchData}
             loading={false}
             aiResults={aiResults}
             aiLoading={aiLoading}

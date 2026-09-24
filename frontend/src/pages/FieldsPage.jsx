@@ -10,6 +10,9 @@ export default function FieldsPage({ onFieldClick, onNavigate, enterpriseId }) {
   const { user: currentUser } = useAuth();
 
   const [fields, setFields] = useState([]);
+  // 'loading' | 'ready' | 'failed' — a failed request is never shown as "no fields".
+  const [fieldsState, setFieldsState] = useState('loading');
+  const [fieldsReloadToken, setFieldsReloadToken] = useState(0);
   const [enterprises, setEnterprises] = useState([]);
   const [selectedFieldId, setSelectedFieldId] = useState(null);
   const [selectedField, setSelectedField] = useState(null);
@@ -32,10 +35,17 @@ export default function FieldsPage({ onFieldClick, onNavigate, enterpriseId }) {
   useEffect(() => {
     const controller = new AbortController();
     let active = true;
+    setFieldsState('loading');
     getFields({ include_ndvi: true }, controller.signal)
-      .then((value) => { if (active) setFields(value); })
+      .then((value) => {
+        if (!active) return;
+        setFields(Array.isArray(value) ? value : []);
+        setFieldsState(Array.isArray(value) ? 'ready' : 'failed');
+      })
       .catch((err) => {
-        if (err?.code !== 'ERR_CANCELED') console.error('Error loading fields:', err);
+        if (!active || err?.code === 'ERR_CANCELED') return;
+        console.error('Error loading fields:', err);
+        setFieldsState('failed');
       });
 
     getCachedEnterprises()
@@ -47,7 +57,7 @@ export default function FieldsPage({ onFieldClick, onNavigate, enterpriseId }) {
       active = false;
       controller.abort();
     };
-  }, []);
+  }, [fieldsReloadToken]);
 
   // Fetch coverage once for current scope — never per field
   useEffect(() => {
@@ -249,6 +259,8 @@ export default function FieldsPage({ onFieldClick, onNavigate, enterpriseId }) {
         {/* Field list panel — absolute overlay on map */}
         <FieldListPanel
           fields={fields}
+          loadState={fieldsState}
+          onRetry={() => setFieldsReloadToken((value) => value + 1)}
           enterprises={enterprises}
           selectedFieldId={selectedFieldId}
           highlightedFieldId={highlightedFieldId}

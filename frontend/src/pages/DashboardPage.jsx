@@ -4,7 +4,11 @@ import SummaryCards from '../components/Dashboard/SummaryCards';
 import { COVERAGE_STATUS_CONFIG, FRESHNESS_STATUS_CONFIG, COVERAGE_PRIORITY_LABELS } from '../config/indexMetadata';
 import INDEX_METADATA from '../config/indexMetadata';
 import { getFieldAttentionQueue } from '../api/fieldAttention';
-import { listFieldInspections } from '../api/fieldInspections';
+import { getAnomalyInspectionQueue } from '../api/anomalyInspections';
+import { dashboardAlertTotals, finiteCount } from '../utils/dashboardTotals';
+
+const RECENT_ALERT_REQUEST_LIMIT = 20;
+const RECENT_ALERT_DISPLAY_LIMIT = 5;
 
 const ALERT_TYPE_LABELS = {
   ndvi_low:    'NDVI ниже нормы для фазы роста',
@@ -41,10 +45,10 @@ export default function DashboardPage({ onNavigate, onFieldClick, onFieldHighlig
     try {
       const results = await Promise.allSettled([
         getCachedDashboardSummary(),
-        getAlerts({ is_active: true, limit: 20 }),
+        getAlerts({ is_active: true, limit: RECENT_ALERT_REQUEST_LIMIT }),
         getSatelliteCoverage({ include_empty: true, active_only: true }),
         getFieldAttentionQueue({ limit: 1 }),
-        listFieldInspections({ limit: 1, offset: 0 }),
+        getAnomalyInspectionQueue({ limit: 1 }),
       ]);
       if (generation !== requestGeneration.current) return;
       const [summaryResult, alertsResult, coverageResult, attentionResult, inspectionsResult] = results;
@@ -55,8 +59,8 @@ export default function DashboardPage({ onNavigate, onFieldClick, onFieldHighlig
       setCoverage(coverageResult.status === 'fulfilled' ? coverageResult.value : null);
       setCoverageError(coverageResult.status === 'rejected' ? 'Не удалось загрузить данные покрытия' : null);
       setAttentionCount(attentionResult.status === 'fulfilled' && Number.isFinite(attentionResult.value?.summary?.total) ? attentionResult.value.summary.total : null);
-      const inspectionSummary = inspectionsResult.status === 'fulfilled' ? inspectionsResult.value?.summary : null;
-      setActiveInspectionCount(inspectionSummary ? Number(inspectionSummary.pending || 0) + Number(inspectionSummary.in_progress || 0) : null);
+      // Canonical inspection queue (TASK_225): open = new, assigned, in progress, submitted.
+      setActiveInspectionCount(inspectionsResult.status === 'fulfilled' ? finiteCount(inspectionsResult.value?.summary?.open) : null);
       if (results.every((result) => result.status === 'rejected')) setError('Оперативные данные недоступны');
     } finally {
       if (generation === requestGeneration.current) {
@@ -71,25 +75,12 @@ export default function DashboardPage({ onNavigate, onFieldClick, onFieldHighlig
     return () => { requestGeneration.current += 1; };
   }, [loadData]);
 
-  // Alert severity breakdown
-  const criticalAlerts = useMemo(
-    () => allAlerts.filter(a => a.severity === 'critical'),
-    [allAlerts]
-  );
-  const warningAlerts = useMemo(
-    () => allAlerts.filter(a => a.severity === 'warning'),
-    [allAlerts]
-  );
-  const infoAlerts = useMemo(
-    () => allAlerts.filter(a => a.severity === 'info'),
-    [allAlerts]
-  );
+  // Authoritative totals from the server summary; never the length of a page.
+  const alertTotals = useMemo(() => dashboardAlertTotals(summary), [summary]);
 
-  // Top recent alerts (sorted by triggered_at desc, up to 5)
-  const recentAlerts = useMemo(
-    () => [...allAlerts]
-      .sort((a, b) => new Date(b.triggered_at) - new Date(a.triggered_at))
-      .slice(0, 5),
+  // Top alerts in the server's priority order (severity first), display only.
+  const topAlerts = useMemo(
+    () => allAlerts.slice(0, RECENT_ALERT_DISPLAY_LIMIT),
     [allAlerts]
   );
 
@@ -194,7 +185,7 @@ export default function DashboardPage({ onNavigate, onFieldClick, onFieldHighlig
           {[
             ['Поля требуют внимания', attentionCount, 'field-attention'],
             ['Открытые осмотры', activeInspectionCount, 'field-inspections'],
-            ['Активные предупреждения', alertsStatus === 'available' ? allAlerts.length : null, 'alerts'],
+            ['Активные предупреждения', alertTotals?.active ?? null, 'alerts'],
             ['Последний спутниковый снимок', coverage?.summary?.latest_captured_date ? new Date(coverage.summary.latest_captured_date).toLocaleDateString('ru-RU') : null, 'fields'],
           ].map(([label, value, target]) => (
             <button key={label} type="button" onClick={() => onNavigate(target)} className="card p-4 text-left focus:outline-none focus:ring-2 focus:ring-agro-accent">
@@ -246,34 +237,37 @@ export default function DashboardPage({ onNavigate, onFieldClick, onFieldHighlig
                 </div>
               ) : (
                 <>
-                  {/* Severity summary chips */}
-                  <div className="flex flex-wrap gap-2 mb-3">
-                    {criticalAlerts.length > 0 && (
-                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-red-100 text-red-700 text-xs font-semibold">
-                        <span className="w-2 h-2 rounded-full bg-red-500" />
-                        Критично: {criticalAlerts.length}
-                      </span>
-                    )}
-                    {warningAlerts.length > 0 && (
-                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-100 text-amber-700 text-xs font-semibold">
-                        <span className="w-2 h-2 rounded-full bg-amber-500" />
-                        Высокий риск: {warningAlerts.length}
-                      </span>
-                    )}
-                    {infoAlerts.length > 0 && (
-                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-blue-100 text-blue-700 text-xs font-semibold">
-                        <span className="w-2 h-2 rounded-full bg-blue-500" />
-                        Инфо: {infoAlerts.length}
-                      </span>
+                  {/* Severity totals: server summary, not the top-alerts page */}
+                  <div className="flex flex-wrap gap-2 mb-3" data-testid="dashboard-alert-totals">
+                    {alertTotals ? (
+                      <>
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-slate-100 text-slate-800 text-xs font-semibold">
+                          Всего активных: {alertTotals.active}
+                        </span>
+                        {alertTotals.critical !== null && (
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-red-100 text-red-700 text-xs font-semibold">
+                            <span className="w-2 h-2 rounded-full bg-red-500" />
+                            Критично: {alertTotals.critical}
+                          </span>
+                        )}
+                        {alertTotals.warning !== null && (
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-100 text-amber-700 text-xs font-semibold">
+                            <span className="w-2 h-2 rounded-full bg-amber-500" />
+                            Высокий риск: {alertTotals.warning}
+                          </span>
+                        )}
+                      </>
+                    ) : (
+                      <span className="text-xs text-agro-muted">Итоги по предупреждениям недоступны: сводка сервера не загрузилась.</span>
                     )}
                   </div>
 
-                  {/* Recent top alerts list */}
+                  {/* Top alerts list (display only) */}
                   <div className="space-y-2">
                     <p className="text-xs font-semibold text-agro-muted uppercase tracking-wide">
-                      Последние предупреждения
+                      Первые по приоритету: {topAlerts.length}{alertTotals ? ` из ${alertTotals.active}` : ''}
                     </p>
-                    {recentAlerts.map(alert => (
+                    {topAlerts.map(alert => (
                       <AlertRow key={alert.id} alert={alert} />
                     ))}
                   </div>
@@ -474,7 +468,7 @@ export default function DashboardPage({ onNavigate, onFieldClick, onFieldHighlig
               </div>
               <div>
                 <p className="text-sm font-medium text-agro-text">Нет данных покрытия</p>
-                <p className="text-xs text-agro-muted">Спутниковые индексы ещё не загружены.</p>
+                <p className="text-xs text-agro-muted">Спутниковые индексы ещё не загружены. Снимки собирает автоматический сборщик по расписанию.</p>
               </div>
             </div>
           </div>

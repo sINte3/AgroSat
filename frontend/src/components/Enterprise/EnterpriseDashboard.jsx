@@ -27,7 +27,7 @@ function ndviTextColor(v) {
   return '#16a34a';
 }
 
-function KpiCard({ icon, label, value, color, subtitle }) {
+function KpiCard({ icon, label, value, color, subtitle, subtitleColor = '#16a34a', subtitleOpacity = 0.8 }) {
   return (
     <div
       style={{
@@ -72,7 +72,7 @@ function KpiCard({ icon, label, value, color, subtitle }) {
         {label}
       </div>
       {subtitle && (
-        <div style={{ fontSize: 11, color: '#16a34a', marginTop: 2, opacity: 0.8 }}>
+        <div style={{ fontSize: 11, color: subtitleColor, marginTop: 2, opacity: subtitleOpacity }}>
           {subtitle}
         </div>
       )}
@@ -100,7 +100,8 @@ function SkeletonCard() {
   );
 }
 
-export default function EnterpriseDashboard({ enterprise, fields, alerts, loading }) {
+export default function EnterpriseDashboard({ enterprise, fields, alerts, alertsState = 'available', alertsTruncated = false, loading }) {
+  const alertsAvailable = alertsState === 'available';
   const computed = useMemo(() => {
     if (!fields || fields.length === 0) {
       return {
@@ -193,8 +194,15 @@ export default function EnterpriseDashboard({ enterprise, fields, alerts, loadin
       key: 'alerts',
       icon: '⚠️',
       label: 'Критических',
-      value: computed.criticalAlerts,
-      color: computed.criticalAlerts > 0 ? '#ef4444' : '#16a34a',
+      // A failed or still-loading alert request is never displayed as zero.
+      value: alertsAvailable ? `${computed.criticalAlerts}${alertsTruncated ? '+' : ''}` : '—',
+      color: !alertsAvailable ? '#6b8578' : computed.criticalAlerts > 0 ? '#ef4444' : '#16a34a',
+      subtitle: alertsState === 'failed'
+        ? 'Предупреждения не загружены'
+        : alertsTruncated ? 'Не менее: список усечён' : null,
+      subtitleColor: '#92400e',
+      // Unavailability notes are rendered at full contrast (WCAG 1.4.3).
+      subtitleOpacity: 1,
     },
     // Строка 2
     {
@@ -218,8 +226,14 @@ export default function EnterpriseDashboard({ enterprise, fields, alerts, loadin
       key: 'normal',
       icon: '✅',
       label: 'Норма NDVI',
-      value: computed.normalCount,
-      color: '#16a34a',
+      value: alertsAvailable && !alertsTruncated ? computed.normalCount : '—',
+      color: alertsAvailable && !alertsTruncated ? '#16a34a' : '#6b8578',
+      subtitle: alertsState === 'failed'
+        ? 'Нельзя оценить без предупреждений'
+        : alertsTruncated ? 'Нельзя оценить: список предупреждений усечён' : null,
+      subtitleColor: '#92400e',
+      // Unavailability notes are rendered at full contrast (WCAG 1.4.3).
+      subtitleOpacity: 1,
     },
   ];
 

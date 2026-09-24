@@ -10,31 +10,38 @@ const severityColors = {
 
 // ─── Main panel component ─────────────────────────────────────────────────────────
 export default function FieldDetailPanel({ field, onBack, onNavigate }) {
-  const [alerts, setAlerts] = useState([]);
-  const [weather, setWeather] = useState(null);
-  const [ndviLoading, setNdviLoading] = useState(false);
+  // Each side panel request is tracked as loading | available | failed: a
+  // failed alert request must never read as "no active alerts".
+  const [alertsState, setAlertsState] = useState({ status: 'loading', items: [] });
+  const [weatherState, setWeatherState] = useState({ status: 'loading', data: null });
+  const [reloadToken, setReloadToken] = useState(0);
 
   // ─── Fetch alerts + weather ────────────────────────────────────────────────────
   useEffect(() => {
-    if (!field?.id) return;
-    setNdviLoading(true);
+    if (!field?.id) return undefined;
+    const controller = new AbortController();
+    setAlertsState({ status: 'loading', items: [] });
+    setWeatherState({ status: 'loading', data: null });
 
     Promise.allSettled([
-      apiClient.get(`/api/alerts/?field_id=${field.id}`),
-      apiClient.get(`/api/weather/field/${field.id}`),
+      apiClient.get('/api/alerts/', { params: { field_id: field.id, is_active: true }, signal: controller.signal }),
+      apiClient.get(`/api/weather/field/${field.id}`, { signal: controller.signal }),
     ]).then(([alertRes, weatherRes]) => {
-      if (alertRes.status === 'fulfilled') {
-        const data = alertRes.value.data;
-        setAlerts(Array.isArray(data) ? data.filter(a => a.is_active !== false) : []);
-      }
-      if (weatherRes.status === 'fulfilled') {
-        setWeather(weatherRes.value.data);
-      }
-      setNdviLoading(false);
+      if (controller.signal.aborted) return;
+      const alertData = alertRes.status === 'fulfilled' ? alertRes.value.data : null;
+      setAlertsState(Array.isArray(alertData)
+        ? { status: 'available', items: alertData.filter(a => a.is_active !== false) }
+        : { status: 'failed', items: [] });
+      setWeatherState(weatherRes.status === 'fulfilled'
+        ? { status: 'available', data: weatherRes.value.data }
+        : { status: 'failed', data: null });
     });
-  }, [field?.id]);
+    return () => controller.abort();
+  }, [field?.id, reloadToken]);
 
   if (!field) return null;
+  const alerts = alertsState.items;
+  const retry = () => setReloadToken(value => value + 1);
 
   return (
     <div className="flex flex-col h-full">
@@ -83,10 +90,15 @@ export default function FieldDetailPanel({ field, onBack, onNavigate }) {
         {/* ── Active Alerts ────────────────────────────────────────────── */}
         <div className="p-3 border-b border-gray-100">
           <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wide mb-2">
-            Алерты ({alerts.length})
+            Алерты ({alertsState.status === 'available' ? alerts.length : '—'})
           </h4>
-          {ndviLoading ? (
-            <div className="text-xs text-gray-400">Загрузка...</div>
+          {alertsState.status === 'loading' ? (
+            <div className="text-xs text-gray-400" role="status">Загрузка...</div>
+          ) : alertsState.status === 'failed' ? (
+            <div className="py-2 text-xs text-red-700" role="alert">
+              Не удалось загрузить алерты — их отсутствие не подтверждено.
+              <button type="button" onClick={retry} className="ml-2 font-medium underline">Повторить</button>
+            </div>
           ) : alerts.length === 0 ? (
             <div className="text-xs text-gray-400 py-2">Нет активных алертов ✓</div>
           ) : (
@@ -125,12 +137,17 @@ export default function FieldDetailPanel({ field, onBack, onNavigate }) {
           <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wide mb-2">
             Погода
           </h4>
-          {ndviLoading ? (
-            <div className="text-xs text-gray-400">Загрузка...</div>
-          ) : !weather ? (
+          {weatherState.status === 'loading' ? (
+            <div className="text-xs text-gray-400" role="status">Загрузка...</div>
+          ) : weatherState.status === 'failed' ? (
+            <div className="text-xs text-red-700" role="alert">
+              Не удалось загрузить погоду.
+              <button type="button" onClick={retry} className="ml-2 font-medium underline">Повторить</button>
+            </div>
+          ) : !weatherState.data ? (
             <div className="text-xs text-gray-400">Нет данных о погоде</div>
           ) : (
-            <WeatherMini data={weather} />
+            <WeatherMini data={weatherState.data} />
           )}
         </div>
       </div>

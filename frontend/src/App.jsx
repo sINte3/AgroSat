@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { BrowserRouter, Navigate, Routes, Route, useLocation, useNavigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import PrivateRoute from './components/Routing/PrivateRoute';
+import RenderErrorBoundary, { AppErrorFallback, RouteErrorFallback } from './components/Routing/RenderErrorBoundary';
 import Sidebar from './components/Layout/Sidebar';
 import Header from './components/Layout/Header';
 import DashboardPage from './pages/DashboardPage';
@@ -350,7 +351,21 @@ function AppLayout() {
           mobileNavigationOpen={mobileNavigationOpen}
           onMobileNavigationToggle={toggleMobileNavigation}
         />
-        {renderContent()}
+        {/* A rendering failure of one page keeps the shell (sidebar, header) usable. */}
+        <RenderErrorBoundary
+          resetKey={location.pathname}
+          fallback={({ reset }) => (
+            <RouteErrorFallback
+              onRetry={reset}
+              onNavigateHome={() => {
+                reset();
+                navigate(getRoleDefaultPath(role), { replace: true });
+              }}
+            />
+          )}
+        >
+          {renderContent()}
+        </RenderErrorBoundary>
       </main>
     </div>
   );
@@ -358,23 +373,25 @@ function AppLayout() {
 
 export default function App() {
   return (
-    <BrowserRouter>
-      <AuthProvider>
-        <Routes>
-          <Route path="/login" element={<LoginPage />} />
-          <Route path="/unauthorized" element={<UnauthorizedPage />} />
+    <RenderErrorBoundary fallback={() => <AppErrorFallback />}>
+      <BrowserRouter>
+        <AuthProvider>
+          <Routes>
+            <Route path="/login" element={<LoginPage />} />
+            <Route path="/unauthorized" element={<UnauthorizedPage />} />
 
-          <Route
-            element={
-              <PrivateRoute
-                allowedRoles={['admin', 'manager', 'agronomist', 'viewer']}
-              />
-            }
-          >
-            <Route path="*" element={<AppLayout />} />
-          </Route>
-        </Routes>
-      </AuthProvider>
-    </BrowserRouter>
+            <Route
+              element={
+                <PrivateRoute
+                  allowedRoles={['admin', 'manager', 'agronomist', 'viewer']}
+                />
+              }
+            >
+              <Route path="*" element={<AppLayout />} />
+            </Route>
+          </Routes>
+        </AuthProvider>
+      </BrowserRouter>
+    </RenderErrorBoundary>
   );
 }

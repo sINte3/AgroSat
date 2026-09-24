@@ -583,12 +583,11 @@ export default function FieldAnalyticsWorkspace({ fieldId, onBack }) {
         }
       }
 
-      // Coverage
-      if (coverageRes.status === 'fulfilled' && coverageRes.value?.fields?.length > 0) {
-        setCoverage(coverageRes.value.fields[0]);
-      } else {
-        setCoverage(null);
-      }
+      // Coverage: use only the row of this field, never an arbitrary first row.
+      const coverageRows = coverageRes.status === 'fulfilled' && Array.isArray(coverageRes.value?.fields)
+        ? coverageRes.value.fields
+        : [];
+      setCoverage(coverageRows.find(row => Number(row?.field_id) === Number(fid)) || null);
 
       // Fetch satellite indices (savi, evi, ndmi, ndre)
       const satelliteCodes = SATELLITE_INDEX_CODES;
