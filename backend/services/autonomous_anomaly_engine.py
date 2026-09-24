@@ -17,6 +17,11 @@ from typing import Iterable, Sequence
 
 RULE_VERSION = "r3-e-v1"
 SUPPORTED_INDICES = ("ndvi", "savi", "evi", "ndmi", "ndre")
+# A robust drop is both materially large and statistically unusual against the
+# field's own rolling baseline. One definition, used by candidate assessment,
+# persistence and supporting-index agreement alike.
+MIN_DROP_MAGNITUDE = 0.08
+MIN_ROBUST_DEVIATION = 3.0
 
 
 @dataclass(frozen=True)
@@ -116,15 +121,27 @@ def robust_signal(history: Sequence[float], current: float, policy: RulePolicy |
     )
 
 
+def is_robust_drop(signal: RobustSignal) -> bool:
+    return (
+        signal.magnitude >= MIN_DROP_MAGNITUDE
+        and signal.robust_deviation >= MIN_ROBUST_DEVIATION
+    )
+
+
+def field_zone_key(field_id: int, geometry_hash: str) -> str:
+    """Identity of a spatial zone: the field and the exact geometry it covers."""
+    if not geometry_hash or len(geometry_hash) != 64:
+        raise ValueError("geometry_hash must be SHA-256")
+    return hashlib.sha256(f"{field_id}|{geometry_hash}".encode()).hexdigest()
+
+
 def stable_keys(
     *, enterprise_id: int, field_id: int, provider: str, index_code: str,
     geometry_hash: str, rule_version: str = RULE_VERSION,
 ) -> tuple[str, str]:
     if index_code not in SUPPORTED_INDICES:
         raise ValueError("unsupported index")
-    if not geometry_hash or len(geometry_hash) != 64:
-        raise ValueError("geometry_hash must be SHA-256")
-    zone_key = hashlib.sha256(f"{field_id}|{geometry_hash}".encode()).hexdigest()
+    zone_key = field_zone_key(field_id, geometry_hash)
     source_key = hashlib.sha256(
         f"{enterprise_id}|{field_id}|{provider}|{index_code}|{zone_key}|{rule_version}".encode()
     ).hexdigest()
@@ -147,7 +164,7 @@ def assess_candidate(
     if affected_area_ha + 1e-9 < minimum_area:
         return None
     signal = robust_signal(history, current, policy)
-    if signal.magnitude < 0.08 or signal.robust_deviation < 3.0:
+    if not is_robust_drop(signal):
         return None
     magnitude_score = min(1.0, signal.magnitude / 0.30)
     deviation_score = min(1.0, signal.robust_deviation / policy.extreme_deviation)

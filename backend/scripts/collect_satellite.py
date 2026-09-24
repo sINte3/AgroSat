@@ -732,17 +732,27 @@ def run(
                 final_code = 4
                 summary["diagnostics"].append(sanitize_text(f"heartbeat persistence failed: {exc}"))
         if apply_run is not None:
+            from services.autonomous_monitoring import finish_apply_run
+
+            provisional = {**summary, "exit_code": final_code}
+            status = provider_status(provisional)
             try:
+                from config import settings as runtime_settings
                 from services.autonomous_monitoring import (
-                    finish_apply_run, reconcile_pixel_candidates, refresh_freshness,
+                    detect_observation_candidates, reconcile_pixel_candidates, refresh_freshness,
                 )
-                provisional = {**summary, "exit_code": final_code}
-                status = provider_status(provisional)
                 freshness_count = refresh_freshness(
                     apply_run,
                     last_outcome="provider_degraded" if status == "degraded" else
                     "quality_blocked" if status == "quality_blocked" else None,
                 )
+                # Accepted observations are persisted and freshness is current:
+                # the deterministic producer records this cycle's candidates,
+                # then promotion opens canonical inspections for them. The
+                # deployment enables the producer explicitly (see config).
+                detection = {"enabled": False, "assessed_fields": 0, "observation_candidates": 0}
+                if final_code in {0, 1} and runtime_settings.observation_detection_enabled:
+                    detection = {"enabled": True, **detect_observation_candidates(apply_run)}
                 anomaly = reconcile_pixel_candidates(apply_run) if final_code in {0, 1} else {
                     "inserted_candidates": 0, "automatic_inspections": 0,
                     "spike_guard_triggered": False,
@@ -757,17 +767,28 @@ def run(
                     from services.closed_loop_agronomy import reconcile_pending
                     verification = reconcile_pending(SessionLocal, limit=100)
                 summary["monitoring"] = {
-                    "freshness_rows": freshness_count, **anomaly,
+                    "freshness_rows": freshness_count, "detection": detection, **anomaly,
                     "verifications": verification,
                 }
+            except Exception as exc:
+                final_code = 4
+                summary["diagnostics"].append(sanitize_text(f"monitoring reconciliation failed: {exc}"))
+                provisional = {**summary, "exit_code": final_code}
+                try:
+                    apply_run.session.rollback()
+                except Exception:
+                    pass
+            # A monitoring failure must still terminalize the run: a row left
+            # 'running' reads as an in-flight cycle to the reconciler.
+            try:
                 finish_apply_run(
                     apply_run, exit_code=final_code, provider_status=status,
-                    counters={**aggregate_counters(summary), **summary["monitoring"]},
+                    counters={**aggregate_counters(summary), **summary.get("monitoring", {})},
                     failure_category=classify_failure(provisional),
                 )
             except Exception as exc:
                 final_code = 4
-                summary["diagnostics"].append(sanitize_text(f"monitoring reconciliation failed: {exc}"))
+                summary["diagnostics"].append(sanitize_text(f"collection run finish failed: {exc}"))
         if lock is not None:
             try:
                 lock_release(lock)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -17,13 +17,48 @@ from sqlalchemy.exc import IntegrityError
 from api.dependencies import ALLOWED_ROLES, TENANT_ROLES
 from database import SessionLocal, engine
 from services import observation_quality
-from services.autonomous_anomaly_engine import RulePolicy, freshness_status, plan_automatic_inspections
+from services.autonomous_anomaly_engine import (
+    RulePolicy, assess_candidate, freshness_status, is_robust_drop,
+    plan_automatic_inspections, robust_signal,
+)
+from services.pixel_ndvi import geometry_hash
 
 
 ADVISORY_LOCK_KEY = 871_320_219
 RULE_VERSION = "r3-e-v1"
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 STATES = {"NEW", "CONFIRMED", "DISMISSED", "INSPECTION_CREATED", "RESOLVED", "SUPERSEDED"}
+
+# ── Canonical deterministic producer (TASK_225) ─────────────────────────────
+# Accepted collector observations -> field-scope candidates. Detection reads
+# persisted field statistics only; it never calls a provider.
+OBSERVATION_PROVIDER = "sentinel2_field_statistics"
+DETECTOR_VERSION = "observation_rolling_median_v1"
+DETECTION_INDEX = "ndvi"
+SUPPORTING_INDICES = ("savi", "evi", "ndmi", "ndre")
+DETECTION_LOOKBACK_DAYS = 120
+DETECTION_BASELINE_SCENES = 12
+DETECTION_PERSISTENCE_WINDOW = 3
+SUPPORT_WINDOW_DAYS = 3
+CANDIDATE_PRIORITY = {"EXTREME": "urgent", "HIGH": "high", "MODERATE": "normal", "LOW": "low"}
+FIELD_SCOPE_LIMITATION = (
+    "Field-mean statistics of accepted Sentinel-2 observations: the zone is the whole field. "
+    "The observation does not establish a cause; that requires field inspection."
+)
+# Detection is part of TASK_219 autonomous monitoring and uses that workflow's
+# canonical valid-pixel tier.
+_DETECTION_NDVI_ACCEPTED = observation_quality.accepted_observation_sql(
+    value_column="n.mean_ndvi",
+    valid_pixels_column="n.valid_pixels_pct",
+    cloud_column="n.cloud_cover_pct",
+    minimum_valid_pixels_pct=observation_quality.MIN_VALID_PIXELS_FRESHNESS_PCT,
+)
+_DETECTION_INDEX_ACCEPTED = observation_quality.accepted_observation_sql(
+    value_column="s.mean_value",
+    valid_pixels_column="s.valid_pixels_pct",
+    cloud_column="s.cloud_cover_pct",
+    minimum_valid_pixels_pct=observation_quality.MIN_VALID_PIXELS_FRESHNESS_PCT,
+)
 
 # Freshness accepts an observation through the canonical contract in
 # services/observation_quality.py. A NULL cloud_cover_pct is neutral because the
@@ -308,8 +343,455 @@ def apply_freshness_recovery(session) -> int:
     return len(result.fetchall())
 
 
+def _detection_series(session, *, as_of_date: date, lookback_from: date) -> dict[int, dict]:
+    """Bounded accepted NDVI series for every active field, oldest first."""
+    rows = _rows(session.execute(text(f"""
+        WITH scope AS (
+          SELECT f.id,f.enterprise_id,
+                 COALESCE(f.area_ha,ST_Area(f.geometry::geography)/10000.0) AS area_ha
+            FROM fields f
+           WHERE f.is_active=true AND f.geometry IS NOT NULL
+             AND NOT ST_IsEmpty(f.geometry) AND ST_IsValid(f.geometry)
+        )
+        SELECT s.id AS field_id,s.enterprise_id,s.area_ha,
+               obs.id,obs.captured_date,obs.value,obs.valid_pixels_pct,obs.cloud_cover_pct
+          FROM scope s
+          CROSS JOIN LATERAL (
+            SELECT n.id,n.captured_date,n.mean_ndvi AS value,n.valid_pixels_pct,n.cloud_cover_pct
+              FROM ndvi_records n
+             WHERE n.field_id=s.id AND n.captured_date<=:as_of_date
+               AND n.captured_date>=:lookback_from AND {_DETECTION_NDVI_ACCEPTED}
+             ORDER BY n.captured_date DESC,n.id DESC
+             LIMIT :per_field
+          ) obs
+         ORDER BY s.id,obs.captured_date,obs.id
+    """), {
+        "as_of_date": as_of_date, "lookback_from": lookback_from,
+        "per_field": DETECTION_BASELINE_SCENES + DETECTION_PERSISTENCE_WINDOW,
+    }))
+    series: dict[int, dict] = {}
+    for row in rows:
+        entry = series.setdefault(int(row["field_id"]), {
+            "enterprise_id": int(row["enterprise_id"]),
+            "area_ha": float(row["area_ha"]) if row["area_ha"] is not None else 0.0,
+            "scenes": [],
+        })
+        entry["scenes"].append({
+            "id": int(row["id"]), "date": row["captured_date"], "value": float(row["value"]),
+            "valid_pixels_pct": float(row["valid_pixels_pct"]),
+            "cloud_cover_pct": row["cloud_cover_pct"],
+        })
+    return series
+
+
+def _persistence(values: list[float], policy: RulePolicy) -> int:
+    """Consecutive trailing scenes that are each a robust drop.
+
+    The baseline for ``k`` trailing scenes is the history *before* them, so a
+    sustained anomaly cannot dilute its own reference.
+    """
+    persistence = 0
+    for trailing in range(1, min(DETECTION_PERSISTENCE_WINDOW, len(values)) + 1):
+        history = values[:len(values) - trailing][-DETECTION_BASELINE_SCENES:]
+        if len(history) < policy.min_baseline_scenes:
+            break
+        if all(is_robust_drop(robust_signal(history, value, policy))
+               for value in values[len(values) - trailing:]):
+            persistence = trailing
+        else:
+            break
+    return persistence
+
+
+def _supporting_agreement(session, *, field_id: int, anchor: date, lookback_from: date,
+                          policy: RulePolicy) -> tuple[int, dict]:
+    """Count the other indices whose nearest accepted scene is also a robust drop."""
+    rows = _rows(session.execute(text(f"""
+        SELECT s.index_code,s.id,s.captured_date,s.mean_value AS value
+          FROM satellite_index_records s
+         WHERE s.field_id=:field_id AND s.index_code IN ('savi','evi','ndmi','ndre')
+           AND s.captured_date>=:lookback_from AND s.captured_date<=:window_to
+           AND {_DETECTION_INDEX_ACCEPTED}
+         ORDER BY s.index_code,s.captured_date,s.id
+    """), {"field_id": field_id, "lookback_from": lookback_from,
+           "window_to": anchor + timedelta(days=SUPPORT_WINDOW_DAYS)}))
+    by_index: dict[str, list[dict]] = {}
+    for row in rows:
+        by_index.setdefault(row["index_code"], []).append(row)
+    agreement, detail = 0, {}
+    for index_code in SUPPORTING_INDICES:
+        scenes = by_index.get(index_code, [])
+        near = [scene for scene in scenes
+                if abs((scene["captured_date"] - anchor).days) <= SUPPORT_WINDOW_DAYS]
+        if not near:
+            detail[index_code] = {"agrees": False, "reason": "no_accepted_scene_in_window"}
+            continue
+        support = min(near, key=lambda scene: (abs((scene["captured_date"] - anchor).days),
+                                               -scene["captured_date"].toordinal(), scene["id"]))
+        history = [float(scene["value"]) for scene in scenes
+                   if scene["captured_date"] < support["captured_date"]][-DETECTION_BASELINE_SCENES:]
+        if len(history) < policy.min_baseline_scenes:
+            detail[index_code] = {"agrees": False, "reason": "insufficient_history",
+                                  "record_id": support["id"]}
+            continue
+        signal = robust_signal(history, float(support["value"]), policy)
+        agrees = is_robust_drop(signal)
+        agreement += int(agrees)
+        detail[index_code] = {
+            "agrees": agrees, "record_id": support["id"],
+            "captured_date": support["captured_date"].isoformat(),
+            "value": float(support["value"]), "baseline_median": signal.baseline_median,
+            "robust_deviation": signal.robust_deviation,
+        }
+    return agreement, detail
+
+
+def _observation_assessments(session, *, as_of: datetime) -> tuple[list[dict], dict[str, int]]:
+    """The detection decision for every active field, without writing.
+
+    One definition shared by the write path and the read-only preview, so a
+    preview can never disagree with the cycle it previews. For every active
+    field it reads a bounded window of accepted NDVI observations (never whole
+    history), tests the newest scene against the field's own rolling
+    median/MAD baseline and proposes a field-scope candidate when the drop is
+    robust. The zone is the whole field polygon, stated as such in the
+    evidence, because the persisted statistics are field statistics.
+    """
+    policy = RulePolicy()
+    as_of_date = as_of.astimezone(timezone.utc).date()
+    lookback_from = as_of_date - timedelta(days=DETECTION_LOOKBACK_DAYS)
+    counters = {key: 0 for key in (
+        "assessed_fields", "observation_candidates", "suppressed_active_case",
+        "insufficient_history", "stale_observation", "no_signal", "replayed_scene",
+    )}
+    proposals: list[dict] = []
+    series = _detection_series(session, as_of_date=as_of_date, lookback_from=lookback_from)
+    for field_id, entry in sorted(series.items()):
+        scenes = entry["scenes"]
+        counters["assessed_fields"] += 1
+        current = scenes[-1]
+        if (as_of_date - current["date"]).days > policy.fresh_days:
+            counters["stale_observation"] += 1
+            continue
+        values = [scene["value"] for scene in scenes]
+        if len(values) <= policy.min_baseline_scenes:
+            counters["insufficient_history"] += 1
+            continue
+        persistence = _persistence(values, policy)
+        if persistence == 0:
+            counters["no_signal"] += 1
+            continue
+        baseline_scenes = scenes[:len(scenes) - persistence][-DETECTION_BASELINE_SCENES:]
+        history = [scene["value"] for scene in baseline_scenes]
+        geometry = _row(session.execute(text(
+            "SELECT ST_AsGeoJSON(geometry)::json AS geometry FROM fields "
+            "WHERE id=:field_id AND enterprise_id=:enterprise_id"
+        ), {"field_id": field_id, "enterprise_id": entry["enterprise_id"]}))
+        field_hash = geometry_hash(geometry["geometry"])
+        agreement, supporting = _supporting_agreement(
+            session, field_id=field_id, anchor=current["date"],
+            lookback_from=lookback_from, policy=policy,
+        )
+        acquired_at = datetime(current["date"].year, current["date"].month,
+                               current["date"].day, tzinfo=timezone.utc)
+        assessment = assess_candidate(
+            enterprise_id=entry["enterprise_id"], field_id=field_id,
+            provider=OBSERVATION_PROVIDER, index_code=DETECTION_INDEX,
+            geometry_hash=field_hash, history=history, current=current["value"],
+            affected_area_ha=entry["area_ha"], field_area_ha=entry["area_ha"],
+            persistence_scenes=persistence, supporting_agreement=agreement,
+            data_quality=min(current["valid_pixels_pct"] / 100.0, 1.0),
+            acquired_at=acquired_at, policy=policy,
+        ) if entry["area_ha"] > 0 else None
+        if assessment is None:
+            counters["no_signal"] += 1
+            continue
+        scene_id = f"ndvi_record:{current['id']}"
+        prior = _row(session.execute(text("""
+            SELECT scene_id FROM autonomous_anomaly_candidates
+             WHERE enterprise_id=:enterprise_id AND source_key=:source_key AND zone_key=:zone_key
+               AND (scene_id=:scene_id OR state IN ('NEW','CONFIRMED','INSPECTION_CREATED'))
+             ORDER BY (scene_id=:scene_id) DESC, id
+             LIMIT 1
+        """), {"enterprise_id": entry["enterprise_id"], "source_key": assessment.source_key,
+               "zone_key": assessment.zone_key, "scene_id": scene_id}))
+        if prior is not None:
+            counters["replayed_scene" if prior["scene_id"] == scene_id else "suppressed_active_case"] += 1
+            continue
+        signal = robust_signal(history, current["value"], policy)
+        evidence = {
+            "detector": DETECTOR_VERSION, "rule_version": RULE_VERSION, "scope": "field",
+            "field_geometry_hash": field_hash, "index_code": DETECTION_INDEX,
+            "metric": "mean_ndvi", "ndvi_record_id": current["id"],
+            "captured_date": current["date"].isoformat(),
+            "source_snapshot": {"sampled_value": current["value"],
+                                "comparison_value": signal.baseline_median},
+            "baseline": {"median": signal.baseline_median, "mad": signal.mad,
+                         "record_ids": [scene["id"] for scene in baseline_scenes],
+                         "dates": [scene["date"].isoformat() for scene in baseline_scenes]},
+            "persistence": {"scenes": persistence,
+                            "record_ids": [scene["id"] for scene in scenes[len(scenes) - persistence:]]},
+            "supporting": supporting,
+            "quality": {"valid_pixels_pct": current["valid_pixels_pct"],
+                        "cloud_cover_pct": current["cloud_cover_pct"],
+                        "minimum_valid_pixels_pct": observation_quality.MIN_VALID_PIXELS_FRESHNESS_PCT,
+                        "contract": "services.observation_quality"},
+            "contract": "non_diagnostic",
+            "limitation": FIELD_SCOPE_LIMITATION,
+        }
+        proposals.append({
+            "enterprise_id": entry["enterprise_id"], "field_id": field_id, "scene_id": scene_id,
+            "acquired_at": acquired_at, "source_key": assessment.source_key,
+            "zone_key": assessment.zone_key, "score": assessment.score,
+            "confidence": assessment.confidence, "severity": assessment.severity,
+            "automatic": assessment.eligible_for_automatic_inspection,
+            "magnitude": signal.magnitude, "deviation": signal.robust_deviation,
+            "area_ha": entry["area_ha"], "persistence": persistence, "agreement": agreement,
+            "quality": min(current["valid_pixels_pct"] / 100.0, 1.0), "evidence": evidence,
+            "explanation": f"{assessment.explanation} {FIELD_SCOPE_LIMITATION}",
+            "cooldown_until": assessment.cooldown_until,
+        })
+    return proposals, counters
+
+
+def detect_observation_candidates(run: ApplyRun, *, as_of: datetime | None = None) -> dict[str, int]:
+    """Canonical deterministic producer: accepted observations -> candidates.
+
+    Runs inside the collector's apply cycle, under its advisory lock, after
+    freshness is refreshed; nothing here calls a provider. Replay-safe: a scene
+    is recorded once (the candidate unique key backs the read-side check), and
+    a field that already has an active case for the same zone is skipped.
+    """
+    proposals, counters = _observation_assessments(
+        run.session, as_of=as_of or datetime.now(timezone.utc),
+    )
+    for proposal in proposals:
+        inserted = run.session.execute(text("""
+            INSERT INTO autonomous_anomaly_candidates
+              (enterprise_id,field_id,run_id,rule_version,provider,scene_id,acquired_at,index_code,
+               source_key,zone_key,geometry,score,confidence,severity,magnitude,robust_deviation,
+               affected_area_ha,affected_area_fraction,persistence_scenes,multi_index_agreement,
+               data_quality,evidence,explanation,state,cooldown_until)
+            SELECT f.enterprise_id,f.id,:run_id,:rule,:provider,:scene_id,:acquired_at,:index_code,
+                   :source_key,:zone_key,ST_Multi(f.geometry),:score,:confidence,:severity,:magnitude,
+                   :deviation,:area_ha,1.0,:persistence,:agreement,:quality,CAST(:evidence AS jsonb),
+                   :explanation,'NEW',:cooldown_until
+              FROM fields f WHERE f.id=:field_id AND f.enterprise_id=:enterprise_id
+            ON CONFLICT (enterprise_id,field_id,index_code,scene_id,zone_key,rule_version) DO NOTHING
+            RETURNING id
+        """), {
+            **{key: value for key, value in proposal.items() if key != "automatic"},
+            "run_id": run.run_id, "rule": RULE_VERSION, "provider": OBSERVATION_PROVIDER,
+            "index_code": DETECTION_INDEX, "evidence": json.dumps(proposal["evidence"], sort_keys=True),
+        }).first()
+        counters["observation_candidates" if inserted else "replayed_scene"] += 1
+    run.session.commit()
+    return counters
+
+
+def preview_observation_candidates(session, *, as_of: datetime | None = None) -> dict:
+    """Read-only preview of what the next apply cycle's detection would record.
+
+    Uses the same decision function as :func:`detect_observation_candidates`
+    and writes nothing; the caller's transaction is rolled back. Automatic
+    inspection eligibility is reported per candidate, before the cap and the
+    spike guard that promotion applies.
+    """
+    try:
+        proposals, counters = _observation_assessments(
+            session, as_of=as_of or datetime.now(timezone.utc),
+        )
+    finally:
+        session.rollback()
+    counters["observation_candidates"] = len(proposals)
+    return {
+        "counters": counters,
+        "candidates": [
+            {key: proposal[key] for key in (
+                "enterprise_id", "field_id", "scene_id", "acquired_at", "severity", "confidence",
+                "score", "persistence", "agreement", "automatic")}
+            | {"current_value": proposal["evidence"]["source_snapshot"]["sampled_value"],
+               "baseline_median": proposal["evidence"]["source_snapshot"]["comparison_value"]}
+            for proposal in proposals
+        ],
+    }
+
+
+class CandidatePromotionError(RuntimeError):
+    """A candidate cannot open an inspection; ``status`` is the HTTP meaning."""
+
+    def __init__(self, status: int, detail: str):
+        super().__init__(detail)
+        self.status = status
+        self.detail = detail
+
+
+def _candidate_source(item) -> "InspectionSource":
+    from services.anomaly_inspections import InspectionSource
+
+    evidence = item["evidence"] or {}
+    snapshot = evidence.get("source_snapshot") or {}
+    sampled = snapshot.get("sampled_value")
+    comparison = snapshot.get("comparison_value")
+    if sampled is None:
+        raise CandidatePromotionError(
+            409, "Candidate evidence has no sampled value snapshot; it needs operator review"
+        )
+    scope = ("Verification scope: the whole field."
+             if evidence.get("scope") == "field" else "Verification scope: the detected zone.")
+    return InspectionSource(
+        kind="pixel_ndvi",
+        reason=f"{item['explanation']} {scope}"[:2000],
+        provider=str(item["provider"])[:40],
+        item_id=item["scene_id"],
+        acquired_at=item["acquired_at"],
+        index_name=item["index_code"],
+        sampled_value=float(sampled),
+        comparison_value=float(comparison) if comparison is not None else None,
+        delta=round(float(sampled) - float(comparison), 6) if comparison is not None else None,
+        geometry_hash=geometry_hash(item["field_geometry"]),
+        zone_ewkb=item["geometry_ewkb"],
+    )
+
+
+def promote_candidate(session, *, candidate_id: int, actor, reason: str, title: str,
+                      origin: str, allowed_states: frozenset[str],
+                      expected_version: int | None = None) -> dict:
+    """Open the canonical inspection for one candidate, in the caller's transaction.
+
+    The candidate row is locked, its state and version checked, the INSERT is
+    the canonical one (services.anomaly_inspections.insert_inspection) and the
+    candidate transition is recorded, so all three commit together or not at
+    all. A candidate derived from a pixel zone that already has its own
+    inspection is refused rather than duplicated.
+    """
+    from services.anomaly_inspections import InspectionSourceError, insert_inspection
+
+    item = _row(session.execute(text("""
+        SELECT a.*,encode(ST_AsEWKB(a.geometry),'hex') AS geometry_ewkb,f.name AS field_name,
+               ST_AsGeoJSON(f.geometry)::json AS field_geometry
+          FROM autonomous_anomaly_candidates a
+          JOIN fields f ON f.id=a.field_id AND f.enterprise_id=a.enterprise_id
+         WHERE a.id=:id FOR UPDATE OF a
+    """), {"id": candidate_id}))
+    if not item:
+        raise CandidatePromotionError(404, "Candidate not found")
+    if item["state"] not in allowed_states or (
+        expected_version is not None and item["version"] != expected_version
+    ):
+        raise CandidatePromotionError(409, "Candidate version or state conflict")
+    duplicate = session.execute(text("""
+        SELECT 1 FROM autonomous_anomaly_candidates
+         WHERE enterprise_id=:enterprise AND source_key=:source AND zone_key=:zone
+           AND inspection_id IS NOT NULL AND state='INSPECTION_CREATED' AND id<>:id
+         LIMIT 1
+    """), {"enterprise": item["enterprise_id"], "source": item["source_key"],
+           "zone": item["zone_key"], "id": candidate_id}).first()
+    pixel_reference = (item["evidence"] or {}).get("pixel_anomaly_id")
+    covered = pixel_reference is not None and session.execute(text("""
+        SELECT 1 FROM pixel_anomaly_inspections
+         WHERE anomaly_id=:anomaly AND enterprise_id=:enterprise LIMIT 1
+    """), {"anomaly": int(pixel_reference), "enterprise": item["enterprise_id"]}).first()
+    if duplicate or covered:
+        raise CandidatePromotionError(409, "An inspection already exists for this anomaly source and zone")
+    source = _candidate_source(item)
+    priority = CANDIDATE_PRIORITY.get(item["severity"], "normal")
+    fingerprint = hashlib.sha256(
+        f"{candidate_id}|{item['source_key']}|{item['zone_key']}".encode()
+    ).hexdigest()
+    try:
+        inspection = insert_inspection(
+            session, actor=actor, field_id=item["field_id"], enterprise_id=item["enterprise_id"],
+            source=source, client_request_id=f"candidate-{candidate_id}",
+            request_fingerprint=fingerprint, title=f"{title}: {item['field_name']}"[:255],
+            priority=priority, origin=origin,
+        )
+    except InspectionSourceError as error:
+        raise CandidatePromotionError(409, f"Candidate snapshot is invalid: {error}") from None
+    updated = session.execute(text("""
+        UPDATE autonomous_anomaly_candidates SET state='INSPECTION_CREATED',inspection_id=:inspection,
+          version=version+1,updated_at=now()
+         WHERE id=:id AND state=:state AND version=:version
+        RETURNING version
+    """), {"inspection": inspection["id"], "id": candidate_id, "state": item["state"],
+           "version": item["version"]}).first()
+    if updated is None:
+        raise CandidatePromotionError(409, "Candidate version or state conflict")
+    session.execute(text("""
+        INSERT INTO autonomous_anomaly_transitions
+          (candidate_id,enterprise_id,from_state,to_state,actor_id,reason,expected_version)
+        VALUES (:id,:enterprise,:old,'INSPECTION_CREATED',:actor,:reason,:version)
+    """), {"id": candidate_id, "enterprise": item["enterprise_id"], "old": item["state"],
+           "actor": actor.user_id, "reason": reason, "version": item["version"]})
+    return {"candidate_id": candidate_id, "inspection_id": inspection["id"],
+            "version": int(updated[0]), "state": "INSPECTION_CREATED"}
+
+
+def promote_automatic_candidates(run: ApplyRun) -> dict[str, int | bool]:
+    """Open canonical inspections for this run's automatic candidates.
+
+    Bounded by the rule's cap and spike guard. Each promotion runs in its own
+    savepoint, so one refused candidate never undoes another.
+    """
+    from services.anomaly_inspections import Actor
+
+    eligible = _rows(run.session.execute(text("""
+      SELECT a.id,a.field_id,a.source_key,a.zone_key,a.confidence,a.cooldown_until,
+             ((a.confidence>=0.85 AND a.persistence_scenes>=2 AND a.multi_index_agreement>=2)
+               OR (a.confidence>=0.85 AND a.severity='EXTREME')) AS automatic,
+             EXISTS (SELECT 1 FROM autonomous_anomaly_candidates prior
+               WHERE prior.enterprise_id=a.enterprise_id AND prior.source_key=a.source_key
+                 AND prior.zone_key=a.zone_key AND prior.id<>a.id
+                 AND prior.cooldown_until>a.acquired_at) AS replay
+        FROM autonomous_anomaly_candidates a WHERE a.run_id=:run AND a.state='NEW'
+    """), {"run": run.run_id}))
+    active_fields = run.session.execute(text("SELECT count(*) FROM fields WHERE is_active=true")).scalar_one()
+    existing = {
+        (row["source_key"], row["zone_key"]) for row in _rows(run.session.execute(text("""
+          SELECT source_key,zone_key FROM autonomous_anomaly_candidates
+           WHERE inspection_id IS NOT NULL AND state='INSPECTION_CREATED'
+        """)))
+    }
+    plan = plan_automatic_inspections(
+        eligible, active_field_count=max(int(active_fields), 1), open_source_zone_keys=existing,
+    )
+    automatic = refused = 0
+    if plan.candidate_ids:
+        admin_id = run.session.execute(text("""
+          SELECT id FROM users WHERE lower(role::text)='admin' AND is_active=true ORDER BY id LIMIT 1
+        """)).scalar_one_or_none()
+        if admin_id is None:
+            raise RuntimeError("automatic inspection requires one active administrator audit identity")
+        actor = Actor(int(admin_id), "admin", None)
+        for candidate_id in plan.candidate_ids:
+            savepoint = run.session.begin_nested()
+            try:
+                promote_candidate(
+                    run.session, candidate_id=candidate_id, actor=actor,
+                    reason="Automatic high-confidence persistent anomaly policy.",
+                    title="Автоматическая проверка спутниковой аномалии",
+                    origin=f"automatic_monitoring:{RULE_VERSION}",
+                    allowed_states=frozenset({"NEW"}),
+                )
+                savepoint.commit()
+                automatic += 1
+            except (CandidatePromotionError, IntegrityError):
+                savepoint.rollback()
+                refused += 1
+    return {"spike_guard_triggered": plan.spike_guard_triggered,
+            "automatic_inspections": automatic, "automatic_cap_suppressed": len(plan.suppressed_cap_ids),
+            "cooldown_or_open_suppressed": len(plan.suppressed_duplicate_ids),
+            "automatic_refused": refused}
+
+
 def reconcile_pixel_candidates(run: ApplyRun) -> dict[str, int | bool]:
-    """Promote eligible accepted pixel zones; replay is protected by a DB unique key."""
+    """Record accepted pixel zones as candidates, then promote this run's automatic ones.
+
+    Candidates recorded earlier in the same run by
+    :func:`detect_observation_candidates` are promoted by the same bounded,
+    capped policy. Replay is protected by the candidate and inspection unique
+    keys.
+    """
     inserted = run.session.execute(text("""
         INSERT INTO autonomous_anomaly_candidates
           (enterprise_id,field_id,run_id,rule_version,provider,scene_id,acquired_at,index_code,
@@ -319,7 +801,7 @@ def reconcile_pixel_candidates(run: ApplyRun) -> dict[str, int | bool]:
         SELECT a.enterprise_id,a.field_id,:collection_run,:rule,
                COALESCE(r.provenance->>'provider','sentinel'),
                r.current_record_type||':'||COALESCE(r.current_ndvi_record_id,r.current_satellite_index_record_id)::text,
-               r.current_observation_date::timestamptz,r.index_code,
+               (r.current_observation_date::timestamp AT TIME ZONE 'UTC'),r.index_code,
                a.zone_key,
                a.zone_key,a.geometry,a.score,a.confidence,
                CASE a.severity WHEN 'critical' THEN 'EXTREME' WHEN 'high' THEN 'HIGH' WHEN 'medium' THEN 'MODERATE' ELSE 'LOW' END,
@@ -334,9 +816,13 @@ def reconcile_pixel_candidates(run: ApplyRun) -> dict[str, int | bool]:
                    AND ST_Intersects(a2.geometry,a.geometry))),
                LEAST(COALESCE((r.quality_summary->>'current_valid_pixels_pct')::float,0)/100.0,1),
                jsonb_build_object('pixel_anomaly_id',a.id,'pixel_run_id',r.id,
-                 'classification',a.classification,'quality',a.quality_summary,'provenance',a.provenance),
+                 'classification',a.classification,'quality',a.quality_summary,'provenance',a.provenance,
+                 'scope','zone',
+                 'source_snapshot',jsonb_build_object(
+                   'sampled_value',(a.provenance->>'median_current_value')::float,
+                   'comparison_value',(a.provenance->>'median_comparison_value')::float)),
                'Pixel anomaly retained from deterministic raster analysis; automatic action requires persistence and high confidence.',
-               'NEW',r.current_observation_date::timestamptz+interval '14 days'
+               'NEW',(r.current_observation_date::timestamp AT TIME ZONE 'UTC')+interval '14 days'
           FROM pixel_anomalies a
           JOIN pixel_anomaly_runs r ON r.id=a.run_id
           JOIN fields f ON f.id=a.field_id AND f.enterprise_id=a.enterprise_id
@@ -345,69 +831,9 @@ def reconcile_pixel_candidates(run: ApplyRun) -> dict[str, int | bool]:
         ON CONFLICT (enterprise_id,field_id,index_code,scene_id,zone_key,rule_version) DO NOTHING
         RETURNING id
     """), {"collection_run": run.run_id, "rule": RULE_VERSION}).fetchall()
-    eligible = _rows(run.session.execute(text("""
-      SELECT a.id,a.field_id,a.source_key,a.zone_key,a.confidence,a.cooldown_until,
-             ((a.confidence>=0.85 AND a.persistence_scenes>=2 AND a.multi_index_agreement>=2)
-               OR (a.confidence>=0.85 AND a.severity='EXTREME')) AS automatic,
-             EXISTS (SELECT 1 FROM autonomous_anomaly_candidates prior
-               WHERE prior.enterprise_id=a.enterprise_id AND prior.source_key=a.source_key
-                 AND prior.zone_key=a.zone_key AND prior.id<>a.id
-                 AND prior.cooldown_until>a.acquired_at) AS replay
-        FROM autonomous_anomaly_candidates a WHERE a.run_id=:run AND a.state='NEW'
-    """), {"run":run.run_id}))
-    active_fields = run.session.execute(text("SELECT count(*) FROM fields WHERE is_active=true")).scalar_one()
-    existing = {
-        (row["source_key"],row["zone_key"]) for row in _rows(run.session.execute(text("""
-          SELECT source_key,zone_key FROM autonomous_anomaly_candidates
-           WHERE inspection_id IS NOT NULL AND state='INSPECTION_CREATED'
-        """)))
-    }
-    plan = plan_automatic_inspections(
-        eligible, active_field_count=active_fields, open_source_zone_keys=existing,
-    )
-    automatic = 0
-    if plan.candidate_ids:
-        admin_id = run.session.execute(text("""
-          SELECT id FROM users WHERE lower(role::text)='admin' AND is_active=true ORDER BY id LIMIT 1
-        """)).scalar_one_or_none()
-        if admin_id is None:
-            raise RuntimeError("automatic inspection requires one active administrator audit identity")
-        for candidate_id in plan.candidate_ids:
-            item = _row(run.session.execute(text("""
-              SELECT a.*,f.name AS field_name FROM autonomous_anomaly_candidates a
-              JOIN fields f ON f.id=a.field_id WHERE a.id=:id FOR UPDATE
-            """), {"id":candidate_id}))
-            key = f"auto-monitoring-{candidate_id}"
-            fingerprint = hashlib.sha256(f"{candidate_id}|{item['source_key']}|automatic".encode()).hexdigest()
-            inspection = _row(run.session.execute(text("""
-              INSERT INTO field_inspections
-                (field_id,enterprise_id,created_by_id,updated_by_id,client_request_id,request_fingerprint,
-                 source,source_priority,source_reason_codes,title,instructions,status,source_kind,
-                 source_reason,priority,source_snapshot_locked)
-              VALUES (:field,:enterprise,:actor,:actor,:key,:fingerprint,'manual','high','[]'::jsonb,
-                 :title,:instructions,'new','manual',:reason,'high',true)
-              ON CONFLICT (client_request_id) DO NOTHING RETURNING id
-            """), {"field":item["field_id"],"enterprise":item["enterprise_id"],"actor":admin_id,
-                     "key":key,"fingerprint":fingerprint,
-                     "title":f"Автоматическая проверка спутниковой аномалии: {item['field_name']}"[:255],
-                     "instructions":item["explanation"],
-                     "reason":"Высокая уверенность, подтверждённая устойчивость и согласие индексов."}))
-            if inspection:
-                run.session.execute(text("""
-                  UPDATE autonomous_anomaly_candidates SET state='INSPECTION_CREATED',inspection_id=:inspection,
-                    version=version+1,updated_at=now() WHERE id=:id AND state='NEW'
-                """), {"inspection":inspection["id"],"id":candidate_id})
-                run.session.execute(text("""
-                  INSERT INTO autonomous_anomaly_transitions
-                    (candidate_id,enterprise_id,from_state,to_state,actor_id,reason,expected_version)
-                  VALUES (:id,:enterprise,'NEW','INSPECTION_CREATED',:actor,:reason,1)
-                """), {"id":candidate_id,"enterprise":item["enterprise_id"],"actor":admin_id,
-                         "reason":"Automatic high-confidence persistent anomaly policy."})
-                automatic += 1
+    promotion = promote_automatic_candidates(run)
     run.session.commit()
-    return {"inserted_candidates": len(inserted), "spike_guard_triggered": plan.spike_guard_triggered,
-            "automatic_inspections": automatic, "automatic_cap_suppressed": len(plan.suppressed_cap_ids),
-            "cooldown_or_open_suppressed": len(plan.suppressed_duplicate_ids)}
+    return {"inserted_candidates": len(inserted), **promotion}
 
 
 def release_apply_run(run: ApplyRun) -> Exception | None:
@@ -572,50 +998,27 @@ def transition_candidate(db, user, candidate_id: int, *, action: str, reason: st
 
 
 def create_inspection(db, user, candidate_id: int, *, reason: str, expected_version: int):
-    _, actor_id, _ = _actor(user, write=True)
+    """Operator promotion of one candidate through the canonical INSERT."""
+    from services.anomaly_inspections import Actor, is_unique_violation
+
+    role, actor_id, enterprise_id = _actor(user, write=True)
     try:
-        item = _row(db.execute(text("""
-          SELECT a.*,f.name AS field_name FROM autonomous_anomaly_candidates a
-          JOIN fields f ON f.id=a.field_id WHERE a.id=:id FOR UPDATE
-        """), {"id":candidate_id}))
-        if not item:
-            raise HTTPException(404,"Candidate not found")
-        if item["state"] not in {"NEW","CONFIRMED"} or item["version"] != expected_version:
-            raise HTTPException(409,"Candidate version or state conflict")
-        existing = _row(db.execute(text("""
-          SELECT inspection_id FROM autonomous_anomaly_candidates
-           WHERE enterprise_id=:enterprise AND source_key=:source AND zone_key=:zone
-             AND inspection_id IS NOT NULL LIMIT 1
-        """), {"enterprise":item["enterprise_id"],"source":item["source_key"],"zone":item["zone_key"]}))
-        if existing:
-            raise HTTPException(409,"An inspection already exists for this anomaly source and zone")
-        key = f"autonomous-{candidate_id}"
-        fingerprint = hashlib.sha256(f"{candidate_id}|{actor_id}|{item['source_key']}".encode()).hexdigest()
-        inspection = _row(db.execute(text("""
-          INSERT INTO field_inspections
-            (field_id,enterprise_id,created_by_id,updated_by_id,client_request_id,request_fingerprint,
-             source,source_priority,source_reason_codes,title,instructions,status,source_kind,
-             source_reason,priority,source_snapshot_locked)
-          VALUES (:field,:enterprise,:actor,:actor,:key,:fingerprint,'manual','high','[]'::jsonb,
-             :title,:instructions,'new','manual',:reason,'high',true)
-          RETURNING id
-        """), {"field":item["field_id"],"enterprise":item["enterprise_id"],"actor":actor_id,
-                 "key":key,"fingerprint":fingerprint,"title":f"Проверить спутниковую аномалию: {item['field_name']}"[:255],
-                 "instructions":item["explanation"],"reason":reason.strip()}))
-        db.execute(text("""
-          UPDATE autonomous_anomaly_candidates SET state='INSPECTION_CREATED',inspection_id=:inspection,
-            version=version+1,updated_at=now() WHERE id=:id
-        """), {"inspection":inspection["id"],"id":candidate_id})
-        db.execute(text("""
-          INSERT INTO autonomous_anomaly_transitions
-            (candidate_id,enterprise_id,from_state,to_state,actor_id,reason,expected_version)
-          VALUES (:id,:enterprise,:old,'INSPECTION_CREATED',:actor,:reason,:version)
-        """), {"id":candidate_id,"enterprise":item["enterprise_id"],"old":item["state"],
-                 "actor":actor_id,"reason":reason.strip(),"version":expected_version})
+        result = promote_candidate(
+            db, candidate_id=candidate_id, actor=Actor(int(actor_id), role, enterprise_id),
+            reason=reason.strip(), title="Проверить спутниковую аномалию",
+            origin="monitoring_review", allowed_states=frozenset({"NEW", "CONFIRMED"}),
+            expected_version=expected_version,
+        )
         db.commit()
-        return {"id":candidate_id,"state":"INSPECTION_CREATED","version":expected_version+1,"inspection_id":inspection["id"]}
-    except IntegrityError:
-        db.rollback(); raise HTTPException(409,"Concurrent inspection conflict") from None
+        return {"id": candidate_id, "state": result["state"], "version": result["version"],
+                "inspection_id": result["inspection_id"]}
+    except CandidatePromotionError as error:
+        db.rollback(); raise HTTPException(error.status, error.detail) from None
+    except IntegrityError as error:
+        db.rollback()
+        if not is_unique_violation(error):
+            raise
+        raise HTTPException(409, "Concurrent inspection conflict") from None
     except HTTPException:
         db.rollback(); raise
     except Exception:

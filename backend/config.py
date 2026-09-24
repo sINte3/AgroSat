@@ -83,6 +83,13 @@ class Settings(BaseSettings):
     # operator supplies an absolute runtime-owned directory outside the repo.
     inspection_media_directory: str = ""
 
+    # TASK_225 canonical signal producer inside the collector's apply cycle.
+    # Off until the deployment enables it after reviewing
+    # scripts/preview_observation_candidates.py against the live data: the
+    # first cycle otherwise records every current robust NDVI drop at once,
+    # seasonal harvest drops included.
+    observation_detection_enabled: bool = False
+
     @field_validator("sentinel_hub_provider", mode="before")
     @classmethod
     def validate_sentinel_hub_provider(cls, value: object) -> str:
