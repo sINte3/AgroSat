@@ -41,7 +41,7 @@ const managementSummary = {
 };
 
 const executiveOverview = {
-  definitions_version: 'task209_executive_v1',
+  definitions_version: 'task225_canonical_backlog_v1',
   generated_at: '2026-07-28T12:00:00+05:00',
   timezone: 'Asia/Tashkent',
   scope: { role: 'manager', enterprise_id: 5 },
@@ -109,7 +109,7 @@ function accountability(parsed) {
   const kind = parsed.searchParams.get('kind') || 'overdue_actions';
   const ownerId = parsed.searchParams.get('owner_id');
   return {
-    definitions_version: 'task209_executive_v1',
+    definitions_version: 'task225_canonical_backlog_v1',
     generated_at: '2026-07-28T12:00:00+05:00',
     timezone: 'Asia/Tashkent',
     scope: { role: activeRole, enterprise_id: 5 },
@@ -123,6 +123,7 @@ function accountability(parsed) {
       id: 401,
       inspection_id: 101,
       action_id: 401,
+      plan_id: 31,
       field_id: 11,
       field_name: 'Synthetic Field',
       enterprise_id: 5,
@@ -308,7 +309,7 @@ for (const [width, height] of [[1440, 900], [1024, 768], [390, 844]]) {
 const managerScreenshot = await send('Page.captureScreenshot', { format: 'png', fromSurface: true });
 
 const openedOverdue = await evaluate(`(() => {
-  const button = [...document.querySelectorAll('button')].find((item) => item.textContent.includes('Просроченные действия'));
+  const button = [...document.querySelectorAll('button')].find((item) => item.textContent.includes('Просроченные работы по планам'));
   button?.click();
   return Boolean(button);
 })()`);
@@ -321,7 +322,7 @@ await evaluate(`(() => {
   close?.click();
 })()`);
 const openedOwner = await evaluate(`(() => {
-  const button = [...document.querySelectorAll('button')].find((item) => item.textContent.includes('3 незакрыто'));
+  const button = [...document.querySelectorAll('button')].find((item) => item.textContent.includes('3 в работе'));
   button?.click();
   return Boolean(button);
 })()`);

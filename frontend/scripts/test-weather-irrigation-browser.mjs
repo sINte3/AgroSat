@@ -130,23 +130,24 @@ function fixtureFor(url, method, postData) {
     events.unshift(item);
     return { status: 201, body: { created: true, event: item } };
   }
-  if (parsed.pathname === '/api/field-inspections' && method === 'POST') {
+  if (parsed.pathname === '/api/field-inspections' && method !== 'GET') {
+    // TASK_225 retired the legacy create; the frontend must never call it.
+    return { status: 410, body: { detail: { code: 'lifecycle_endpoint_retired' } } };
+  }
+  if (parsed.pathname === '/api/anomaly-inspections' && method === 'POST') {
     activeInspection = {
       id: 209,
-      status: 'pending',
-      source: body?.source,
-      source_priority: body?.source_priority,
-      source_observation_date: body?.source_observation_date,
-      source_reason_codes: body?.source_reason_codes,
+      status: body?.assigned_to_id ? 'assigned' : 'new',
+      source: body?.source_kind,
+      source_priority: body?.priority,
+      source_observation_date: null,
+      source_reason_codes: [],
     };
     return {
       status: 201,
       body: {
         created: true,
-        inspection: {
-          ...activeInspection,
-          field: { id: 1, name: 'TASK209 Fixture Field', enterprise_id: 901 },
-        },
+        inspection: { id: 209, status: activeInspection.status, field_id: 1, field_name: 'TASK209 Fixture Field' },
       },
     };
   }
@@ -361,6 +362,14 @@ for (const [width, height] of [[1920, 1080], [1440, 900], [1024, 768], [390, 844
 await clickText('Зафиксировать событие');
 await waitFor(`document.querySelector('[aria-labelledby="irrigation-event-list-title"]')?.innerText.includes('TASK209 manager')`);
 await waitFor(`document.body.innerText.includes('Создать осмотр')`);
+// TASK_226: the canonical inspection requires an explicit deadline.
+const dueInput = new Date(Date.now() + 2 * 86400000 + 5 * 3600000).toISOString().slice(0, 16);
+await evaluate(`(() => {
+  const form = [...document.querySelectorAll('form')].find((item) => item.textContent.includes('Назначить проверку поля'));
+  const input = form.querySelector('input[type="datetime-local"]');
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, ${JSON.stringify(dueInput)});
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+})()`);
 await clickText('Создать осмотр');
 await waitFor(`document.body.innerText.includes('Активный осмотр #209')`);
 
@@ -368,13 +377,14 @@ const managerWrites = apiRequests.filter((item) => item.method !== 'GET');
 assert.equal(managerWrites.length, 2);
 assert.deepEqual(managerWrites.map((item) => item.path), [
   '/api/irrigation-context/fields/1/events',
-  '/api/field-inspections',
+  '/api/anomaly-inspections',
 ]);
 assert.equal(managerWrites[0].body.evidence_source, 'human_reported');
 assert.match(managerWrites[0].body.occurred_at, /\+05:00$/);
-assert.equal(managerWrites[1].body.source, 'irrigation_context');
-assert.equal(managerWrites[1].body.source_attention_score, null);
-assert.equal(Array.isArray(managerWrites[1].body.source_reason_codes), true);
+assert.equal(managerWrites[1].body.source_kind, 'manual');
+assert.match(managerWrites[1].body.reason, /^Контекст орошения: /);
+assert.equal(managerWrites[1].body.due_at, `${dueInput}:00+05:00`);
+assert.equal('source' in managerWrites[1].body, false);
 
 role = 'viewer';
 const writesBeforeViewer = managerWrites.length;

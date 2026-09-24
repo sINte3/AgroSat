@@ -146,7 +146,7 @@ try {
     if (viewport.name === 'desktop') {
       const destinations = [
         [`Осмотр #${inspectionId}`, `/inspections/${inspectionId}`],
-        ['Меры и контроль', `/agronomy-plans/${planId}`],
+        [`План мер #${planId}`, `/agronomy-plans/${planId}`],
         ['Поле', `/fields/${fieldId}`],
         ['Мониторинг', '/monitoring'],
       ];

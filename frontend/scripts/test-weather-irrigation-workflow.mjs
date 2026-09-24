@@ -7,11 +7,12 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (name) => readFile(path.join(root, name), 'utf8');
 
-const [api, panel, wrapper, fieldDetail] = await Promise.all([
+const [api, panel, wrapper, fieldDetail, requests] = await Promise.all([
   read('src/api/irrigationContext.js'),
   read('src/components/Field/FieldIrrigationContextPanel.jsx'),
   read('src/components/Field/WeatherWidget.jsx'),
   read('src/components/Field/FieldDetail.jsx'),
+  read('src/utils/inspectionRequests.js'),
 ]);
 
 assert.match(api, /irrigation-context\/fields\/\$\{fieldId\}/);
@@ -22,12 +23,20 @@ assert.doesNotMatch(api, /open-meteo\.com|token|password|Authorization/i);
 assert.match(panel, /new AbortController\(\)/);
 assert.match(panel, /controller\.abort\(\)/);
 assert.match(panel, /generationRef/);
-assert.match(panel, /source: 'irrigation_context'/);
-assert.match(panel, /source_attention_score: null/);
-assert.match(panel, /source_reason_codes: \[reason\]/);
+// TASK_226: the irrigation context creates a canonical manual inspection
+// (POST /api/anomaly-inspections); the retired TASK_209 create is never used.
+assert.match(panel, /createAnomalyInspection\(payload, keyRef\.current, controller\.signal\)/);
+assert.match(panel, /source_kind: 'manual'/);
+assert.match(panel, /reason: irrigationInspectionReason\(reason\)/);
+assert.match(panel, /due_at: parsed\.state === 'valid' \? parsed\.iso : null/);
+assert.match(panel, /type="datetime-local" required/);
+assert.match(panel, /Срок осмотра \(Ташкент\)/);
+assert.match(panel, /canCreateInspections\(role\)/);
+assert.doesNotMatch(panel, /source: 'irrigation_context'|source_reason_codes|createFieldInspection|field-inspections/);
 assert.match(panel, /evidence_source: 'human_reported'/);
-assert.match(panel, /water_stress_suspicion/);
-assert.match(panel, /irrigation_interruption/);
+assert.match(requests, /water_stress_suspicion/);
+assert.match(requests, /irrigation_interruption/);
+assert.match(requests, /Контекст орошения: /);
 assert.match(panel, /не подтверждают агрономическую\s+причину/i);
 assert.match(panel, /Погодный контекст недоступен/);
 assert.match(panel, /Подтверждённые события/);

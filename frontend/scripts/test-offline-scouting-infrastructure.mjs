@@ -5,10 +5,9 @@ import { fileURLToPath } from 'node:url';
 
 import {
   OFFLINE_SCOUTING_LIMITS,
-  createOfflineDraft,
+  createAnomalyWorkflowDraft,
   offlineScope,
 } from '../src/offline/offlineScoutingStore.js';
-import { classifyOfflineSyncError } from '../src/offline/offlineScoutingSync.js';
 import {
   isSessionRevoked,
   isTransientSessionFailure,
@@ -16,15 +15,21 @@ import {
 } from '../src/offline/offlineSession.js';
 
 
+// TASK_226: the TASK_209 offline queue (result -> evidence -> corrective action)
+// synchronized to endpoints TASK_225 retired (HTTP 410) and was removed with
+// its unrouted UI. Offline scouting is the canonical finding draft of
+// AnomalyInspectionDetail, partitioned per enterprise:user, and it survives an
+// involuntary loss of the web session.
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const read = (relative) => fs.readFileSync(path.join(root, relative), 'utf8');
 const store = read('src/offline/offlineScoutingStore.js');
-const sync = read('src/offline/offlineScoutingSync.js');
+const session = read('src/auth/session.js');
+const client = read('src/api/client.js');
+const auth = read('src/context/AuthContext.jsx');
+const sidebar = read('src/components/Layout/Sidebar.jsx');
 const worker = read('public/sw.js');
-const statusPanel = read('src/components/Inspections/OfflineScoutingStatus.jsx');
-const draftPanel = read('src/components/Inspections/OfflineScoutingPanel.jsx');
-const listPage = read('src/pages/FieldInspectionsPage.jsx');
-const detailDrawer = read('src/components/Inspections/InspectionDetailDrawer.jsx');
+const detail = read('src/components/Inspections/AnomalyInspectionDetail.jsx');
+const queuePage = read('src/pages/AnomalyInspectionsPage.jsx');
 
 assert.equal(offlineScope({ id: 5, enterprise_id: 7 }), '7:5');
 assert.equal(offlineScope({ id: 5, enterprise_id: null }), null);
@@ -33,60 +38,17 @@ assert.deepEqual(OFFLINE_SCOUTING_LIMITS, {
   maxSnapshots: 100,
   maxDrafts: 100,
   maxQueue: 200,
-  maxEvidence: 20,
   maxRecordBytes: 512 * 1024,
 });
 
-const draft = createOfflineDraft({
-  scope: '7:5',
-  inspection: { id: 11, version: 3 },
-  result: { cause_code: 'irrigation', cause_details: 'Fixture observation' },
-  evidence: [{ evidence_type: 'geolocation', latitude: 39.7, longitude: 64.1 }],
-  action: {
-    owner_id: 5,
-    description: 'Inspect the irrigation outlet',
-    due_date: '2026-08-01',
-  },
-});
-assert.equal(draft.baseVersion, 3);
-assert.equal(draft.evidence.length, 1);
-assert.match(draft.idempotency.result, /^[A-Za-z0-9._:-]{8,64}$/);
-assert.match(draft.idempotency.evidence[0], /^[A-Za-z0-9._:-]{8,64}$/);
-assert.match(draft.idempotency.action, /^[A-Za-z0-9._:-]{8,64}$/);
-assert.equal(new Set([
-  draft.idempotency.result,
-  draft.idempotency.evidence[0],
-  draft.idempotency.action,
-]).size, 3);
-
+const draftA = createAnomalyWorkflowDraft({ scope: '7:5', inspectionId: 11, baseVersion: 3, finding: { cause: 'pest' } });
+const draftB = createAnomalyWorkflowDraft({ scope: '7:6', inspectionId: 11, baseVersion: 3, finding: { cause: 'pest' } });
+assert.notEqual(draftA.key, draftB.key, 'two users never share a draft key for the same inspection');
+assert.ok(draftA.key.startsWith('7:5:') && draftB.key.startsWith('7:6:'));
 assert.throws(
-  () => createOfflineDraft({
-    scope: '7:5',
-    inspection: { id: 11, version: 3 },
-    result: { cause_code: 'irrigation', access_token: 'forbidden' },
-  }),
+  () => createAnomalyWorkflowDraft({ scope: '7:5', inspectionId: 11, baseVersion: 3, finding: { refresh_token: 'x' } }),
   /forbidden credential field/,
 );
-assert.throws(
-  () => createOfflineDraft({
-    scope: '7:5',
-    inspection: { id: 11, version: 3 },
-    result: { cause_code: 'irrigation' },
-    evidence: Array.from({ length: 21 }, () => ({ evidence_type: 'geolocation' })),
-  }),
-  /evidence metadata limit/,
-);
-
-assert.deepEqual(classifyOfflineSyncError({ response: { status: 409 } }), {
-  status: 'conflict',
-  category: 'conflict',
-  retryable: false,
-});
-assert.deepEqual(classifyOfflineSyncError({ code: 'ECONNABORTED' }), {
-  status: 'queued',
-  category: 'transient',
-  retryable: true,
-});
 
 const cachedUser = readCachedActiveUser({
   getItem: () => JSON.stringify({
@@ -113,62 +75,53 @@ assert.equal(isSessionRevoked({ response: { status: 403 } }), true);
 assert.equal(isSessionRevoked({ code: 'ERR_NETWORK' }), false);
 
 for (const required of [
-  "const DATABASE_VERSION = 1",
-  "const MAX_SNAPSHOTS = 100",
-  "const MAX_DRAFTS = 100",
-  "const MAX_QUEUE = 200",
-  "const MAX_EVIDENCE = 20",
-  'deleteDatabase(DATABASE_NAME)',
+  'const DATABASE_VERSION = 1',
+  'const MAX_SNAPSHOTS = 100',
+  'const MAX_DRAFTS = 100',
+  'const MAX_QUEUE = 200',
   'contains unsupported binary content',
+  'export async function purgeOfflineScope(scope)',
+  'export async function listOfflineDrafts(scope)',
+  "item?.scope === scope",
 ]) {
   assert.ok(store.includes(required), `missing store contract: ${required}`);
 }
-for (const required of [
-  'recordInspectionResult(',
-  'attachInspectionEvidence(',
-  'createCorrectiveAction(',
-  'expected_version: progress.currentVersion',
-  'expected_inspection_version: progress.currentVersion',
-  'markOfflineSynchronized',
-]) {
-  assert.ok(sync.includes(required), `missing sync contract: ${required}`);
-}
+assert.doesNotMatch(store, /deleteDatabase|purgeOfflineScoutingData|enqueueOfflineDraft|syncOfflineQueue/);
+assert.ok(!fs.existsSync(path.join(root, 'src/offline/offlineScoutingSync.js')), 'retired TASK_209 sync is removed');
+
+// A. involuntary session loss: storage credential only.
+assert.match(session, /export function invalidateSession\(/);
+assert.doesNotMatch(session.slice(session.indexOf('export function invalidateSession('), session.indexOf('export async function logoutExplicitly(')), /purgeOffline|indexedDB/);
+assert.match(client, /status === 401 && !config\?\.__skipSessionInvalidation/);
+assert.doesNotMatch(client, /purgeOffline|offlineScoutingStore|indexedDB/);
+// B. explicit logout: only the user's own partition.
+assert.match(session, /export async function logoutExplicitly\(user\)[\s\S]*purgeOfflineScope\(scope\)/);
+assert.match(sidebar, /listOfflineDrafts\(scope\)/);
+assert.match(sidebar, /Несинхронизированные черновики/);
+assert.match(sidebar, /Выйти и удалить/);
+// C. identity change: caches only.
+assert.match(session, /export function beginSession\(token, user, previousUser\)/);
+assert.match(auth, /SESSION_INVALIDATED_EVENT/);
+assert.doesNotMatch(auth, /purgeOffline|deleteDatabase|indexedDB/);
+assert.match(auth, /window\.addEventListener\('storage', handleStorageChange\)/);
+
+// Recovery path after re-authentication.
+assert.match(detail, /getOfflineDraft\(scope, detail\.id\)/);
+assert.match(detail, /saved\.scope !== scope/);
+assert.match(detail, /saved\.status === 'pending_sync' && navigator\.onLine/);
+assert.match(queuePage, /Несинхронизированные черновики на этом устройстве/);
+
 assert.match(worker, /url\.pathname\.startsWith\('\/api\/'\)/);
 assert.doesNotMatch(worker, /sync|authorization|cookie|token/i);
 assert.match(worker, /CACHE_NAME = `\$\{CACHE_PREFIX\}v1`/);
-for (const required of [
-  'Отправка не начнётся автоматически',
-  'syncOfflineQueue(scope',
-  "window.addEventListener('online'",
-  "window.removeEventListener('online'",
-]) {
-  assert.ok(statusPanel.includes(required), `missing offline status contract: ${required}`);
-}
-for (const required of [
-  'Офлайн-черновик осмотра',
-  'Изменения ещё не являются серверными данными',
-  'Конфликт версии',
-  'syncOfflineQueueItem',
-  'crypto.subtle.digest',
-  'Файл не сохраняется офлайн и не загружается',
-  'controllerRef.current?.abort()',
-]) {
-  assert.ok(draftPanel.includes(required), `missing offline draft contract: ${required}`);
-}
-assert.match(listPage, /getCachedAssignedInspections/);
-assert.match(listPage, /state === 'offline'/);
-assert.match(detailDrawer, /getCachedInspectionDetail/);
-assert.match(detailDrawer, /offline=\{state === 'offline'\}/);
 
 console.log(JSON.stringify({
   status: 'PASS',
+  suite: 'Offline scouting contract (TASK_226 session model)',
   databaseVersion: 1,
-  partition: draft.scope,
-  orderedWriteSteps: 3,
-  stableIdempotencyKeys: 3,
-  maxEvidence: OFFLINE_SCOUTING_LIMITS.maxEvidence,
+  partition: draftA.scope,
+  globalPurge: 0,
+  involuntaryLossPurges: 0,
+  explicitLogoutScope: 'own partition only',
   apiCachePaths: 0,
-  binaryPayloads: 0,
-  manualSyncControls: 2,
-  offlineFallbacks: 2,
 }));
