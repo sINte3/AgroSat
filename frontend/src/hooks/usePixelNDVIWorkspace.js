@@ -238,10 +238,15 @@ export default function usePixelNDVIWorkspace({
       let loadedA = null;
       let loadedB = null;
       try {
-        [loadedA, loadedB] = await Promise.all([
+        // allSettled, not all: when one scene fails or is aborted, the object URL
+        // already created for the other scene must still be revoked below.
+        const settled = await Promise.allSettled([
           loadScene(sceneA),
           comparisonEnabled && sceneB ? loadScene(sceneB) : Promise.resolve(null),
         ]);
+        [loadedA, loadedB] = settled.map((result) => (result.status === 'fulfilled' ? result.value : null));
+        const failure = settled.find((result) => result.status === 'rejected');
+        if (failure) throw failure.reason;
         if (generation !== generationRef.current || controller.signal.aborted || !mountedRef.current) return;
         let imageB = null;
         let clippedUrl = null;
