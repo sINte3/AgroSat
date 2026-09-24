@@ -84,8 +84,24 @@ def recommend(snapshot):
     }
 
 
-def evaluate(baseline, post, completed_at, as_of, *, freshness=None, zone_required=False):
-    """Dates are day-resolution; the first eligible date is conservatively after wait."""
+SCOPE_EXPLANATIONS = {
+    "comparable": "Область проверки — всё поле: зона обнаружения совпадает с полем, исходное и последующее значения измерены по одной и той же границе. ",
+    "zone_statistics_unavailable": "Для локальной зоны нет сохранённой статистики наблюдений; среднее по полю не подтверждает восстановление зоны. ",
+    "zone_geometry_changed": "Граница поля изменилась после фиксации области проверки; значения несопоставимы. ",
+    "baseline_missing": "Нет принятого исходного наблюдения по области проверки. ",
+    "baseline_outside_scope": "Исходное наблюдение относится к другой области, чем зона проверки. ",
+    "post_outside_scope": "Последующее наблюдение относится к другой области, чем зона проверки. ",
+    "scope_not_recorded": "Область проверки не зафиксирована; среднее по полю не подтверждает восстановление локальной зоны. ",
+}
+
+
+def evaluate(baseline, post, completed_at, as_of, *, freshness=None, zone_required=False, scope=None):
+    """Dates are day-resolution; the first eligible date is conservatively after wait.
+
+    ``scope`` is the spatial-scope comparison (services.closed_loop_agronomy
+    .scope_comparison). It never changes the thresholds; it only explains why
+    a zone-required verification is or is not comparable.
+    """
     eligible = day(completed_at) + timedelta(days=WAIT_DAYS + 1)
     status, delta = "PENDING_DATA", None
     if day(as_of) < eligible:
@@ -115,11 +131,21 @@ def evaluate(baseline, post, completed_at, as_of, *, freshness=None, zone_requir
     }
     def describe(value):
         return f"{value['date']}: NDVI {value.get('value')}, облачность {value.get('cloud')}%, пригодные пиксели {value.get('valid')}%" if value else "нет данных"
+    if scope is None:
+        scope_text = ("Среднее по полю не подтверждает восстановление локальной зоны. "
+                      if zone_required and status == "INCONCLUSIVE" else "")
+        statistics_scope = "zone" if post and post.get("zone_key") else "field"
+    else:
+        # Only persisted field statistics exist; the scope says whether the
+        # field is the zone being verified.
+        scope_text = SCOPE_EXPLANATIONS.get(scope.get("reason"), "") if zone_required else ""
+        statistics_scope = "field"
     return {
         "status": status, "baseline": baseline, "post": post, "delta": delta,
         "policy_version": POLICY, "eligible_from": eligible.isoformat(),
-        "statistics_scope": "zone" if post and post.get("zone_key") else "field",
+        "statistics_scope": statistics_scope,
+        "scope": scope,
         "explanation": f"{labels[status]}. Исходное: {describe(baseline)}. Последующее: {describe(post)}. Порог ±{MATERIAL_DELTA}; ожидание {WAIT_DAYS} полных дней; правило {POLICY}. "
-                       + ("Среднее по полю не подтверждает восстановление локальной зоны. " if zone_required and status == "INCONCLUSIVE" else "")
+                       + scope_text
                        + "Наблюдаемое изменение не доказывает причинный эффект выполненных работ.",
     }

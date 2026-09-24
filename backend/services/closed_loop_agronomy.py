@@ -15,6 +15,7 @@ from database import Base
 from services import anomaly_inspections as inspections
 from services import agronomy_policy as policy
 from services import observation_quality
+from services.autonomous_anomaly_engine import field_zone_key
 
 DECISION_ROLES = {'admin', 'manager', 'agronomist'}
 TERMINAL = {'closed', 'cancelled', 'superseded'}
@@ -123,7 +124,13 @@ def _write(operation):
     return execute
 
 
-def observation(db, field_id, *, before=None, after=None, identifier=None, accepted=True):
+def observation(db, field_id, *, before=None, after=None, identifier=None, accepted=True, scope=None, field_hash=None):
+    """One persisted NDVI field observation.
+
+    With a field-scope verification scope, the observation is labelled with
+    the zone it covers: the field's *current* geometry. A field observation is
+    only ever labelled with its own field's zone, never with a sub-field zone.
+    """
     params = {'field':field_id}
     where = 'field_id=:field'
     if before:
@@ -134,19 +141,81 @@ def observation(db, field_id, *, before=None, after=None, identifier=None, accep
         where += ' AND id=:id'; params['id']=identifier
     if accepted:
         where += ' AND ' + _ACCEPTED_NDVI_OBSERVATION
-    return one(db, 'SELECT id,captured_date AS date,mean_ndvi AS value,min_ndvi AS min,max_ndvi AS max,p10_ndvi AS p10,p90_ndvi AS p90,cloud_cover_pct AS cloud,valid_pixels_pct AS valid,satellite FROM ndvi_records WHERE '+where+' ORDER BY captured_date DESC,id DESC LIMIT 1', params)
+    found = one(db, 'SELECT id,captured_date AS date,mean_ndvi AS value,min_ndvi AS min,max_ndvi AS max,p10_ndvi AS p10,p90_ndvi AS p90,cloud_cover_pct AS cloud,valid_pixels_pct AS valid,satellite FROM ndvi_records WHERE '+where+' ORDER BY captured_date DESC,id DESC LIMIT 1', params)
+    if found is not None and scope and scope.get('kind') == 'field' and field_hash:
+        found.update(scope='field', zone_key=field_zone_key(field_id, field_hash), field_geometry_hash=field_hash)
+    return found
+
+
+# -- Verification scope (TASK_225) --------------------------------------------
+# A plan is verified over one explicit spatial scope, frozen into its input
+# snapshot at draft. Only persisted field statistics exist, so a scope is
+# verifiable when it IS the field; a sub-field zone or a point has no stored
+# zonal statistic and verifies to a typed INCONCLUSIVE instead of silently
+# borrowing the field mean.
+SCOPE_VERSION = 'task225-verification-scope-v1'
+ZONE_STATISTICS_UNAVAILABLE = 'zone_statistics_unavailable'
+
+
+def field_geometry_hash(db, field_id, enterprise_id):
+    found = one(db, 'SELECT ST_AsGeoJSON(geometry)::json AS geometry FROM fields WHERE id=:field AND enterprise_id=:enterprise', {'field':field_id, 'enterprise':enterprise_id})
+    return inspections.geometry_hash(found['geometry']) if found else None
+
+
+def verification_scope(db, source, current):
+    """Freeze the spatial scope of a plan; ``current`` is today's field geometry hash."""
+    candidate = one(db, 'SELECT id,zone_key,evidence FROM autonomous_anomaly_candidates WHERE inspection_id=:id AND field_id=:field AND enterprise_id=:enterprise', {'id':source['id'], 'field':source['field_id'], 'enterprise':source['enterprise_id']})
+    spatial = one(db, 'SELECT i.source_zone IS NOT NULL AS has_zone,i.source_point IS NOT NULL AS has_point,CASE WHEN i.source_zone IS NULL THEN NULL ELSE ST_Equals(ST_Multi(i.source_zone),ST_Multi(f.geometry)) END AS zone_is_field FROM field_inspections i JOIN fields f ON f.id=i.field_id AND f.enterprise_id=i.enterprise_id WHERE i.id=:id AND i.enterprise_id=:enterprise', {'id':source['id'], 'enterprise':source['enterprise_id']}) or {}
+    scope = {'version':SCOPE_VERSION, 'index_code':'ndvi', 'metric':'mean_ndvi', 'source':f"inspection:{source['id']}", 'field_geometry_hash':current}
+    evidence = (candidate or {}).get('evidence') or {}
+    if candidate and evidence.get('scope') == 'field' and evidence.get('field_geometry_hash'):
+        # The detection geometry, not today's: a boundary edited since
+        # detection makes the case non-comparable rather than re-scoped.
+        return {**scope, 'kind':'field', 'zone_key':candidate['zone_key'], 'field_geometry_hash':evidence['field_geometry_hash'],
+                'statistics':'persisted_field_observation', 'source':f"candidate:{candidate['id']}"}
+    if spatial.get('has_zone') and spatial.get('zone_is_field') and current:
+        return {**scope, 'kind':'field', 'zone_key':field_zone_key(source['field_id'], current), 'statistics':'persisted_field_observation'}
+    if candidate or spatial.get('has_zone') or spatial.get('has_point'):
+        return {**scope, 'kind':'point' if spatial.get('has_point') else 'subfield', 'zone_key':(candidate or {}).get('zone_key'),
+                'statistics':'unavailable', 'reason':ZONE_STATISTICS_UNAVAILABLE}
+    return {**scope, 'kind':'unscoped', 'zone_key':None, 'statistics':'persisted_field_observation'}
+
+
+def scope_comparison(scope, baseline, post, field_hash):
+    """Whether baseline and post measure the same spatial scope, and why not."""
+    report = {'kind':scope['kind'], 'zone_key':scope.get('zone_key'), 'statistics':scope.get('statistics'),
+              'frozen_field_geometry_hash':scope.get('field_geometry_hash'), 'current_field_geometry_hash':field_hash,
+              'baseline_zone_key':(baseline or {}).get('zone_key'), 'post_zone_key':(post or {}).get('zone_key')}
+    if scope['kind'] == 'unscoped':
+        comparable, reason = True, 'unscoped_field_statistics'
+    elif scope['kind'] != 'field':
+        comparable, reason = False, ZONE_STATISTICS_UNAVAILABLE
+    elif field_hash != scope.get('field_geometry_hash'):
+        comparable, reason = False, 'zone_geometry_changed'
+    elif not baseline:
+        comparable, reason = False, 'baseline_missing'
+    elif report['baseline_zone_key'] != scope.get('zone_key'):
+        comparable, reason = False, 'baseline_outside_scope'
+    elif post is not None and report['post_zone_key'] != scope.get('zone_key'):
+        comparable, reason = False, 'post_outside_scope'
+    else:
+        comparable, reason = True, 'comparable'
+    report.update(comparable=comparable, reason=reason)
+    return report
 
 
 def source_snapshot(db, source):
     finding = one(db, 'SELECT cause_code,cause_details,severity,observations,recommended_action,affected_area_ha,affected_area_pct FROM inspection_results WHERE inspection_id=:id', {'id':source['id']})
-    baseline = observation(db, source['field_id'], before=now())
+    current = field_geometry_hash(db, source['field_id'], source['enterprise_id'])
+    scope = verification_scope(db, source, current)
+    baseline = observation(db, source['field_id'], before=now(), scope=scope, field_hash=current)
     season = one(db, 'SELECT s.season_year,s.variety,s.planting_date,s.expected_harvest_date,c.name_ru AS crop_name FROM crop_seasons s JOIN crop_types c ON c.id=s.crop_type_id WHERE s.field_id=:field AND s.season_year=:year ORDER BY s.id DESC LIMIT 1', {'field':source['field_id'], 'year':now().year})
     freshness = one(db, "SELECT status,last_accepted_at,last_quality_reason,last_failure_reason FROM satellite_field_freshness WHERE field_id=:field AND enterprise_id=:enterprise AND index_code='ndvi'", {'field':source['field_id'], 'enterprise':source['enterprise_id']})
     indices = rows(db, "SELECT DISTINCT ON (index_code) index_code,captured_date,mean_value,valid_pixels_pct,cloud_cover_pct FROM satellite_index_records WHERE field_id=:field AND captured_date<=CURRENT_DATE AND " + _ACCEPTED_INDEX_OBSERVATION + " ORDER BY index_code,captured_date DESC LIMIT 5", {'field':source['field_id']})
     candidate = one(db, 'SELECT id,source_key,zone_key,scene_id,confidence,evidence,explanation FROM autonomous_anomaly_candidates WHERE inspection_id=:id AND field_id=:field AND enterprise_id=:enterprise', {'id':source['id'], 'field':source['field_id'], 'enterprise':source['enterprise_id']})
     return jsonable_encoder({'as_of':now().date(), 'inspection_version':source['version'], 'finding':finding, 'baseline':baseline,
         'season':season, 'freshness':freshness, 'indices':indices, 'candidate':candidate,
-        'source':inspections._inspection_item(source)['source']})
+        'source':inspections._inspection_item(source)['source'], 'verification_scope':scope})
 
 
 def create_plan(db, actor, source, snapshot, *, supersedes=None):
@@ -262,16 +331,15 @@ def reconcile_candidate(db, actor, plan, target, reason):
 
 
 def follow_up(db, actor, plan, reason, key):
-    """Create within this transaction using the accepted inspection schema/history."""
+    """Open the re-inspection through the canonical INSERT, in this transaction."""
     request_key = 'f-reinspect-' + hashlib.sha256(key.encode()).hexdigest()[:40]
-    inspection = insert(db, 'field_inspections', {
-        'enterprise_id':plan['enterprise_id'], 'field_id':plan['field_id'], 'created_by_id':actor.user_id,
-        'updated_by_id':actor.user_id, 'client_request_id':request_key, 'request_fingerprint':fingerprint('reinspection',plan['id'],reason),
-        'source':'manual', 'source_kind':'manual', 'source_priority':plan['priority'], 'source_reason_codes':[],
-        'title':'Повторный осмотр по плану '+str(plan['id']), 'instructions':reason, 'source_reason':reason,
-        'priority':plan['priority'], 'status':'new', 'follow_up_of_id':plan['inspection_id'],
-    })
-    inspections._audit(db, actor, inspection, 'inspection_created', inspection['version'], {'reason':reason})
+    inspection = inspections.insert_inspection(
+        db, actor=actor, field_id=plan['field_id'], enterprise_id=plan['enterprise_id'],
+        source=inspections.InspectionSource(kind='manual', reason=reason),
+        client_request_id=request_key, request_fingerprint=fingerprint('reinspection',plan['id'],reason),
+        title='Повторный осмотр по плану '+str(plan['id']), priority=plan['priority'],
+        follow_up_of_id=plan['inspection_id'], origin=f"agronomy_plan:{plan['id']}",
+    )
     return inspection['id']
 
 
@@ -288,7 +356,9 @@ def transition(db, user, identifier, payload, key):
         if not work or any(i['status']!='planned' or not i['assigned_to_id'] or not i['due_at'] for i in work):
             raise HTTPException(409, 'Approval requires assigned work with deadlines')
         for item in work: validate_assignment(db,plan,item['assigned_to_id'])
-        baseline = observation(db, plan['field_id'], before=now())
+        scope = (plan['input_snapshot'] or {}).get('verification_scope')
+        baseline = observation(db, plan['field_id'], before=now(), scope=scope,
+                               field_hash=field_geometry_hash(db, plan['field_id'], plan['enterprise_id']))
         values.update(status='approved', approved_at=now(), approved_by_id=actor.user_id,
                       baseline_record_id=baseline['id'] if baseline else None, baseline=jsonable_encoder(baseline))
     elif operation=='cancel':
@@ -375,17 +445,29 @@ def work_transition(db,user,identifier,item_id,payload,key):
 def evaluate_plan(db,actor,plan,key,digest,*,observation_id=None,reason='Scheduled accepted-observation reconciliation'):
     if plan['status']!='pending_verification' or not plan['completed_at']: raise HTTPException(409,'A completed plan is required')
     first_after=policy.day(plan['completed_at'])+timedelta(days=policy.WAIT_DAYS)
-    post=observation(db,plan['field_id'],after=first_after,identifier=observation_id,accepted=True)
+    scope=(plan['input_snapshot'] or {}).get('verification_scope')
+    field_hash=field_geometry_hash(db,plan['field_id'],plan['enterprise_id'])
+    post=observation(db,plan['field_id'],after=first_after,identifier=observation_id,accepted=True,scope=scope,field_hash=field_hash)
     if observation_id and not post: raise HTTPException(422,'Observation is not an eligible accepted post-completion scene')
     freshness=one(db,"SELECT status FROM satellite_field_freshness WHERE enterprise_id=:enterprise AND field_id=:field AND index_code='ndvi'",{'enterprise':plan['enterprise_id'],'field':plan['field_id']})
     state=(freshness or {}).get('status')
     if not post:
         rejected=observation(db,plan['field_id'],after=first_after,accepted=False)
         if rejected: state=policy.quality(rejected) or state
-    source=plan['input_snapshot'].get('source') or {}
-    zone_required=bool(source.get('zone') or source.get('point') or plan['candidate_id'])
-    measurement=policy.evaluate(plan['baseline'],post,plan['completed_at'],now(),freshness=state,zone_required=zone_required)
-    evaluation_key=hashlib.sha256(json.dumps({'post':post['id'] if post else None,'status':measurement['status'],'baseline':plan['baseline_record_id']},sort_keys=True).encode()).hexdigest()
+    if scope is None:
+        # Drafted before TASK_225: no frozen scope, so a spatial source can
+        # never be shown comparable. Unchanged, conservative behaviour.
+        source=plan['input_snapshot'].get('source') or {}
+        zone_required=bool(source.get('zone') or source.get('point') or plan['candidate_id'])
+        comparison={'kind':'legacy_unscoped','comparable':not zone_required,
+                    'reason':'scope_not_recorded' if zone_required else 'unscoped_field_statistics'}
+    else:
+        zone_required=scope['kind']!='unscoped'
+        comparison=scope_comparison(scope,plan['baseline'],post,field_hash)
+        if zone_required and not comparison['comparable'] and post:
+            post={**post,'zone_key':None}
+    measurement=policy.evaluate(plan['baseline'],post,plan['completed_at'],now(),freshness=state,zone_required=zone_required,scope=comparison)
+    evaluation_key=hashlib.sha256(json.dumps({'post':post['id'] if post else None,'status':measurement['status'],'baseline':plan['baseline_record_id'],'scope':[comparison['kind'],comparison['reason']]},sort_keys=True).encode()).hexdigest()
     existing=one(db,'SELECT id,status FROM agronomy_verifications WHERE plan_id=:id AND cycle=:cycle AND evaluation_key=:key AND policy_version=:policy',{'id':plan['id'],'cycle':plan['cycle'],'key':evaluation_key,'policy':policy.POLICY})
     if existing:
         response=result(plan,verification_id=existing['id'])
