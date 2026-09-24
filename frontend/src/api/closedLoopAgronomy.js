@@ -4,7 +4,7 @@ const key = () => `agronomy-${globalThis.crypto?.randomUUID?.() || `${Date.now()
 export const listAgronomyPlans = async (params = {}, signal) => (await client.get('agronomy-plans/queue', { params, signal })).data;
 export const getAgronomySummary = async (params = {}, signal) => (await client.get('agronomy-plans/summary', { params, signal })).data;
 export const getAgronomyPlan = async (id, signal) => (await client.get(`agronomy-plans/${id}`, { signal })).data;
-export const createAgronomyDraft = async (inspectionId, reason) => (await client.post('agronomy-plans', { inspection_id: inspectionId, reason }, { headers: { 'Idempotency-Key': key() } })).data;
+export const createAgronomyDraft = async (inspectionId, reason, requestKey = key()) => (await client.post('agronomy-plans', { inspection_id: inspectionId, reason }, { headers: { 'Idempotency-Key': requestKey } })).data;
 export const editAgronomyPlan = async (id, payload, requestKey = key()) => (await client.put(`agronomy-plans/${id}`, payload, { headers: { 'Idempotency-Key': requestKey } })).data;
 export const transitionAgronomyPlan = async (id, operation, expectedVersion, reason, requestKey = key()) => (await client.post(`agronomy-plans/${id}/transition`, { operation, expected_version: expectedVersion, reason }, { headers: { 'Idempotency-Key': requestKey } })).data;
 export const addAgronomyWork = async (id, payload, requestKey = key()) => (await client.post(`agronomy-plans/${id}/work`, payload, { headers: { 'Idempotency-Key': requestKey } })).data;

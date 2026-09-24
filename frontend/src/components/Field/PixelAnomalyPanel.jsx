@@ -9,6 +9,7 @@ import {
   listPixelAnomalies,
 } from '../../api/pixelAnomalies';
 import { useAuth } from '../../context/AuthContext';
+import { INSPECTION_STATUS_LABELS } from '../../config/canonicalLifecycle';
 import {
   createIdempotencyKey,
   normalizeRole,
@@ -798,7 +799,7 @@ export default function PixelAnomalyPanel({ fieldId, indexCode = 'ndvi', dayRang
                   </p>
                   {detail.inspection ? (
                     <span className="shrink-0 rounded-full bg-blue-100 px-3 py-1 text-sm font-medium text-blue-900">
-                      Осмотр #{detail.inspection.id} · {detail.inspection.status}
+                      Осмотр #{detail.inspection.id} · {INSPECTION_STATUS_LABELS[detail.inspection.status] || detail.inspection.status}
                     </span>
                   ) : canWrite && detail.status === 'open' ? (
                     <button

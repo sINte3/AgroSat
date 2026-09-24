@@ -9,10 +9,17 @@ import {
 import AnomalyInspectionDetail from '../components/Inspections/AnomalyInspectionDetail';
 import InspectionSourceDialog from '../components/Inspections/InspectionSourceDialog';
 import {
+  INSPECTION_PRIORITY_LABELS as PRIORITY,
+  INSPECTION_SOURCE_LABELS as SOURCE,
+  INSPECTION_STATUS_LABELS as STATUS,
+} from '../config/canonicalLifecycle';
+import {
   cacheAssignedInspections,
   getCachedAssignedInspections,
+  listOfflineDrafts,
   offlineScope,
 } from '../offline/offlineScoutingStore';
+import { formatTashkentDateTime } from '../utils/tashkentTime';
 
 const FILTER_VALUES = {
   status: ['', 'new', 'assigned', 'in_progress', 'submitted', 'confirmed', 'rejected', 'cancelled'],
@@ -21,9 +28,12 @@ const FILTER_VALUES = {
   due_state: ['', 'overdue', 'due'],
   sort: ['priority', 'due_at', 'created_at'],
 };
-const STATUS = { new: 'Новый', assigned: 'Назначен', in_progress: 'В работе', submitted: 'На проверке', confirmed: 'Подтверждён', rejected: 'Отклонён', cancelled: 'Отменён' };
-const PRIORITY = { low: 'Низкий', normal: 'Обычный', high: 'Высокий', urgent: 'Срочный' };
-const SOURCE = { pixel_ndvi: 'Пиксельный NDVI', alert: 'Предупреждение', manual: 'Ручной' };
+const DRAFT_STATUS = {
+  local_draft: 'сохранён локально',
+  pending_sync: 'ожидает отправки',
+  conflict: 'конфликт версии',
+  legacy_unsynchronizable: 'устаревший контур, отправка недоступна',
+};
 
 function validFilter(name, value) {
   return FILTER_VALUES[name]?.includes(value) ? value : FILTER_VALUES[name]?.[0] || '';
@@ -58,9 +68,42 @@ function loadMessage(error) {
 function Kpis({ summary }) {
   const items = [
     ['Открыто', summary?.open], ['Просрочено', summary?.overdue], ['Ожидают проверки', summary?.awaiting_review],
-    ['Активные действия', summary?.active_actions], ['Нужна верификация', summary?.verification_due],
+    ['Активные планы мер', summary?.active_actions], ['Ждут спутниковой проверки', summary?.verification_due],
   ];
-  return <dl className="grid grid-cols-2 divide-x divide-y divide-slate-200 overflow-hidden rounded-xl border border-slate-200 bg-white sm:grid-cols-5 sm:divide-y-0">{items.map(([label, value]) => <div key={label} className="min-w-0 p-3 sm:p-4"><dt className="text-xs font-semibold leading-4 text-slate-600">{label}</dt><dd className="mt-1 font-mono text-2xl font-bold tabular-nums text-slate-950">{Number(value || 0)}</dd></div>)}</dl>;
+  return <dl className="grid grid-cols-2 divide-x divide-y divide-slate-200 overflow-hidden rounded-xl border border-slate-200 bg-white sm:grid-cols-5 sm:divide-y-0">{items.map(([label, value]) => <div key={label} className="min-w-0 p-3 sm:p-4"><dt className="text-xs font-semibold leading-4 text-slate-600">{label}</dt><dd className="mt-1 font-mono text-2xl font-bold tabular-nums text-slate-950">{summary ? Number(value || 0) : '—'}</dd></div>)}</dl>;
+}
+
+// Unsynchronized drafts of the current user on this device. After a session
+// ends involuntarily they stay here; the same user sees them again after
+// signing in, another user never does (drafts are partitioned by user).
+function OfflineDrafts({ scope, onNavigate, reloadToken }) {
+  const [drafts, setDrafts] = useState([]);
+  useEffect(() => {
+    let active = true;
+    if (!scope) { setDrafts([]); return undefined; }
+    listOfflineDrafts(scope).then((items) => { if (active) setDrafts(items); }).catch(() => { if (active) setDrafts([]); });
+    return () => { active = false; };
+  }, [reloadToken, scope]);
+  if (!drafts.length) return null;
+  return (
+    <section aria-labelledby="offline-drafts-title" className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950" data-testid="offline-drafts">
+      <h2 id="offline-drafts-title" className="font-bold">Несинхронизированные черновики на этом устройстве: {drafts.length}</h2>
+      <p className="mt-1">Они не являются серверными данными, пока не отправлены. Откройте осмотр или план, чтобы отправить черновик.</p>
+      <ul className="mt-3 flex flex-wrap gap-2">
+        {drafts.map((draft) => (
+          <li key={draft.key}>
+            {draft.kind === 'agronomy-plan' && draft.planId ? (
+              <button type="button" onClick={() => onNavigate('agronomy-plans', draft.planId)} className="min-h-11 rounded-lg border border-amber-400 bg-white px-3 font-semibold">План мер #{draft.planId} · {DRAFT_STATUS[draft.status] || draft.status}</button>
+            ) : draft.inspectionId ? (
+              <button type="button" onClick={() => onNavigate('field-inspection-detail', draft.inspectionId)} className="min-h-11 rounded-lg border border-amber-400 bg-white px-3 font-semibold">Осмотр #{draft.inspectionId} · {DRAFT_STATUS[draft.status] || draft.status}</button>
+            ) : (
+              <span className="inline-flex min-h-11 items-center rounded-lg border border-amber-400 bg-white px-3">Черновик · {DRAFT_STATUS[draft.status] || draft.status}</span>
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
 }
 
 export default function AnomalyInspectionsPage({ onNavigate, enterprises = [], selectedInspectionId }) {
@@ -96,8 +139,9 @@ export default function AnomalyInspectionsPage({ onNavigate, enterprises = [], s
     }).catch(async (requestError) => {
       if (controller.signal.aborted) return;
       const cached = scope ? await getCachedAssignedInspections(scope).catch(() => null) : null;
+      if (controller.signal.aborted) return;
       if (cached) { setData(cached); setState('offline'); setError('Показана последняя сохранённая очередь.'); }
-      else { setState('error'); setError(loadMessage(requestError)); }
+      else { setData(null); setState('error'); setError(loadMessage(requestError)); }
     });
     return () => controller.abort();
   }, [filters, reload, scope]);
@@ -136,21 +180,22 @@ export default function AnomalyInspectionsPage({ onNavigate, enterprises = [], s
   if (selectedInspectionId) {
     if (detailState === 'loading' || detailState === 'idle') return <div className="h-full overflow-y-auto px-5 pb-5 pt-20"><div className="mx-auto h-72 max-w-6xl animate-pulse rounded-xl bg-slate-200" aria-label="Загрузка осмотра" /></div>;
     if (detailState === 'error' || !detail) return <div className="flex h-full items-center justify-center px-5 pb-5 pt-20"><div className="max-w-md text-center"><p role="alert" className="font-semibold text-red-900">{error}</p><button type="button" onClick={refreshDetail} className="mt-4 min-h-11 rounded-lg bg-green-700 px-4 font-bold text-white">Повторить</button></div></div>;
-    return <AnomalyInspectionDetail detail={detail} onRefresh={refreshDetail} onBack={() => onNavigate('field-inspections')} />;
+    return <AnomalyInspectionDetail detail={detail} onRefresh={refreshDetail} onNavigate={onNavigate} onBack={() => onNavigate('field-inspections')} />;
   }
 
   return (
     <div className="h-full overflow-y-auto bg-slate-50 px-4 pb-5 pt-20 sm:px-6" data-testid="inspection-queue">
       <div className="mx-auto max-w-7xl space-y-5">
-        <div className="flex flex-wrap items-start justify-between gap-3"><div><h1 className="text-xl font-bold text-slate-950">Осмотры</h1><p className="mt-1 max-w-[72ch] text-sm text-slate-600">От аномалии к полевому подтверждению, действию и проверке результата.</p></div>{canCreate && <button type="button" onClick={() => setManualOpen((value) => !value)} aria-expanded={manualOpen} className="min-h-11 rounded-lg bg-green-700 px-4 font-bold text-white hover:bg-green-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-800 focus-visible:ring-offset-2">Новый ручной осмотр</button>}</div>
+        <div className="flex flex-wrap items-start justify-between gap-3"><div><h1 className="text-xl font-bold text-slate-950">Осмотры</h1><p className="mt-1 max-w-[72ch] text-sm text-slate-600">От аномалии к полевому подтверждению, плану мер и проверке результата.</p></div>{canCreate && <button type="button" onClick={() => setManualOpen((value) => !value)} aria-expanded={manualOpen} className="min-h-11 rounded-lg bg-green-700 px-4 font-bold text-white hover:bg-green-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-800 focus-visible:ring-offset-2">Новый ручной осмотр</button>}</div>
         {manualOpen && <form className="flex flex-col gap-3 rounded-xl border border-slate-200 bg-white p-4 sm:flex-row sm:items-end" onSubmit={(event) => { event.preventDefault(); const id = Number(manualFieldId); if (Number.isSafeInteger(id) && id > 0) setManualSource({ kind: 'manual', field_id: id, reason: 'Проверить состояние поля по ручному наблюдению', priority: 'normal' }); }}><label className="flex-1 text-sm font-semibold text-slate-900">ID поля<input type="number" min="1" required value={manualFieldId} onChange={(event) => setManualFieldId(event.target.value)} className="mt-1.5 min-h-11 w-full rounded-lg border border-slate-300 px-3 font-normal" /></label><button type="submit" className="min-h-11 rounded-lg border border-green-700 px-4 font-bold text-green-800">Продолжить</button></form>}
+        <OfflineDrafts scope={scope} onNavigate={onNavigate} reloadToken={reload} />
         <Kpis summary={data?.summary} />
         <form onSubmit={applyFilters} className="rounded-xl border border-slate-200 bg-white p-4"><div className="flex flex-wrap gap-3"><label className="min-w-[14rem] flex-[2] text-xs font-semibold text-slate-700">Поиск<input value={filters.search} onChange={(event) => setFilters((current) => ({ ...current, search: event.target.value }))} placeholder="Поле или причина" className="mt-1 min-h-11 w-full rounded-lg border border-slate-300 px-3 text-sm font-normal text-slate-950" /></label><label className="min-w-[10rem] flex-1 text-xs font-semibold text-slate-700">Предприятие<select value={filters.enterprise_id} onChange={(event) => setFilters((current) => ({ ...current, enterprise_id: event.target.value }))} disabled={user?.role !== 'admin'} className="mt-1 min-h-11 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm font-normal"><option value="">Все доступные</option>{enterprises.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label className="min-w-[8rem] flex-1 text-xs font-semibold text-slate-700">Поле<input type="number" min="1" value={filters.field_id} onChange={(event) => setFilters((current) => ({ ...current, field_id: event.target.value }))} className="mt-1 min-h-11 w-full rounded-lg border border-slate-300 px-3 text-sm font-normal" /></label><FilterSelect label="Статус" value={filters.status} onChange={(value) => setFilters((current) => ({ ...current, status: value }))} options={[['', 'Все'], ...FILTER_VALUES.status.slice(1).map((value) => [value, STATUS[value]])]} /><FilterSelect label="Приоритет" value={filters.priority} onChange={(value) => setFilters((current) => ({ ...current, priority: value }))} options={[['', 'Все'], ...FILTER_VALUES.priority.slice(1).map((value) => [value, PRIORITY[value]])]} /><FilterSelect label="Источник" value={filters.source_kind} onChange={(value) => setFilters((current) => ({ ...current, source_kind: value }))} options={[['', 'Все'], ...FILTER_VALUES.source_kind.slice(1).map((value) => [value, SOURCE[value]])]} /><FilterSelect label="Срок" value={filters.due_state} onChange={(value) => setFilters((current) => ({ ...current, due_state: value }))} options={[['', 'Любой'], ['overdue', 'Просрочено'], ['due', 'В срок']]} /><button type="submit" className="min-h-11 self-end rounded-lg bg-slate-900 px-4 text-sm font-bold text-white">Применить</button></div></form>
         {state === 'offline' && <p role="status" className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-950">Офлайн-режим. {error || 'Показана сохранённая очередь.'}</p>}
         {state === 'error' && <div className="rounded-xl border border-red-300 bg-white p-6 text-center"><p role="alert" className="font-semibold text-red-900">{error}</p><button type="button" onClick={() => setReload((value) => value + 1)} className="mt-4 min-h-11 rounded-lg bg-green-700 px-4 font-bold text-white">Повторить</button></div>}
         {state === 'loading' && <div className="space-y-2" aria-label="Загрузка очереди">{[0, 1, 2].map((item) => <div key={item} className="h-24 animate-pulse rounded-xl bg-slate-200" />)}</div>}
-        {state !== 'loading' && state !== 'error' && !data?.items?.length && <div className="rounded-xl border border-slate-200 bg-white px-5 py-12 text-center"><p className="font-bold text-slate-950">Осмотров по выбранным условиям нет</p><p className="mt-1 text-sm text-slate-600">Измените фильтры или создайте осмотр из Pixel NDVI, предупреждения либо поля.</p></div>}
-        {data?.items?.length > 0 && <ol className="divide-y divide-slate-200 overflow-hidden rounded-xl border border-slate-200 bg-white">{data.items.map((item) => <li key={item.id}><button type="button" onClick={() => onNavigate('field-inspection-detail', item.id)} className="grid min-h-24 w-full gap-3 px-4 py-4 text-left hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-green-700 sm:grid-cols-[minmax(14rem,2fr)_repeat(3,minmax(7rem,1fr))]"><div className="min-w-0"><p className="truncate font-bold text-slate-950">#{item.id} · {item.field_name}</p><p className="mt-1 line-clamp-2 text-sm text-slate-700">{item.source.reason}</p></div><QueueMeta label="Статус" value={STATUS[item.status]} urgent={item.status === 'submitted'} /><QueueMeta label="Приоритет" value={PRIORITY[item.priority]} urgent={item.priority === 'urgent'} /><QueueMeta label={item.is_overdue ? 'Просрочено' : 'Срок'} value={new Date(item.due_at).toLocaleString('ru-RU')} urgent={item.is_overdue} /></button></li>)}</ol>}
+        {['ready', 'offline'].includes(state) && !data?.items?.length && <div className="rounded-xl border border-slate-200 bg-white px-5 py-12 text-center"><p className="font-bold text-slate-950">Осмотров по выбранным условиям нет</p><p className="mt-1 text-sm text-slate-600">Измените фильтры или создайте осмотр из Pixel NDVI, предупреждения либо поля.</p></div>}
+        {['ready', 'offline'].includes(state) && data?.items?.length > 0 && <ol className="divide-y divide-slate-200 overflow-hidden rounded-xl border border-slate-200 bg-white">{data.items.map((item) => <li key={item.id}><button type="button" onClick={() => onNavigate('field-inspection-detail', item.id)} className="grid min-h-24 w-full gap-3 px-4 py-4 text-left hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-green-700 sm:grid-cols-[minmax(14rem,2fr)_repeat(3,minmax(7rem,1fr))]"><div className="min-w-0"><p className="truncate font-bold text-slate-950">#{item.id} · {item.field_name}</p><p className="mt-1 line-clamp-2 text-sm text-slate-700">{item.source?.reason}</p>{item.source?.kind === 'legacy' && <p className="mt-1 text-xs font-semibold text-amber-900">{SOURCE.legacy}</p>}</div><QueueMeta label="Статус" value={STATUS[item.status] || item.status} urgent={item.status === 'submitted'} /><QueueMeta label="Приоритет" value={PRIORITY[item.priority] || item.priority || 'не задан'} urgent={item.priority === 'urgent'} /><QueueMeta label={item.is_overdue ? 'Просрочено' : 'Срок'} value={formatTashkentDateTime(item.due_at)} urgent={item.is_overdue} /></button></li>)}</ol>}
       </div>
       {manualSource && <InspectionSourceDialog source={manualSource} onClose={() => setManualSource(null)} onCreated={(inspection) => { setManualSource(null); onNavigate('field-inspection-detail', inspection.id); }} />}
     </div>

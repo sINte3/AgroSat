@@ -1,17 +1,27 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 
-import { createFieldInspection } from '../../api/fieldInspections';
+import { createAnomalyInspection, workflowKey } from '../../api/anomalyInspections';
 import {
   createIrrigationEvent,
   getFieldIrrigationContext,
 } from '../../api/irrigationContext';
+import {
+  INSPECTION_PRIORITY_OPTIONS,
+  INSPECTION_SOURCE_LABELS,
+  INSPECTION_STATUS_LABELS,
+} from '../../config/canonicalLifecycle';
 import { useAuth } from '../../context/AuthContext';
 import {
+  inspectionDueError,
+  IRRIGATION_REASON_LABELS as REASON_LABELS,
+  irrigationInspectionReason,
+} from '../../utils/inspectionRequests';
+import { parseTashkentDateTimeInput, toTashkentDateTimeInput } from '../../utils/tashkentTime';
+import {
+  canCreateInspections,
   createIdempotencyKey,
   normalizeRole,
-  SOURCE_LABELS,
-  STATUS_LABELS,
-  todayTashkentDate,
 } from '../Inspections/inspectionPresentation';
 
 
@@ -28,13 +38,6 @@ const METHOD_LABELS = {
   furrow: 'По бороздам',
   manual: 'Ручной',
   unknown: 'Не указан',
-};
-const REASON_LABELS = {
-  water_stress_suspicion: 'Подозрение на водный стресс',
-  weather_water_deficit: 'Проверить дефицит влаги по погодному контексту',
-  irrigation_interruption: 'Проверить прерывание полива',
-  irrigation_delivery_check: 'Проверить доставку воды',
-  irrigation_equipment_check: 'Проверить оборудование орошения',
 };
 
 
@@ -217,9 +220,12 @@ function EventForm({ fieldId, activeInspection, onCreated }) {
   const controllerRef = useRef(null);
   const mountedRef = useRef(true);
 
-  useEffect(() => () => {
-    mountedRef.current = false;
-    controllerRef.current?.abort();
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      controllerRef.current?.abort();
+    };
   }, []);
 
   const payload = useMemo(() => ({
@@ -310,48 +316,74 @@ function EventForm({ fieldId, activeInspection, onCreated }) {
 }
 
 
-function InspectionContext({ fieldId, activeInspection, onCreated }) {
+// The irrigation context is not a backend-recognized inspection source: the
+// inspection is canonical `manual` and the irrigation reason is kept in the
+// visible reason text (irrigationInspectionReason).
+function InspectionContext({ fieldId, activeInspection, canCreate, onCreated }) {
   const [reason, setReason] = useState('water_stress_suspicion');
-  const [priority, setPriority] = useState('medium');
+  const [priority, setPriority] = useState('normal');
+  const [dueAt, setDueAt] = useState('');
+  const [dueTouched, setDueTouched] = useState(false);
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState('');
+  const [created, setCreated] = useState(null);
   const controllerRef = useRef(null);
   const mountedRef = useRef(true);
-  const keyRef = useRef(createIdempotencyKey());
+  const keyRef = useRef(workflowKey('irrigation-inspection'));
+  const frozenRef = useRef('');
 
-  useEffect(() => () => {
-    mountedRef.current = false;
-    controllerRef.current?.abort();
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      controllerRef.current?.abort();
+    };
   }, []);
 
-  async function createInspection() {
-    if (pending) return;
+  const dueError = inspectionDueError(dueAt);
+  const payload = useMemo(() => {
+    const parsed = parseTashkentDateTimeInput(dueAt);
+    return {
+      field_id: Number(fieldId),
+      source_kind: 'manual',
+      reason: irrigationInspectionReason(reason),
+      priority,
+      due_at: parsed.state === 'valid' ? parsed.iso : null,
+    };
+  }, [dueAt, fieldId, priority, reason]);
+  const serialized = JSON.stringify(payload);
+
+  async function createInspection(event) {
+    event.preventDefault();
+    setDueTouched(true);
+    if (pending || dueError) return;
+    if (frozenRef.current && frozenRef.current !== serialized) {
+      keyRef.current = workflowKey('irrigation-inspection');
+    }
+    frozenRef.current = serialized;
     const controller = new AbortController();
     controllerRef.current?.abort();
     controllerRef.current = controller;
     setPending(true);
     setMessage('');
     try {
-      const result = await createFieldInspection({
-        field_id: fieldId,
-        source: 'irrigation_context',
-        source_priority: priority,
-        source_attention_score: null,
-        source_observation_date: todayTashkentDate(),
-        source_reason_codes: [reason],
-        title: `Осмотр: ${REASON_LABELS[reason]}`,
-        instructions: 'Проверить состояние в поле и зафиксировать фактические доказательства.',
-        due_date: null,
-      }, keyRef.current, controller.signal);
+      const result = await createAnomalyInspection(payload, keyRef.current, controller.signal);
       if (!mountedRef.current || controller.signal.aborted) return;
-      keyRef.current = createIdempotencyKey();
-      setMessage(result?.created ? 'Осмотр создан.' : 'Этот осмотр уже был создан.');
+      keyRef.current = workflowKey('irrigation-inspection');
+      frozenRef.current = '';
+      setCreated(result?.inspection || null);
+      setMessage(result?.created === false ? 'Этот осмотр уже был создан.' : 'Осмотр создан.');
       onCreated();
     } catch (error) {
       if (!mountedRef.current || controller.signal.aborted || cancelled(error)) return;
-      setMessage(error?.response?.status === 409
-        ? 'Для поля уже есть активный осмотр.'
-        : 'Не удалось подтвердить создание осмотра. Повторите запрос.');
+      const status = error?.response?.status;
+      setMessage(status === 403
+        ? 'У вашей роли нет права создавать осмотр.'
+        : status === 422
+          ? 'Проверьте причину, приоритет и срок.'
+          : status === 409
+            ? 'Запрос конфликтует с уже выполненным. Обновите страницу и проверьте осмотры поля.'
+            : 'Не удалось подтвердить создание осмотра. Повторите тот же запрос.');
     } finally {
       if (mountedRef.current && !controller.signal.aborted) setPending(false);
     }
@@ -364,26 +396,37 @@ function InspectionContext({ fieldId, activeInspection, onCreated }) {
           Активный осмотр #{activeInspection.id}
         </h3>
         <p className="mt-2 text-sm text-agro-muted">
-          Статус: {STATUS_LABELS[activeInspection.status] || activeInspection.status}
+          Статус: {INSPECTION_STATUS_LABELS[activeInspection.status] || activeInspection.status}
           {' · '}
-          источник: {SOURCE_LABELS[activeInspection.source] || activeInspection.source}
+          источник: {INSPECTION_SOURCE_LABELS[activeInspection.source] || activeInspection.source}
         </p>
-        <a className="btn-secondary mt-4 inline-flex min-h-11 items-center" href="/inspections">
-          Открыть осмотры
-        </a>
+        {message && <p aria-live="polite" className="mt-2 text-sm text-agro-muted">{message}</p>}
+        <Link className="btn-secondary mt-4 inline-flex min-h-11 items-center" to={`/inspections/${activeInspection.id}`}>
+          Открыть осмотр
+        </Link>
       </section>
     );
   }
 
+  if (!canCreate) {
+    return (
+      <section className="card" aria-labelledby="irrigation-inspection-title">
+        <h3 id="irrigation-inspection-title" className="font-semibold text-agro-text">Проверка поля</h3>
+        <p className="mt-2 text-sm text-agro-muted">Осмотр по контексту орошения назначает менеджер или администратор.</p>
+      </section>
+    );
+  }
+
+  const showDueError = (dueTouched || dueAt) && dueError;
   return (
-    <section className="card space-y-3" aria-labelledby="irrigation-inspection-title">
+    <form className="card space-y-3" aria-labelledby="irrigation-inspection-title" onSubmit={createInspection} noValidate>
       <div>
         <h3 id="irrigation-inspection-title" className="font-semibold text-agro-text">Назначить проверку поля</h3>
         <p className="mt-1 text-xs text-agro-muted">
           Контекст создаёт задачу на проверку, но не подтверждает причину.
         </p>
       </div>
-      <div className="grid gap-3 sm:grid-cols-2">
+      <div className="grid gap-3 sm:grid-cols-3">
         <label className="text-sm text-agro-text">
           Причина проверки
           <select className="input mt-1 min-h-11 w-full" value={reason} onChange={(event) => setReason(event.target.value)}>
@@ -393,18 +436,26 @@ function InspectionContext({ fieldId, activeInspection, onCreated }) {
         <label className="text-sm text-agro-text">
           Приоритет
           <select className="input mt-1 min-h-11 w-full" value={priority} onChange={(event) => setPriority(event.target.value)}>
-            <option value="low">Низкий</option>
-            <option value="medium">Средний</option>
-            <option value="high">Высокий</option>
-            <option value="critical">Критический</option>
+            {INSPECTION_PRIORITY_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
           </select>
         </label>
+        <label className="text-sm text-agro-text">
+          Срок осмотра (Ташкент)<span aria-hidden="true"> *</span>
+          <input className="input mt-1 min-h-11 w-full" type="datetime-local" required min={toTashkentDateTimeInput()} value={dueAt} onChange={(event) => setDueAt(event.target.value)} onBlur={() => setDueTouched(true)} aria-invalid={Boolean(showDueError)} aria-describedby="irrigation-inspection-due-help" />
+          <span id="irrigation-inspection-due-help" className={`mt-1 block text-xs ${showDueError ? 'text-red-700' : 'text-agro-muted'}`}>{showDueError || 'Обязательно. Asia/Tashkent (UTC+05:00).'}</span>
+        </label>
       </div>
-      {message && <p aria-live="polite" className="text-sm text-agro-muted">{message}</p>}
-      <button className="btn-primary min-h-11 w-full sm:w-auto" disabled={pending} onClick={createInspection} type="button">
-        {pending ? 'Создание…' : 'Создать осмотр'}
+      <p className="text-xs text-agro-muted">Причина в осмотре: «{payload.reason}»</p>
+      {message && (
+        <p aria-live="polite" className="text-sm text-agro-muted">
+          {message}
+          {created?.id ? <> <Link className="text-agro-accent underline" to={`/inspections/${created.id}`}>Осмотр #{created.id}</Link></> : null}
+        </p>
+      )}
+      <button className="btn-primary min-h-11 w-full sm:w-auto" disabled={pending || Boolean(dueError)} type="submit">
+        {pending ? 'Создание…' : frozenRef.current ? 'Повторить тот же запрос' : 'Создать осмотр'}
       </button>
-    </section>
+    </form>
   );
 }
 
@@ -413,6 +464,7 @@ export default function FieldIrrigationContextPanel({ fieldId }) {
   const { user } = useAuth();
   const role = normalizeRole(user?.role);
   const readOnly = role === 'viewer';
+  const canCreateInspection = canCreateInspections(role);
   const [state, setState] = useState({ status: 'loading', data: null, message: '' });
   const [reload, setReload] = useState(0);
   const generationRef = useRef(0);
@@ -487,7 +539,7 @@ export default function FieldIrrigationContextPanel({ fieldId }) {
       ) : (
         <>
           <EventForm key={`event-${fieldId}`} fieldId={fieldId} activeInspection={data.active_inspection} onCreated={() => setReload((value) => value + 1)} />
-          <InspectionContext key={`inspection-${fieldId}`} fieldId={fieldId} activeInspection={data.active_inspection} onCreated={() => setReload((value) => value + 1)} />
+          <InspectionContext key={`inspection-${fieldId}`} fieldId={fieldId} activeInspection={data.active_inspection} canCreate={canCreateInspection} onCreated={() => setReload((value) => value + 1)} />
         </>
       )}
     </div>

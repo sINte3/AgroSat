@@ -5,17 +5,9 @@ import {
   getInspectionAssignees,
   workflowKey,
 } from '../../api/anomalyInspections';
+import { INSPECTION_PRIORITY_OPTIONS as PRIORITIES } from '../../config/canonicalLifecycle';
+import { parseTashkentDateTimeInput, tashkentDateTimeInputAfterDays } from '../../utils/tashkentTime';
 
-const PRIORITIES = [
-  ['low', 'Низкий'], ['normal', 'Обычный'], ['high', 'Высокий'], ['urgent', 'Срочный'],
-];
-
-function localDateTime(days = 1) {
-  const date = new Date(Date.now() + days * 86400000);
-  date.setHours(17, 0, 0, 0);
-  const offset = date.getTimezoneOffset() * 60000;
-  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
-}
 function sourceLabel(kind) {
   return { pixel_ndvi: 'Пиксельный NDVI', alert: 'Предупреждение', manual: 'Ручной контекст' }[kind] || kind;
 }
@@ -32,34 +24,38 @@ export default function InspectionSourceDialog({ source, onClose, onCreated }) {
   const dialogRef = useRef(null);
   const closeRef = useRef(null);
   const requestRef = useRef(null);
+  const onCloseRef = useRef(onClose);
   const keyRef = useRef(workflowKey('create-inspection'));
   const [assignees, setAssignees] = useState([]);
   const [reason, setReason] = useState(source?.reason || 'Проверить выявленное отклонение на поле');
   const [priority, setPriority] = useState(source?.priority || 'normal');
   const [assigneeId, setAssigneeId] = useState('');
-  const [dueAt, setDueAt] = useState(localDateTime());
+  const [dueAt, setDueAt] = useState(() => tashkentDateTimeInputAfterDays(1));
   const [state, setState] = useState('loading');
   const [error, setError] = useState('');
+  onCloseRef.current = onClose;
+
+  useEffect(() => () => requestRef.current?.abort(), []);
 
   useEffect(() => {
     const previous = document.activeElement;
     const controller = new AbortController();
-    requestRef.current = controller;
     closeRef.current?.focus();
     getInspectionAssignees({ fieldId: source.field_id }, controller.signal)
       .then((items) => {
+        if (controller.signal.aborted) return;
         setAssignees(Array.isArray(items) ? items : []);
         if (items?.[0]?.id) setAssigneeId(String(items[0].id));
         setState('ready');
       })
       .catch((requestError) => {
-        if (requestError?.name !== 'CanceledError') {
+        if (!controller.signal.aborted && requestError?.name !== 'CanceledError') {
           setState('error');
           setError('Не удалось загрузить список агрономов.');
         }
       });
     const onKeyDown = (event) => {
-      if (event.key === 'Escape') onClose();
+      if (event.key === 'Escape') onCloseRef.current();
       if (event.key !== 'Tab') return;
       const controls = Array.from(dialogRef.current?.querySelectorAll(
         'button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled])',
@@ -76,13 +72,16 @@ export default function InspectionSourceDialog({ source, onClose, onCreated }) {
       window.removeEventListener('keydown', onKeyDown);
       if (previous instanceof HTMLElement && document.contains(previous)) previous.focus();
     };
-  }, [onClose, source.field_id]);
+  }, [source.field_id]);
 
   async function submit(event) {
     event.preventDefault();
     if (!assigneeId) { setError('Выберите назначенного агронома.'); return; }
+    const due = parseTashkentDateTimeInput(dueAt);
+    if (due.state !== 'valid') { setError('Укажите полный срок осмотра (дата и время, Ташкент).'); return; }
     setState('saving');
     setError('');
+    requestRef.current?.abort();
     const controller = new AbortController();
     requestRef.current = controller;
     try {
@@ -103,10 +102,11 @@ export default function InspectionSourceDialog({ source, onClose, onCreated }) {
         reason,
         priority,
         assigned_to_id: Number(assigneeId),
-        due_at: new Date(dueAt).toISOString(),
+        due_at: due.iso,
       }, keyRef.current, controller.signal);
       onCreated(result.inspection);
     } catch (requestError) {
+      if (controller.signal.aborted) return;
       setError(messageFor(requestError));
       setState('ready');
     }
@@ -147,7 +147,7 @@ export default function InspectionSourceDialog({ source, onClose, onCreated }) {
                 {assignees.map((item) => <option key={item.id} value={item.id}>{item.full_name || item.email}</option>)}
               </select>
             </label>
-            <label className="text-sm font-semibold text-slate-900">Срок
+            <label className="text-sm font-semibold text-slate-900">Срок (Ташкент)
               <input type="datetime-local" value={dueAt} onChange={(event) => setDueAt(event.target.value)} required className="mt-1.5 min-h-11 w-full rounded-lg border border-slate-300 px-3 font-normal focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-700" />
             </label>
           </div>

@@ -1,6 +1,9 @@
 import client from './client';
 
-const noRetry = { __retryCount: 0 };
+// Canonical inspection lifecycle (/api/anomaly-inspections). Remediation after
+// review is the agronomy-plan lifecycle in ./closedLoopAgronomy.js; the TASK_217
+// corrective-action writes are retired by the backend (HTTP 410).
+const noRetry = { __noRetry: true };
 
 export function workflowKey(prefix = 'workflow') {
   const random = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
@@ -59,6 +62,18 @@ export async function reviewAnomalyInspection(id, payload, signal) {
   return data;
 }
 
+/**
+ * Cancels an open canonical inspection, or closes out an open legacy
+ * (TASK_209) inspection with a reason — the only transition the canonical
+ * workflow offers a legacy row.
+ */
+export async function cancelAnomalyInspection(id, expectedVersion, reason, signal) {
+  const { data } = await client.post(`anomaly-inspections/${id}/cancel`, {
+    expected_version: expectedVersion, reason,
+  }, { signal, ...noRetry });
+  return data;
+}
+
 export async function uploadInspectionPhoto(id, expectedVersion, file, capturedAt, signal) {
   const body = new FormData();
   body.set('expected_version', String(expectedVersion));
@@ -81,21 +96,6 @@ export async function deleteInspectionPhoto(id, photoId, expectedVersion, signal
   const { data } = await client.delete(`anomaly-inspections/${id}/photos/${photoId}`, {
     data: { expected_version: expectedVersion }, signal, ...noRetry,
   });
-  return data;
-}
-
-export async function createInspectionAction(id, payload, signal) {
-  const { data } = await client.post(`anomaly-inspections/${id}/actions`, payload, { signal, ...noRetry });
-  return data;
-}
-
-export async function transitionInspectionAction(actionId, payload, signal) {
-  const { data } = await client.post(`anomaly-inspections/actions/${actionId}/transition`, payload, { signal, ...noRetry });
-  return data;
-}
-
-export async function verifyInspectionAction(actionId, payload, signal) {
-  const { data } = await client.post(`anomaly-inspections/actions/${actionId}/verify`, payload, { signal, ...noRetry });
   return data;
 }
 

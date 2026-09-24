@@ -1,19 +1,34 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import maplibregl from '../../maplibreRuntime';
 
 import { useAuth } from '../../context/AuthContext';
 import {
-  createInspectionAction,
+  cancelAnomalyInspection,
   deleteInspectionPhoto,
   downloadInspectionPhoto,
   reviewAnomalyInspection,
   saveAnomalyFinding,
   startAnomalyInspection,
   submitAnomalyInspection,
-  transitionInspectionAction,
   uploadInspectionPhoto,
-  verifyInspectionAction,
 } from '../../api/anomalyInspections';
+import {
+  createAgronomyDraft,
+  createAgronomyKey,
+  listAgronomyPlans,
+} from '../../api/closedLoopAgronomy';
+import {
+  canCancelInspection,
+  INSPECTION_PRIORITY_LABELS,
+  INSPECTION_SOURCE_LABELS,
+  INSPECTION_STATUS_LABELS,
+  isLegacyInspection,
+  planStatusLabel,
+  planStatusTone,
+  TERMINAL_PLAN_STATUSES,
+  TONE_CLASSES,
+  VERIFICATION_STATUS,
+} from '../../config/canonicalLifecycle';
 import {
   createAnomalyWorkflowDraft,
   discardOfflineDraft,
@@ -23,12 +38,12 @@ import {
   offlineScope,
   saveOfflineDraft,
 } from '../../offline/offlineScoutingStore';
+import {
+  formatTashkentDateTime,
+  parseTashkentDateTimeInput,
+  toTashkentDateTimeInput,
+} from '../../utils/tashkentTime';
 
-const STATUS = {
-  new: 'Новый', assigned: 'Назначен', in_progress: 'В работе', submitted: 'На проверке',
-  confirmed: 'Подтверждён', rejected: 'Отклонён', cancelled: 'Отменён',
-};
-const PRIORITY = { low: 'Низкий', normal: 'Обычный', high: 'Высокий', urgent: 'Срочный' };
 const CAUSES = [
   ['water_stress', 'Водный стресс'], ['irrigation_failure', 'Сбой орошения'], ['pest', 'Вредители'],
   ['disease', 'Болезнь'], ['nutrient_deficiency', 'Дефицит питания'], ['weed_pressure', 'Сорняки'],
@@ -42,18 +57,13 @@ const SYNC_COPY = {
   local_draft: 'Сохранено локально', pending_sync: 'Ожидает синхронизации',
   synchronized: 'Синхронизировано', conflict: 'Конфликт: серверная версия новее',
 };
-
-function localInput(value = new Date()) {
-  const date = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(date.valueOf())) return '';
-  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-}
+const PLAN_CREATION_ROLES = ['admin', 'manager', 'agronomist'];
 
 function initialFinding(detail) {
   const row = detail?.finding;
   const coordinates = row?.gps_point?.coordinates;
   return {
-    inspected_at: localInput(row?.actual_inspected_at || new Date()),
+    inspected_at: toTashkentDateTimeInput(row?.actual_inspected_at || new Date()),
     longitude: Array.isArray(coordinates) ? String(coordinates[0]) : '',
     latitude: Array.isArray(coordinates) ? String(coordinates[1]) : '',
     gps_accuracy_m: row?.gps_accuracy_m == null ? '' : String(row.gps_accuracy_m),
@@ -67,21 +77,28 @@ function initialFinding(detail) {
   };
 }
 
-function findingPayload(form, version, syncState = 'server') {
+/** Builds the canonical finding request, or explains why the form cannot be sent yet. */
+export function findingPayload(form, version, syncState = 'server') {
+  const inspectedAt = parseTashkentDateTimeInput(form?.inspected_at);
+  if (inspectedAt.state !== 'valid') {
+    return { error: 'Время осмотра указано неполностью или некорректно.' };
+  }
   const hasGps = form.longitude !== '' && form.latitude !== '';
   return {
-    expected_version: version,
-    inspected_at: new Date(form.inspected_at).toISOString(),
-    gps_point: hasGps ? { longitude: Number(form.longitude), latitude: Number(form.latitude) } : null,
-    gps_accuracy_m: form.gps_accuracy_m === '' ? null : Number(form.gps_accuracy_m),
-    cause: form.cause,
-    other_explanation: form.cause === 'other' ? form.other_explanation : null,
-    severity: form.severity,
-    affected_area_ha: form.affected_mode === 'ha' ? Number(form.affected_value) : null,
-    affected_area_pct: form.affected_mode === 'pct' ? Number(form.affected_value) : null,
-    observations: form.observations,
-    recommended_action: form.recommended_action,
-    sync_state: syncState,
+    payload: {
+      expected_version: version,
+      inspected_at: inspectedAt.iso,
+      gps_point: hasGps ? { longitude: Number(form.longitude), latitude: Number(form.latitude) } : null,
+      gps_accuracy_m: form.gps_accuracy_m === '' ? null : Number(form.gps_accuracy_m),
+      cause: form.cause,
+      other_explanation: form.cause === 'other' ? form.other_explanation : null,
+      severity: form.severity,
+      affected_area_ha: form.affected_mode === 'ha' ? Number(form.affected_value) : null,
+      affected_area_pct: form.affected_mode === 'pct' ? Number(form.affected_value) : null,
+      observations: form.observations,
+      recommended_action: form.recommended_action,
+      sync_state: syncState,
+    },
   };
 }
 
@@ -162,8 +179,8 @@ function SourceContext({ detail }) {
       <h2 id="source-heading" className="text-base font-bold text-slate-950">Почему создан осмотр</h2>
       <div className="mt-3 grid gap-x-5 gap-y-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
         <div><span className="block text-slate-600">Поле</span><strong>{detail.field_name}</strong></div>
-        <div><span className="block text-slate-600">Источник</span><strong>{source.kind === 'pixel_ndvi' ? 'Пиксельный NDVI' : source.kind === 'alert' ? 'Предупреждение' : 'Ручной'}</strong></div>
-        {source.acquired_at && <div><span className="block text-slate-600">Снимок</span><strong className="font-mono">{new Date(source.acquired_at).toLocaleString('ru-RU')}</strong></div>}
+        <div><span className="block text-slate-600">Источник</span><strong>{INSPECTION_SOURCE_LABELS[source.kind] || source.kind || 'не указан'}</strong></div>
+        {source.acquired_at && <div><span className="block text-slate-600">Снимок</span><strong className="font-mono">{formatTashkentDateTime(source.acquired_at)}</strong></div>}
         {Number.isFinite(source.sampled_value) && <div><span className="block text-slate-600">{String(source.index_name).toUpperCase()}</span><strong className="font-mono">{source.sampled_value.toFixed(3)}</strong></div>}
         {Array.isArray(point) && <div><span className="block text-slate-600">Точка на карте</span><strong className="font-mono">{point[0].toFixed(6)}, {point[1].toFixed(6)}</strong></div>}
         {source.zone && <div><span className="block text-slate-600">Зона</span><strong>В границах поля</strong></div>}
@@ -181,77 +198,95 @@ function FindingWorkspace({ detail, onRefresh }) {
   const [state, setState] = useState('idle');
   const [syncState, setSyncState] = useState(detail.finding ? 'synchronized' : null);
   const [error, setError] = useState('');
-  const [draft, setDraft] = useState(null);
   const draftRef = useRef(null);
   const mountedRef = useRef(true);
-  const canEdit = user?.role === 'agronomist' && detail.status === 'in_progress';
+  const syncDraftRef = useRef(null);
+  const canEdit = user?.role === 'agronomist' && detail.status === 'in_progress' && !isLegacyInspection(detail);
 
   useEffect(() => {
     setForm(initialFinding(detail));
   }, [detail.id, detail.finding]);
 
-  useEffect(() => {
-    mountedRef.current = true;
-    if (!scope) return () => { mountedRef.current = false; };
-    getOfflineDraft(scope, detail.id).then((saved) => {
-      if (!mountedRef.current || saved?.schemaVersion !== 2) return;
-      setDraft(saved); draftRef.current = saved;
-      setForm(saved.finding); setSyncState(saved.status || 'local_draft');
-    }).catch(() => {});
-    return () => { mountedRef.current = false; };
-  }, [detail.id, scope]);
-
   const syncDraft = useCallback(async (candidate = draftRef.current) => {
-    if (!candidate || !navigator.onLine || !scope) return;
+    if (!candidate || !navigator.onLine || !scope || candidate.scope !== scope) return;
+    const built = findingPayload(candidate.finding, candidate.baseVersion, 'pending_sync');
+    if (built.error) {
+      if (mountedRef.current) setError(`${built.error} Черновик сохранён на устройстве.`);
+      return;
+    }
     setState('saving'); setError('');
     try {
-      await saveAnomalyFinding(detail.id, findingPayload(candidate.finding, candidate.baseVersion, 'pending_sync'));
+      await saveAnomalyFinding(detail.id, built.payload);
       await discardOfflineDraft(scope, detail.id);
-      draftRef.current = null; setDraft(null); setSyncState('synchronized');
+      if (!mountedRef.current) return;
+      draftRef.current = null; setSyncState('synchronized');
       await onRefresh();
     } catch (requestError) {
       if (Number(requestError?.response?.status) === 409) {
         const conflicted = await markAnomalyDraftConflict(candidate);
-        draftRef.current = conflicted; setDraft(conflicted); setSyncState('conflict');
-      } else {
-        setError(apiError(requestError));
+        if (!mountedRef.current) return;
+        draftRef.current = conflicted; setSyncState('conflict');
+      } else if (mountedRef.current) {
+        // The draft stays pending on this device (including after a 401).
+        setError(`${apiError(requestError)} Черновик сохранён на устройстве.`);
       }
-    } finally { setState('idle'); }
+    } finally {
+      if (mountedRef.current) setState('idle');
+    }
   }, [detail.id, onRefresh, scope]);
+  syncDraftRef.current = syncDraft;
+
+  // A draft of this user is restored after reload or re-authentication; a draft
+  // the user already queued for sending is sent as soon as the network allows.
+  useEffect(() => {
+    mountedRef.current = true;
+    if (!scope) return () => { mountedRef.current = false; };
+    getOfflineDraft(scope, detail.id).then((saved) => {
+      if (!mountedRef.current || saved?.schemaVersion !== 2 || saved.scope !== scope) return;
+      draftRef.current = saved;
+      setForm(saved.finding); setSyncState(saved.status || 'local_draft');
+      if (saved.status === 'pending_sync' && navigator.onLine) void syncDraftRef.current?.(saved);
+    }).catch(() => {});
+    return () => { mountedRef.current = false; };
+  }, [detail.id, scope]);
 
   useEffect(() => {
     const reconnect = () => {
-      if (draftRef.current?.status === 'pending_sync') void syncDraft(draftRef.current);
+      if (draftRef.current?.status === 'pending_sync') void syncDraftRef.current?.(draftRef.current);
     };
     window.addEventListener('online', reconnect);
     return () => window.removeEventListener('online', reconnect);
-  }, [syncDraft]);
+  }, []);
 
   function update(name, value) { setForm((current) => ({ ...current, [name]: value })); }
 
   async function save(event) {
     event.preventDefault(); setError('');
     if (!navigator.onLine) {
-      const local = createAnomalyWorkflowDraft({ scope, inspectionId: detail.id, baseVersion: detail.version, finding: form });
-      const queued = await markAnomalyDraftPending(await saveOfflineDraft(local));
-      draftRef.current = queued; setDraft(queued); setSyncState('pending_sync');
+      try {
+        const local = createAnomalyWorkflowDraft({ scope, inspectionId: detail.id, baseVersion: detail.version, finding: form });
+        const queued = await markAnomalyDraftPending(await saveOfflineDraft(local));
+        draftRef.current = queued; setSyncState('pending_sync');
+      } catch { setError('Локальное сохранение недоступно в этом браузере.'); }
       return;
     }
+    const built = findingPayload(form, detail.version);
+    if (built.error) { setError(built.error); return; }
     setState('saving');
     try {
-      await saveAnomalyFinding(detail.id, findingPayload(form, detail.version));
+      await saveAnomalyFinding(detail.id, built.payload);
       if (scope) await discardOfflineDraft(scope, detail.id);
-      draftRef.current = null; setDraft(null); setSyncState('synchronized');
+      draftRef.current = null; setSyncState('synchronized');
       await onRefresh();
     } catch (requestError) { setError(apiError(requestError)); }
-    finally { setState('idle'); }
+    finally { if (mountedRef.current) setState('idle'); }
   }
 
   async function saveLocal() {
     try {
       const local = createAnomalyWorkflowDraft({ scope, inspectionId: detail.id, baseVersion: detail.version, finding: form });
       const saved = await saveOfflineDraft(local);
-      draftRef.current = saved; setDraft(saved); setSyncState('local_draft'); setError('');
+      draftRef.current = saved; setSyncState('local_draft'); setError('');
     } catch { setError('Локальное сохранение недоступно в этом браузере.'); }
   }
 
@@ -277,7 +312,7 @@ function FindingWorkspace({ detail, onRefresh }) {
       <form onSubmit={save} className="mt-4 space-y-4">
         <fieldset disabled={!canEdit || state === 'saving'} className="space-y-4 disabled:opacity-70">
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            <label className="text-sm font-semibold text-slate-900">Время осмотра<input type="datetime-local" required value={form.inspected_at} onChange={(event) => update('inspected_at', event.target.value)} className="mt-1.5 min-h-11 w-full rounded-lg border border-slate-300 px-3 font-normal focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-700" /></label>
+            <label className="text-sm font-semibold text-slate-900">Время осмотра (Ташкент)<input type="datetime-local" required value={form.inspected_at} onChange={(event) => update('inspected_at', event.target.value)} className="mt-1.5 min-h-11 w-full rounded-lg border border-slate-300 px-3 font-normal focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-700" /></label>
             <label className="text-sm font-semibold text-slate-900">Причина<select value={form.cause} onChange={(event) => update('cause', event.target.value)} className="mt-1.5 min-h-11 w-full rounded-lg border border-slate-300 bg-white px-3 font-normal focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-700">{CAUSES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
             <label className="text-sm font-semibold text-slate-900">Выраженность<select value={form.severity} onChange={(event) => update('severity', event.target.value)} className="mt-1.5 min-h-11 w-full rounded-lg border border-slate-300 bg-white px-3 font-normal focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-700">{SEVERITIES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
           </div>
@@ -307,7 +342,7 @@ function PhotoWorkspace({ detail, onRefresh }) {
   const [error, setError] = useState('');
   const [preview, setPreview] = useState(null);
   const previewRequestRef = useRef(null);
-  const canUpload = user?.role === 'agronomist' && detail.status === 'in_progress';
+  const canUpload = user?.role === 'agronomist' && detail.status === 'in_progress' && !isLegacyInspection(detail);
   useEffect(() => () => {
     previewRequestRef.current?.abort();
     if (preview?.url) URL.revokeObjectURL(preview.url);
@@ -350,13 +385,120 @@ function PhotoWorkspace({ detail, onRefresh }) {
   );
 }
 
-function ReviewAndActions({ detail, onRefresh }) {
+function RemediationPlans({ detail, onNavigate }) {
+  const { user } = useAuth();
+  const [plans, setPlans] = useState({ state: 'idle', items: [] });
+  const [reloadToken, setReloadToken] = useState(0);
+  const [reason, setReason] = useState('Решение по подтверждённому осмотру');
+  const [state, setState] = useState('idle');
+  const [error, setError] = useState('');
+  const keyRef = useRef(createAgronomyKey());
+  const mountedRef = useRef(true);
+  const relevant = ['submitted', 'confirmed'].includes(detail.status) && !isLegacyInspection(detail);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!relevant) { setPlans({ state: 'idle', items: [] }); return undefined; }
+    const controller = new AbortController();
+    setPlans((current) => ({ state: 'loading', items: current.items }));
+    listAgronomyPlans({ inspection_id: detail.id, limit: 20 }, controller.signal)
+      .then((result) => {
+        if (!controller.signal.aborted) setPlans({ state: 'ready', items: Array.isArray(result?.items) ? result.items : [] });
+      })
+      .catch((requestError) => {
+        if (!controller.signal.aborted && requestError?.name !== 'CanceledError') setPlans({ state: 'error', items: [] });
+      });
+    return () => controller.abort();
+  }, [detail.id, detail.version, relevant, reloadToken]);
+
+  if (!relevant) return null;
+  const activePlan = plans.items.find((plan) => !TERMINAL_PLAN_STATUSES.includes(plan.status));
+  const canCreatePlan = detail.status === 'confirmed' && PLAN_CREATION_ROLES.includes(user?.role)
+    && plans.state === 'ready' && !activePlan;
+
+  async function createPlan(event) {
+    event.preventDefault();
+    if (reason.trim().length < 5 || state === 'saving') return;
+    setState('saving'); setError('');
+    try {
+      const result = await createAgronomyDraft(detail.id, reason.trim(), keyRef.current);
+      keyRef.current = createAgronomyKey();
+      if (result?.plan_id) onNavigate?.('agronomy-plans', result.plan_id);
+      else if (mountedRef.current) setReloadToken((value) => value + 1);
+    } catch (requestError) {
+      if (!mountedRef.current) return;
+      setError(Number(requestError?.response?.status) === 409
+        ? 'У осмотра уже есть активный план мер или его состояние изменилось. Обновите страницу.'
+        : apiError(requestError));
+      setReloadToken((value) => value + 1);
+    } finally {
+      if (mountedRef.current) setState('idle');
+    }
+  }
+
+  return (
+    <div className="mt-4 space-y-3">
+      <h3 className="text-sm font-bold text-slate-950">План мер</h3>
+      {plans.state === 'loading' && <p role="status" className="text-sm text-slate-600">Загружаем планы мер…</p>}
+      {plans.state === 'error' && <div role="alert" className="rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-900">Не удалось загрузить планы мер. <button type="button" onClick={() => setReloadToken((value) => value + 1)} className="ml-1 min-h-11 font-bold underline">Повторить</button></div>}
+      {plans.state === 'ready' && plans.items.length === 0 && <p className="text-sm text-slate-600">{detail.status === 'confirmed' ? 'Плана мер ещё нет.' : 'План мер создаётся после подтверждения осмотра.'}</p>}
+      {plans.items.length > 0 && (
+        <ul className="space-y-2">
+          {plans.items.map((plan) => (
+            <li key={plan.id} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 p-3">
+              <div className="min-w-0">
+                <p className="font-bold text-slate-950">План мер #{plan.id}</p>
+                <p className="mt-1 text-sm text-slate-700">{VERIFICATION_STATUS[plan.verification_status]?.label || 'Проверка результата ещё не выполнялась'}</p>
+              </div>
+              <span className={`rounded-full border px-3 py-1 text-xs font-bold ${TONE_CLASSES[planStatusTone(plan)]}`}>{planStatusLabel(plan)}</span>
+              <button type="button" onClick={() => onNavigate?.('agronomy-plans', plan.id)} className="min-h-11 rounded-lg border border-slate-400 px-4 text-sm font-bold text-slate-900">Открыть план</button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {canCreatePlan && (
+        <form onSubmit={createPlan} className="grid gap-3 rounded-xl bg-slate-50 p-4">
+          <label className="text-sm font-semibold text-slate-900">Основание для плана мер
+            <textarea required minLength={5} maxLength={2000} rows={2} value={reason} onChange={(event) => setReason(event.target.value)} className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal" />
+          </label>
+          <p className="text-xs text-slate-600">План создаётся как черновик в разделе «Меры и контроль»: работы, исполнители и сроки задаются там, результат подтверждается новым спутниковым наблюдением.</p>
+          <button type="submit" disabled={state === 'saving' || reason.trim().length < 5} className="min-h-11 justify-self-start rounded-lg bg-green-700 px-4 font-bold text-white disabled:opacity-50">{state === 'saving' ? 'Создаём…' : 'Создать план мер'}</button>
+        </form>
+      )}
+      {error && <p role="alert" className="rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-900">{error}</p>}
+    </div>
+  );
+}
+
+function HistoricalActions({ actions }) {
+  if (!actions?.length) return null;
+  return (
+    <div className="mt-4">
+      <h3 className="text-sm font-bold text-slate-950">Исторические корректирующие действия (только чтение)</h3>
+      <p className="mt-1 text-xs text-slate-600">Прежний контур действий выведен из эксплуатации. Текущие меры ведутся в разделе «Меры и контроль».</p>
+      <ul className="mt-2 space-y-2">
+        {actions.map((action) => (
+          <li key={action.id} className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm">
+            <div className="flex flex-wrap items-start justify-between gap-2"><p className="font-semibold text-slate-900">{action.action_type || 'Действие'}</p><span className="rounded-full bg-slate-200 px-2 py-0.5 text-xs text-slate-800">{action.status}</span></div>
+            {action.description && <p className="mt-1 leading-6 text-slate-700">{action.description}</p>}
+            {action.owner_name && <p className="mt-1 text-xs text-slate-600">Ответственный: {action.owner_name}</p>}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function ReviewAndRemediation({ detail, onRefresh, onNavigate }) {
   const { user } = useAuth();
   const isReviewer = ['admin', 'manager'].includes(user?.role);
   const [error, setError] = useState('');
   const [state, setState] = useState('idle');
   const [reviewReason, setReviewReason] = useState('');
-  const [actionForm, setActionForm] = useState({ action_type: 'field_treatment', owner_id: String(detail.assigned_to_id || ''), instructions: '', due_at: localInput(new Date(Date.now() + 2 * 86400000)) });
 
   async function run(operation) {
     setState('saving'); setError('');
@@ -367,33 +509,81 @@ function ReviewAndActions({ detail, onRefresh }) {
 
   return (
     <section aria-labelledby="closure-heading" className="border-b border-slate-200 py-5">
-      <h2 id="closure-heading" className="text-base font-bold text-slate-950">Решение и действия</h2>
-      {isReviewer && detail.status === 'submitted' && <div className="mt-4 rounded-xl bg-slate-50 p-4"><label className="block text-sm font-semibold text-slate-900">Причина решения (обязательна для отклонения)<textarea rows={2} value={reviewReason} onChange={(event) => setReviewReason(event.target.value)} className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal" /></label><div className="mt-3 flex flex-col gap-2 sm:flex-row sm:justify-end"><button type="button" disabled={state === 'saving' || reviewReason.trim().length < 5} onClick={() => run(() => reviewAnomalyInspection(detail.id, { expected_version: detail.version, decision: 'rejected', reason: reviewReason }))} className="min-h-11 rounded-lg border border-red-400 px-4 font-bold text-red-900 disabled:opacity-50">Отклонить аномалию</button><button type="button" disabled={state === 'saving'} onClick={() => run(() => reviewAnomalyInspection(detail.id, { expected_version: detail.version, decision: 'confirmed', reason: reviewReason || null }))} className="min-h-11 rounded-lg bg-green-700 px-4 font-bold text-white disabled:opacity-50">Подтвердить аномалию</button></div></div>}
-      {isReviewer && detail.status === 'confirmed' && !detail.actions?.length && <form className="mt-4 grid gap-4 rounded-xl bg-slate-50 p-4 sm:grid-cols-2" onSubmit={(event) => { event.preventDefault(); void run(() => createInspectionAction(detail.id, { expected_inspection_version: detail.version, action_type: actionForm.action_type, owner_id: Number(actionForm.owner_id), instructions: actionForm.instructions, planned_start_at: null, due_at: new Date(actionForm.due_at).toISOString() })); }}><label className="text-sm font-semibold">Тип действия<input value={actionForm.action_type} pattern="[a-z][a-z0-9_]{1,49}" onChange={(event) => setActionForm((current) => ({ ...current, action_type: event.target.value }))} className="mt-1.5 min-h-11 w-full rounded-lg border border-slate-300 px-3 font-normal" /></label><label className="text-sm font-semibold">Ответственный<input type="number" min="1" required value={actionForm.owner_id} onChange={(event) => setActionForm((current) => ({ ...current, owner_id: event.target.value }))} className="mt-1.5 min-h-11 w-full rounded-lg border border-slate-300 px-3 font-normal" /></label><label className="text-sm font-semibold sm:col-span-2">Инструкции<textarea required minLength={5} rows={3} value={actionForm.instructions} onChange={(event) => setActionForm((current) => ({ ...current, instructions: event.target.value }))} className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal" /></label><label className="text-sm font-semibold">Срок<input type="datetime-local" required value={actionForm.due_at} onChange={(event) => setActionForm((current) => ({ ...current, due_at: event.target.value }))} className="mt-1.5 min-h-11 w-full rounded-lg border border-slate-300 px-3 font-normal" /></label><button type="submit" disabled={state === 'saving'} className="min-h-11 self-end rounded-lg bg-green-700 px-4 font-bold text-white disabled:opacity-50">Создать план действия</button></form>}
-      {detail.actions?.length > 0 && <ul className="mt-4 space-y-3">{detail.actions.map((action) => <li key={action.id} className="rounded-xl border border-slate-200 p-4"><div className="flex flex-wrap items-start justify-between gap-2"><div><p className="font-bold text-slate-950">{action.action_type}</p><p className="mt-1 text-sm leading-6 text-slate-700">{action.description}</p></div><span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-800">{action.status}</span></div><div className="mt-3 flex flex-wrap gap-2">{action.status === 'planned' && <button type="button" onClick={() => run(() => transitionInspectionAction(action.id, { expected_version: action.version, transition: 'start', note: null }))} className="min-h-11 rounded-lg border border-slate-400 px-4 font-bold">Начать</button>}{action.status === 'in_progress' && <button type="button" onClick={() => run(() => transitionInspectionAction(action.id, { expected_version: action.version, transition: 'complete', note: 'Работы выполнены по плану' }))} className="min-h-11 rounded-lg bg-slate-900 px-4 font-bold text-white">Завершить</button>}{isReviewer && action.status === 'completed' && <><button type="button" onClick={() => run(() => verifyInspectionAction(action.id, { expected_version: action.version, result: 'effective', notes: 'Результат подтверждён при контрольной проверке', index_name: null, sampled_value: null, create_follow_up: false, follow_up_assignee_id: null, follow_up_due_at: null }))} className="min-h-11 rounded-lg bg-green-700 px-4 font-bold text-white">Эффективно</button><button type="button" onClick={() => run(() => verifyInspectionAction(action.id, { expected_version: action.version, result: 'ineffective', notes: 'Требуется повторный цикл проверки', index_name: null, sampled_value: null, create_follow_up: false, follow_up_assignee_id: null, follow_up_due_at: null }))} className="min-h-11 rounded-lg border border-red-400 px-4 font-bold text-red-900">Неэффективно</button></>}</div></li>)}</ul>}
+      <h2 id="closure-heading" className="text-base font-bold text-slate-950">Решение и план мер</h2>
+      {isReviewer && detail.status === 'submitted' && !isLegacyInspection(detail) && <div className="mt-4 rounded-xl bg-slate-50 p-4"><label className="block text-sm font-semibold text-slate-900">Причина решения (обязательна для отклонения)<textarea rows={2} value={reviewReason} onChange={(event) => setReviewReason(event.target.value)} className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal" /></label><div className="mt-3 flex flex-col gap-2 sm:flex-row sm:justify-end"><button type="button" disabled={state === 'saving' || reviewReason.trim().length < 5} onClick={() => run(() => reviewAnomalyInspection(detail.id, { expected_version: detail.version, decision: 'rejected', reason: reviewReason }))} className="min-h-11 rounded-lg border border-red-400 px-4 font-bold text-red-900 disabled:opacity-50">Отклонить аномалию</button><button type="button" disabled={state === 'saving'} onClick={() => run(() => reviewAnomalyInspection(detail.id, { expected_version: detail.version, decision: 'confirmed', reason: reviewReason || null }))} className="min-h-11 rounded-lg bg-green-700 px-4 font-bold text-white disabled:opacity-50">Подтвердить аномалию</button></div></div>}
+      <RemediationPlans detail={detail} onNavigate={onNavigate} />
+      <HistoricalActions actions={detail.actions} />
       {error && <p role="alert" className="mt-3 rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-900">{error}</p>}
     </section>
   );
 }
 
-export default function AnomalyInspectionDetail({ detail, onBack, onRefresh }) {
+function CancelInspection({ detail, onRefresh }) {
+  const { user } = useAuth();
+  const legacy = isLegacyInspection(detail);
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState('');
+  const [state, setState] = useState('idle');
+  const [error, setError] = useState('');
+  if (!['admin', 'manager'].includes(user?.role) || !canCancelInspection(detail)) return null;
+
+  async function submit(event) {
+    event.preventDefault();
+    if (reason.trim().length < 5 || state === 'saving') return;
+    setState('saving'); setError('');
+    try {
+      await cancelAnomalyInspection(detail.id, detail.version, reason.trim());
+      setOpen(false); setReason('');
+      await onRefresh();
+    } catch (requestError) {
+      setError(Number(requestError?.response?.status) === 409
+        ? 'Осмотр нельзя отменить: состояние изменилось или по нему ведётся план мер.'
+        : apiError(requestError));
+    } finally { setState('idle'); }
+  }
+
+  return (
+    <section aria-labelledby="cancel-heading" className="border-b border-slate-200 py-5">
+      <h2 id="cancel-heading" className="text-base font-bold text-slate-950">{legacy ? 'Закрытие устаревшего осмотра' : 'Отмена осмотра'}</h2>
+      {!open && <button type="button" onClick={() => setOpen(true)} className="mt-3 min-h-11 rounded-lg border border-red-400 px-4 text-sm font-bold text-red-900">{legacy ? 'Закрыть устаревший осмотр' : 'Отменить осмотр'}</button>}
+      {open && (
+        <form onSubmit={submit} className="mt-3 space-y-3 rounded-xl bg-slate-50 p-4">
+          <label className="block text-sm font-semibold text-slate-900">Причина (не менее 5 символов)
+            <textarea required minLength={5} maxLength={2000} rows={2} value={reason} onChange={(event) => setReason(event.target.value)} className="mt-1.5 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal" />
+          </label>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" onClick={() => { setOpen(false); setError(''); }} className="min-h-11 rounded-lg border border-slate-300 px-4 font-bold">Не отменять</button>
+            <button type="submit" disabled={state === 'saving' || reason.trim().length < 5} className="min-h-11 rounded-lg bg-red-700 px-4 font-bold text-white disabled:opacity-50">{state === 'saving' ? 'Сохраняем…' : 'Подтвердить'}</button>
+          </div>
+        </form>
+      )}
+      {error && <p role="alert" className="mt-3 rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-900">{error}</p>}
+    </section>
+  );
+}
+
+export default function AnomalyInspectionDetail({ detail, onBack, onRefresh, onNavigate }) {
   const { user } = useAuth();
   const [state, setState] = useState('idle');
   const [error, setError] = useState('');
   const role = user?.role;
-  const canStart = role === 'agronomist' && detail.status === 'assigned' && detail.assigned_to_id === user?.id;
-  const canSubmit = role === 'agronomist' && detail.status === 'in_progress' && Boolean(detail.finding);
+  const legacy = isLegacyInspection(detail);
+  const canStart = !legacy && role === 'agronomist' && detail.status === 'assigned' && detail.assigned_to_id === user?.id;
+  const canSubmit = !legacy && role === 'agronomist' && detail.status === 'in_progress' && Boolean(detail.finding);
   async function mutate(operation) { setState('saving'); setError(''); try { await operation(); await onRefresh(); } catch (requestError) { setError(apiError(requestError)); } finally { setState('idle'); } }
   return (
     <article className="h-full overflow-y-auto bg-white pt-16" aria-labelledby="inspection-detail-title">
-      <header className="sticky top-16 z-20 border-b border-slate-200 bg-white/95 px-4 py-3 backdrop-blur-sm sm:px-6"><div className="mx-auto flex max-w-6xl items-center gap-3"><button type="button" onClick={onBack} className="min-h-11 rounded-lg border border-slate-300 px-3 text-sm font-bold text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-700">← К очереди</button><div className="min-w-0 flex-1"><h1 id="inspection-detail-title" className="truncate text-lg font-bold text-slate-950">Осмотр #{detail.id} · {detail.field_name}</h1><p className="text-sm text-slate-600"><span>{STATUS[detail.status]}</span> · <span>{PRIORITY[detail.priority]}</span> · срок {new Date(detail.due_at).toLocaleString('ru-RU')}</p></div></div></header>
-      <div className="mx-auto max-w-6xl px-4 py-5 sm:px-6"><SourceContext detail={detail} />
+      <header className="sticky top-16 z-20 border-b border-slate-200 bg-white/95 px-4 py-3 backdrop-blur-sm sm:px-6"><div className="mx-auto flex max-w-6xl items-center gap-3"><button type="button" onClick={onBack} className="min-h-11 rounded-lg border border-slate-300 px-3 text-sm font-bold text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-green-700">← К очереди</button><div className="min-w-0 flex-1"><h1 id="inspection-detail-title" className="truncate text-lg font-bold text-slate-950">Осмотр #{detail.id} · {detail.field_name}</h1><p className="text-sm text-slate-600"><span>{INSPECTION_STATUS_LABELS[detail.status] || detail.status}</span> · <span>{INSPECTION_PRIORITY_LABELS[detail.priority] || detail.priority || 'приоритет не задан'}</span> · срок {formatTashkentDateTime(detail.due_at)}</p></div></div></header>
+      <div className="mx-auto max-w-6xl px-4 py-5 sm:px-6">
+        {legacy && <p role="note" className="mb-4 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-950">Осмотр создан в устаревшем контуре (TASK_209) и доступен только для чтения. Его можно закрыть с причиной; для новой проверки создайте канонический осмотр.</p>}
+        <SourceContext detail={detail} />
         {(canStart || canSubmit) && <div className="sticky bottom-3 z-10 my-4 flex justify-end rounded-xl border border-slate-200 bg-white p-3 shadow-md"><button type="button" disabled={state === 'saving'} onClick={() => mutate(() => canStart ? startAnomalyInspection(detail.id, detail.version) : submitAnomalyInspection(detail.id, detail.version))} className="min-h-12 w-full rounded-lg bg-green-700 px-5 font-bold text-white hover:bg-green-800 disabled:opacity-50 sm:w-auto">{canStart ? 'Начать осмотр' : 'Отправить на проверку'}</button></div>}
         {error && <p role="alert" className="rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-900">{error}</p>}
         <FindingWorkspace detail={detail} onRefresh={onRefresh} />
         <PhotoWorkspace detail={detail} onRefresh={onRefresh} />
-        <ReviewAndActions detail={detail} onRefresh={onRefresh} />
-        <section aria-labelledby="timeline-heading" className="py-5"><h2 id="timeline-heading" className="text-base font-bold text-slate-950">Хронология</h2>{detail.timeline?.length ? <ol className="mt-3 space-y-3">{detail.timeline.map((event) => <li key={event.id} className="grid gap-1 border-b border-slate-100 pb-3 text-sm sm:grid-cols-[11rem_1fr]"><time className="font-mono text-xs text-slate-600">{new Date(event.occurred_at).toLocaleString('ru-RU')}</time><div><p className="font-semibold text-slate-900">{event.event_type}</p><p className="text-slate-600">{event.actor_name} · версия {event.entity_version}</p>{event.event_metadata?.reason && <p className="mt-1 text-slate-700">{event.event_metadata.reason}</p>}</div></li>)}</ol> : <p className="mt-3 text-sm text-slate-600">Событий пока нет.</p>}</section>
+        <ReviewAndRemediation detail={detail} onRefresh={onRefresh} onNavigate={onNavigate} />
+        <CancelInspection detail={detail} onRefresh={onRefresh} />
+        <section aria-labelledby="timeline-heading" className="py-5"><h2 id="timeline-heading" className="text-base font-bold text-slate-950">Хронология</h2>{detail.timeline?.length ? <ol className="mt-3 space-y-3">{detail.timeline.map((event) => <li key={event.id} className="grid gap-1 border-b border-slate-100 pb-3 text-sm sm:grid-cols-[11rem_1fr]"><time className="font-mono text-xs text-slate-600">{formatTashkentDateTime(event.occurred_at)}</time><div><p className="font-semibold text-slate-900">{event.event_type}</p><p className="text-slate-600">{event.actor_name} · версия {event.entity_version}</p>{event.event_metadata?.reason && <p className="mt-1 text-slate-700">{event.event_metadata.reason}</p>}</div></li>)}</ol> : <p className="mt-3 text-sm text-slate-600">Событий пока нет.</p>}</section>
       </div>
     </article>
   );

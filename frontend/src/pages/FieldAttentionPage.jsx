@@ -5,7 +5,7 @@ import AttentionFilters from '../components/Attention/AttentionFilters';
 import AttentionSummaryCards from '../components/Attention/AttentionSummaryCards';
 import AttentionFieldCard from '../components/Attention/AttentionFieldCard';
 import InspectionCreateModal from '../components/Inspections/InspectionCreateModal';
-import { canWriteInspections, normalizeRole } from '../components/Inspections/inspectionPresentation';
+import { canCreateInspections, normalizeRole } from '../components/Inspections/inspectionPresentation';
 
 function localDate() {
   const now = new Date();
@@ -35,7 +35,7 @@ export default function FieldAttentionPage({ onNavigate, enterprises }) {
   const { user } = useAuth();
   const role = normalizeRole(user?.role);
   const isGlobalRole = role === 'admin' || role === 'manager';
-  const canCreateInspection = canWriteInspections(role);
+  const canCreateInspection = canCreateInspections(role);
   const [draft, setDraft] = useState(defaultFilters);
   const [applied, setApplied] = useState(defaultFilters);
   const [data, setData] = useState(null);
@@ -160,7 +160,7 @@ export default function FieldAttentionPage({ onNavigate, enterprises }) {
           })}</div>}
         </div>
       </div>
-      {createSource && <InspectionCreateModal source={createSource} user={user} assignees={[]} onClose={() => setSelectedAttention(null)} onSuccess={(inspection) => { setSelectedAttention(null); if (inspection?.id) onNavigate('field-inspection-detail', inspection.id); }} />}
+      {createSource && <InspectionCreateModal source={createSource} user={user} onClose={() => setSelectedAttention(null)} onSuccess={(inspection) => { setSelectedAttention(null); if (inspection?.id) onNavigate('field-inspection-detail', inspection.id); }} />}
     </main>
   );
 }
