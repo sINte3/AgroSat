@@ -2,6 +2,12 @@ import { useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
+const LOGIN_FAILURE_MESSAGES = Object.freeze({
+  credentials: 'Неверный email или пароль',
+  disabled: 'Учётная запись отключена. Обратитесь к администратору.',
+  unavailable: 'Сервер недоступен или не ответил. Повторите попытку.',
+});
+
 export default function LoginPage() {
   const { login } = useAuth();
   const location = useLocation();
@@ -18,10 +24,10 @@ export default function LoginPage() {
     setBusy(true);
     setError('');
 
-    const ok = await login(emailTrimmed, password);
+    const result = await login(emailTrimmed, password);
     setBusy(false);
 
-    if (ok) {
+    if (result?.ok) {
       const from = location.state?.from;
       const pathname = from?.pathname;
       const isSafePath =
@@ -36,7 +42,7 @@ export default function LoginPage() {
 
       navigate(destination, { replace: true });
     } else {
-      setError('Неверный email или пароль');
+      setError(LOGIN_FAILURE_MESSAGES[result?.reason] || LOGIN_FAILURE_MESSAGES.unavailable);
     }
   };
 

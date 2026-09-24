@@ -1,9 +1,10 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import {
   getNavigationKeysForRole,
   getNavigationLabelForRole,
 } from '../../config/roleAccess';
+import { listOfflineDrafts, offlineScope } from '../../offline/offlineScoutingStore.js';
 
 const NAV_ITEMS = [
   { key: 'dashboard', icon: DashboardIcon },
@@ -26,6 +27,10 @@ export default function Sidebar({ activeView, onNavigate, mobileOpen, onMobileCl
   const { user, logout } = useAuth();
   const drawerRef = useRef(null);
   const closeButtonRef = useRef(null);
+  const stayButtonRef = useRef(null);
+  const mountedRef = useRef(true);
+  const [logoutConfirmation, setLogoutConfirmation] = useState(null);
+  const [loggingOut, setLoggingOut] = useState(false);
   const profileName = user?.name || user?.full_name || user?.username || 'Профиль';
   const roleLabel = ROLE_LABELS[user?.role] || 'Профиль';
   const navigationItems = getNavigationKeysForRole(user?.role)
@@ -72,10 +77,52 @@ export default function Sidebar({ activeView, onNavigate, mobileOpen, onMobileCl
       }
     };
   }, [mobileOpen, onMobileClose]);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  useEffect(() => {
+    if (logoutConfirmation) stayButtonRef.current?.focus();
+  }, [logoutConfirmation]);
+
   const isActive = (key) => {
     if (activeView === 'field-detail') return key === 'fields';
     if (activeView === 'enterprise-detail') return key === 'enterprises';
     return activeView === key;
+  };
+
+  // An explicit logout removes this user's local offline partition (product
+  // contract). Unsynchronized drafts are never removed without confirmation.
+  const performLogout = async () => {
+    setLoggingOut(true);
+    try {
+      await logout();
+    } finally {
+      if (mountedRef.current) {
+        setLoggingOut(false);
+        setLogoutConfirmation(null);
+      }
+    }
+  };
+
+  const requestLogout = async () => {
+    if (loggingOut) return;
+    const scope = offlineScope(user);
+    let unsynchronized = 0;
+    if (scope) {
+      try {
+        unsynchronized = (await listOfflineDrafts(scope)).length;
+      } catch {
+        unsynchronized = 0;
+      }
+    }
+    if (!mountedRef.current) return;
+    if (unsynchronized > 0) {
+      setLogoutConfirmation({ count: unsynchronized });
+      return;
+    }
+    await performLogout();
   };
 
   return (
@@ -121,6 +168,16 @@ export default function Sidebar({ activeView, onNavigate, mobileOpen, onMobileCl
       </nav>
 
       {/* Bottom */}
+      {logoutConfirmation && (
+        <div role="alertdialog" aria-labelledby="logout-confirmation-title" aria-describedby="logout-confirmation-text" className="border-t border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">
+          <p id="logout-confirmation-title" className="font-semibold">Несинхронизированные черновики: {logoutConfirmation.count}</p>
+          <p id="logout-confirmation-text" className="mt-1 leading-5">При выходе они будут удалены с этого устройства. Чтобы сохранить их, откройте «Осмотры» и отправьте черновики на сервер, затем выйдите.</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button ref={stayButtonRef} type="button" onClick={() => setLogoutConfirmation(null)} disabled={loggingOut} className="btn-secondary min-h-11 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-agro-accent">Остаться</button>
+            <button type="button" onClick={performLogout} disabled={loggingOut} className="min-h-11 rounded-lg border border-red-400 bg-white px-3 text-sm font-semibold text-red-900 hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-red-600 disabled:opacity-60">{loggingOut ? 'Выходим…' : 'Выйти и удалить'}</button>
+          </div>
+        </div>
+      )}
       <div className="flex items-center gap-3 border-t border-agro-border p-4">
         <div className="relative group">
           <div className="w-7 h-7 rounded-full bg-agro-card flex items-center justify-center text-agro-muted text-xs">
@@ -128,7 +185,7 @@ export default function Sidebar({ activeView, onNavigate, mobileOpen, onMobileCl
           </div>
         </div>
         <div className="min-w-0 flex-1"><p className="truncate text-sm font-medium text-agro-text">{profileName}</p><p className="text-xs text-agro-muted">{roleLabel}</p></div>
-        <button type="button" onClick={logout} className="rounded-lg px-2 py-1 text-xs font-medium text-agro-muted hover:bg-agro-hover hover:text-agro-text focus:outline-none focus:ring-2 focus:ring-agro-accent">Выйти</button>
+        <button type="button" onClick={requestLogout} disabled={loggingOut} className="rounded-lg px-2 py-1 text-xs font-medium text-agro-muted hover:bg-agro-hover hover:text-agro-text focus:outline-none focus:ring-2 focus:ring-agro-accent disabled:opacity-60">Выйти</button>
       </div>
     </aside>
     </>

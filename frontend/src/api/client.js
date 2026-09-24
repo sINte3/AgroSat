@@ -1,5 +1,9 @@
-import axios from 'axios';
-import { purgeOfflineScoutingData } from '../offline/offlineScoutingStore.js';
+import axios, { CanceledError } from 'axios';
+import {
+  invalidateSession,
+  readSessionToken,
+  registerUserScopedCacheClearer,
+} from '../auth/session.js';
 
 const client = axios.create({
   baseURL: '/api/',
@@ -18,7 +22,7 @@ export function getSameOriginApiAuthorizationHeaders(url) {
   } catch (_) {
     return {};
   }
-  const token = localStorage.getItem('agrosat_token');
+  const token = readSessionToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
@@ -33,7 +37,10 @@ client.interceptors.request.use(config => {
     config.url = config.url.replace(/^\/api\//, '');
   }
 
-  const token = localStorage.getItem('agrosat_token');
+  const token = readSessionToken();
+  // Remember which credential this request carried: a 401 for an older
+  // credential must not end a session established after the request left.
+  config.__sessionToken = token;
   if (token) {
     config.headers = config.headers || {};
     config.headers.Authorization = `Bearer ${token}`;
@@ -56,32 +63,77 @@ async function cachedGet(url, params = {}, ttl = TTL) {
   return data;
 }
 
-// ─── Retry interceptor (timeout + 5xx, up to 2 retries) ─────────────────────
+// Cached responses belong to one authenticated user; a session end or a
+// different user drops them. Offline scouting data is not a cache and is kept.
+function clearApiResponseCaches() {
+  cache.clear();
+  try {
+    sessionStorage.removeItem(GEO_CACHE_KEY);
+  } catch {
+    // sessionStorage may be unavailable.
+  }
+}
+registerUserScopedCacheClearer(clearApiResponseCaches);
+
+// ─── Automatic retry policy ──────────────────────────────────────────────────
+// Only safe read methods are retried, and only after a timeout or a 5xx. A
+// mutation is never re-sent automatically, even after a timeout: its outcome is
+// unknown and an Idempotency-Key does not make a hidden duplicate acceptable.
+
+export const SAFE_RETRY_METHODS = Object.freeze(['get', 'head']);
+export const MAX_AUTOMATIC_RETRIES = 2;
+const RETRY_BASE_DELAY_MS = 1000;
+const TIMEOUT_CODES = new Set(['ECONNABORTED', 'ETIMEDOUT']);
+
+function isCancelledRequest(error, config) {
+  return axios.isCancel(error)
+    || error?.code === 'ERR_CANCELED'
+    || error?.name === 'CanceledError'
+    || error?.name === 'AbortError'
+    || Boolean(config?.signal?.aborted);
+}
+
+export function isAutomaticRetryAllowed(error) {
+  const config = error?.config;
+  if (!config || config.__noRetry) return false;
+  if (isCancelledRequest(error, config)) return false;
+  if (!SAFE_RETRY_METHODS.includes(String(config.method || 'get').toLowerCase())) return false;
+  if ((Number(config.__retryCount) || 0) >= MAX_AUTOMATIC_RETRIES) return false;
+  const status = Number(error?.response?.status || 0);
+  if (status) return status >= 500;
+  return TIMEOUT_CODES.has(error?.code);
+}
+
+function waitBeforeRetry(attempt, config) {
+  const signal = config.signal;
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new CanceledError('Request aborted before retry', config));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener?.('abort', onAbort);
+      resolve();
+    }, RETRY_BASE_DELAY_MS * attempt);
+    signal?.addEventListener?.('abort', onAbort, { once: true });
+  });
+}
 
 client.interceptors.response.use(
   response => response,
   async error => {
-    if (error?.response?.status === 401) {
-      await purgeOfflineScoutingData().catch(() => {});
-      localStorage.removeItem('agrosat_token');
-      localStorage.removeItem('agrosat_user');
-      window.dispatchEvent(new Event('agrosat:logout'));
-
-      if (window.location.pathname !== '/login') {
-        window.location.href = '/login';
-      }
-
+    const config = error?.config;
+    if (error?.response?.status === 401 && !config?.__skipSessionInvalidation) {
+      // Involuntary authentication loss: end the web session only. Offline
+      // scouting drafts stay on the device for the same user to recover.
+      invalidateSession({ reason: 'unauthorized', failedToken: config?.__sessionToken ?? null });
       return Promise.reject(error);
     }
 
-    const config = error.config;
-    if (!config || config.__retryCount >= 2) return Promise.reject(error);
-    if (error.code === 'ECONNABORTED' || error.response?.status >= 500) {
-      config.__retryCount = (config.__retryCount || 0) + 1;
-      await new Promise(r => setTimeout(r, 1000 * config.__retryCount));
-      return client(config);
-    }
-    return Promise.reject(error);
+    if (!isAutomaticRetryAllowed(error)) return Promise.reject(error);
+    config.__retryCount = (Number(config.__retryCount) || 0) + 1;
+    await waitBeforeRetry(config.__retryCount, config);
+    return client(config);
   }
 );
 
@@ -175,10 +227,8 @@ export async function getLatestNDVI(fieldId) {
   return data;
 }
 
-export async function refreshNDVI(fieldId) {
-  const { data } = await client.post(`ndvi/${fieldId}/refresh`);
-  return data;
-}
+// Satellite collection is owned by the standalone collector: the web client
+// only reads persisted observations and never triggers a provider request.
 
 // ─── Alerts ─────────────────────────────────────────────────────────────────
 // NOT cached — alerts must always be fresh
@@ -299,6 +349,9 @@ export async function loginWithPassword(email, password) {
 
   const { data } = await client.post('auth/login', params, {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    // A rejected credential is a login failure, not the loss of the current
+    // session; the caller reports it.
+    __skipSessionInvalidation: true,
   });
 
   return data;
@@ -307,6 +360,46 @@ export async function loginWithPassword(email, password) {
 // ─── Satellite Coverage ──────────────────────────────────────────────
 
 const VALID_INDEX_CODES = ['savi', 'evi', 'ndmi', 'ndre'];
+
+function listValues(value) {
+  if (value === null || value === undefined || value === '') return [];
+  return (Array.isArray(value) ? value : String(value).split(','))
+    .map(item => String(item).trim())
+    .filter(Boolean);
+}
+
+/**
+ * Query parameters for GET /api/satellite-indices/coverage.
+ *
+ * The backend reads `field_ids` and `index_codes` as comma-separated strings;
+ * axios would send an array as `field_ids[]=…`, which the backend ignores and
+ * which silently widens the query to every field in scope. Lists are therefore
+ * serialized here, once, for every caller.
+ */
+export function serializeCoverageParams(params = {}) {
+  const cleaned = { ...params };
+
+  if ('field_ids' in cleaned) {
+    const ids = listValues(cleaned.field_ids).map(Number);
+    if (ids.some(id => !Number.isSafeInteger(id) || id <= 0)) {
+      throw new Error('field_ids must contain positive integer field identifiers');
+    }
+    if (ids.length) cleaned.field_ids = Array.from(new Set(ids)).join(',');
+    else delete cleaned.field_ids;
+  }
+
+  // NDVI is never requested from the satellite-indices coverage endpoint.
+  if (cleaned.index_codes === undefined || cleaned.index_codes === null || cleaned.index_codes === '') {
+    delete cleaned.index_codes;
+  } else {
+    const codes = listValues(cleaned.index_codes)
+      .map(code => code.toLowerCase())
+      .filter(code => code !== 'ndvi');
+    cleaned.index_codes = (codes.length ? Array.from(new Set(codes)) : VALID_INDEX_CODES).join(',');
+  }
+
+  return cleaned;
+}
 
 /**
  * Fetch satellite-index coverage summary.
@@ -317,24 +410,14 @@ const VALID_INDEX_CODES = ['savi', 'evi', 'ndmi', 'ndre'];
  * date_to, active_only, include_empty, stale_after_days, as_of.
  *
  * Rules:
+ * - field_ids / index_codes are sent as comma-separated strings.
  * - NDVI is never included in index_codes — stripped before request.
  * - Response is normalized defensively: missing summary/fields are safe.
- * - 401/403 are surfaced via the retry interceptor's 401 handler.
+ * - 401 ends the web session through the response interceptor.
  * - 422 surfaces a configuration error string.
  */
 export async function getSatelliteCoverage(params = {}, signal) {
-  const cleaned = { ...params };
-
-  // Strip NDVI from index_codes if present
-  if (cleaned.index_codes) {
-    const codes = Array.isArray(cleaned.index_codes)
-      ? cleaned.index_codes
-      : String(cleaned.index_codes).split(',').map(s => s.trim().toLowerCase());
-    cleaned.index_codes = codes.filter(c => c !== 'ndvi');
-    if (cleaned.index_codes.length === 0) {
-      cleaned.index_codes = VALID_INDEX_CODES;
-    }
-  }
+  const cleaned = serializeCoverageParams(params);
 
   try {
     const { data } = await client.get('satellite-indices/coverage', {
