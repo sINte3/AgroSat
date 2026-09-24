@@ -93,9 +93,13 @@ def work_transition(payload: WorkCommand, plan_id: int = Path(..., gt=0), item_i
 
 
 @router.post("/{plan_id}/work/{item_id}/evidence", response_model=MutationResponse, status_code=201)
-async def upload_evidence(plan_id: int = Path(..., gt=0), item_id: int = Path(..., gt=0), expected_plan_version: int = Form(..., gt=0), expected_version: int = Form(..., gt=0), key: str = Form(..., min_length=8, max_length=64), photo: UploadFile = File(...), db: Session = Depends(get_db), current_user=Depends(get_current_active_user)):
+def upload_evidence(plan_id: int = Path(..., gt=0), item_id: int = Path(..., gt=0), expected_plan_version: int = Form(..., gt=0), expected_version: int = Form(..., gt=0), key: str = Form(..., min_length=8, max_length=64), photo: UploadFile = File(...), db: Session = Depends(get_db), current_user=Depends(get_current_active_user)):
+    # Plain def: the synchronous Session and private media write run in the threadpool.
     if not KEY.fullmatch(key): raise HTTPException(422, "Invalid idempotency key")
-    content = await photo.read(8 * 1024 * 1024 + 1); await photo.close()
+    try:
+        content = photo.file.read(8 * 1024 * 1024 + 1)
+    finally:
+        photo.file.close()
     return service.upload_evidence(db, current_user, plan_id, item_id, expected_plan_version, expected_version, key, photo.filename or "photo", photo.content_type or "application/octet-stream", content)
 
 

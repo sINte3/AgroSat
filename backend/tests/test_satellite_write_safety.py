@@ -1,7 +1,6 @@
 """Regression tests for fail-closed satellite write safety."""
 
 import argparse
-import asyncio
 import ast
 import importlib
 import os
@@ -451,7 +450,6 @@ class StaticContractTests(unittest.TestCase):
 
     def test_final_write_boundaries_retain_central_guards(self):
         contracts = (
-            ("api/ndvi.py", "refresh_ndvi", "require_payload_provenance(ndvi_data)"),
             ("scripts/fetch_all_ndvi.py", "fetch_ndvi_for_all", "require_payload_provenance(ndvi_data)"),
             ("scripts/backfill_ndvi_history.py", "backfill_field", "require_payload_provenance(ndvi_data)"),
             ("scripts/run_remaining_backfill.py", "main", "require_payload_provenance(ndvi_data)"),
@@ -465,60 +463,32 @@ class StaticContractTests(unittest.TestCase):
 
 
 class ApiSchedulerScriptTests(unittest.TestCase):
-    def test_refresh_missing_credentials_503_before_db(self):
-        from api.ndvi import refresh_ndvi
-        from services.satellite_safety import SatelliteConfigurationError
-        from fastapi import HTTPException
-        db = Mock()
-        with patch("services.satellite.get_satellite_service", side_effect=SatelliteConfigurationError()):
-            with self.assertRaises(HTTPException) as raised:
-                asyncio.run(refresh_ndvi(1, db=db, _auth_field=Mock(name="field")))
-        self.assertEqual(raised.exception.status_code, 503)
-        db.execute.assert_not_called()
-        db.rollback.assert_not_called()
+    def test_web_refresh_is_retired_before_provider_or_database(self):
+        """TASK_225 (C13): the web process no longer collects satellite data.
 
-    def assert_refresh_partial_credentials_503(self, client_id, secret):
-        from api.ndvi import refresh_ndvi
-        from config import settings
-        from fastapi import HTTPException
-        db = Mock()
-        with patch.object(settings, "sentinel_hub_client_id", client_id), patch.object(
-            settings, "sentinel_hub_client_secret", secret
-        ):
-            with self.assertRaises(HTTPException) as raised:
-                asyncio.run(refresh_ndvi(1, db=db, _auth_field=Mock(name="field")))
-        self.assertEqual(raised.exception.status_code, 503)
-        self.assertNotIn(client_id or secret, raised.exception.detail)
-        db.execute.assert_not_called()
-        db.commit.assert_not_called()
-        db.rollback.assert_not_called()
-
-    def test_refresh_client_id_only_503_before_db(self):
-        self.assert_refresh_partial_credentials_503("client-id", "")
-
-    def test_refresh_client_secret_only_503_before_db(self):
-        self.assert_refresh_partial_credentials_503("", "client-secret")
-
-    def test_refresh_mock_payload_rejected_before_write_operations(self):
+        The former refresh called the provider synchronously on the event loop
+        and wrote an observation outside the collection-run contract. It now
+        answers 410 Gone without touching the provider or any session.
+        """
         from api.ndvi import refresh_ndvi
         from fastapi import HTTPException
-        service = Mock()
-        service.get_ndvi_stats.return_value = {
-            "satellite": "Mock/Dev",
-            "mean_ndvi": 0.5,
-            "captured_date": "2026-07-01",
-        }
-        geometry = Mock(geometry_wkt="POLYGON EMPTY")
-        db = Mock()
-        db.execute.return_value.fetchone.return_value = geometry
-        with patch("services.satellite.get_satellite_service", return_value=service):
+        with patch("services.satellite.get_satellite_service") as provider:
             with self.assertRaises(HTTPException) as raised:
-                asyncio.run(refresh_ndvi(1, db=db, _auth_field=Mock(name="field")))
-        self.assertEqual(raised.exception.status_code, 502)
-        self.assertNotIn("Mock/Dev", raised.exception.detail)
-        self.assertEqual(db.execute.call_count, 1)
-        db.commit.assert_not_called()
-        db.rollback.assert_not_called()
+                refresh_ndvi(1, current_user=Mock(name="user"))
+        self.assertEqual(raised.exception.status_code, 410)
+        self.assertEqual(raised.exception.detail["code"], "lifecycle_endpoint_retired")
+        self.assertIn("collect_satellite.py", raised.exception.detail["replacement"])
+        provider.assert_not_called()
+
+    def test_web_refresh_has_no_database_or_provider_dependency(self):
+        import inspect
+        from api.ndvi import refresh_ndvi
+        parameters = inspect.signature(refresh_ndvi).parameters
+        self.assertNotIn("db", parameters)
+        self.assertNotIn("_auth_field", parameters)
+        source = inspect.getsource(refresh_ndvi)
+        for forbidden in ("get_satellite_service", "INSERT INTO", "commit"):
+            self.assertNotIn(forbidden, source)
 
     def test_fetch_all_missing_credentials_before_init_db(self):
         from scripts import fetch_all_ndvi

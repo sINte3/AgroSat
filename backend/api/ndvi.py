@@ -1,26 +1,31 @@
+"""Read-only NDVI endpoints.
+
+Satellite collection is owned by the standalone collector
+(scripts/collect_satellite.py), which writes observations inside a
+satellite_collection_runs record under its advisory lock. The web process
+never calls the provider and never writes an observation: the former
+synchronous refresh endpoint is retired with 410 Gone (TASK_225).
+"""
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from database import get_db
 from datetime import datetime, timedelta
-import logging
 
-from api.dependencies import (
-    get_authorized_field_row,
-    get_authorized_field_row_for_write,
-)
+from api.auth import get_current_active_user
+from api.dependencies import get_authorized_field_row
+from api.lifecycle_retirement import retired
 from api.query_bounds import (
     SATELLITE_HISTORY_ROW_CAP,
     ensure_within_row_cap,
     fetch_limit,
 )
 
-logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/ndvi", tags=["ndvi"])
 
 
 @router.get("/{field_id}/history")
-async def get_ndvi_history(
+def get_ndvi_history(
     field_id: int,
     days: int = 90,
     include_cloudy: bool = False,
@@ -95,7 +100,7 @@ async def get_ndvi_history(
 
 
 @router.get("/{field_id}/latest")
-async def get_ndvi_latest(
+def get_ndvi_latest(
     field_id: int,
     db: Session = Depends(get_db),
     _auth_field=Depends(get_authorized_field_row),
@@ -128,167 +133,15 @@ async def get_ndvi_latest(
     }
 
 
-@router.post("/{field_id}/refresh")
-async def refresh_ndvi(
+@router.post("/{field_id}/refresh", status_code=410)
+def refresh_ndvi(
     field_id: int,
-    db: Session = Depends(get_db),
-    _auth_field=Depends(get_authorized_field_row_for_write),
+    current_user=Depends(get_current_active_user),
 ):
-    """Force refresh NDVI for a field now. Admin/manager/agronomist only."""
-    from services.satellite import get_satellite_service, validate_ndvi_quality
-    from services.satellite_safety import (
-        SatelliteConfigurationError,
-        SatelliteProvenanceError,
-        require_payload_provenance,
+    """Retired: the web process no longer collects satellite data."""
+    raise retired(
+        "POST /api/ndvi/{field_id}/refresh",
+        "Collection runs in the standalone collector (scripts/collect_satellite.py); "
+        "read GET /api/ndvi/{field_id}/latest",
+        "Synchronous web-process satellite collection is retired; no observation is written.",
     )
-
-    try:
-        satellite_service = get_satellite_service()
-    except SatelliteConfigurationError:
-        raise HTTPException(status_code=503, detail="Satellite service unavailable")
-
-    try:
-
-        geom_row = db.execute(
-            text("SELECT ST_AsText(geometry) AS geometry_wkt FROM fields WHERE id = :fid"),
-            {"fid": field_id},
-        ).fetchone()
-        if not geom_row or not geom_row.geometry_wkt:
-            raise HTTPException(status_code=404, detail="Field geometry not found")
-
-        today = datetime.now().date()
-        ndvi_data = satellite_service.get_ndvi_stats(
-            geometry_wkt=geom_row.geometry_wkt,
-            date_from=today - timedelta(days=10),
-            date_to=today,
-        )
-
-        if not ndvi_data:
-            return {
-                "status": "no_data",
-                "message": "Satellite data unavailable or cloud cover too high",
-            }
-
-        try:
-            require_payload_provenance(ndvi_data)
-        except SatelliteProvenanceError:
-            raise HTTPException(status_code=502, detail="Satellite data unavailable")
-
-        is_valid, reason = validate_ndvi_quality(
-            mean_ndvi=ndvi_data["mean_ndvi"],
-            cloud_cover_pct=ndvi_data.get("cloud_cover_pct"),
-            min_ndvi=ndvi_data.get("min_ndvi"),
-            max_ndvi=ndvi_data.get("max_ndvi"),
-            field_name=_auth_field.name,
-        )
-        if not is_valid:
-            return {
-                "status": "rejected",
-                "message": "NDVI data rejected by quality gate",
-                "reason": reason,
-            }
-
-        captured_date = datetime.fromisoformat(str(ndvi_data["captured_date"])).date()
-
-        existing = db.execute(
-            text("""
-                SELECT id, mean_ndvi
-                FROM ndvi_records
-                WHERE field_id = :fid AND captured_date = :captured_date
-                LIMIT 1
-            """),
-            {"fid": field_id, "captured_date": captured_date},
-        ).fetchone()
-
-        if existing:
-            return {
-                "status": "exists",
-                "message": "NDVI record for this date already exists",
-                "record_id": existing.id,
-                "ndvi": float(existing.mean_ndvi) if existing.mean_ndvi is not None else None,
-            }
-
-        prev = db.execute(
-            text("""
-                SELECT mean_ndvi
-                FROM ndvi_records
-                WHERE field_id = :fid
-                ORDER BY captured_date DESC
-                LIMIT 1
-            """),
-            {"fid": field_id},
-        ).fetchone()
-
-        ndvi_change = None
-        ndvi_change_pct = None
-        if prev and prev.mean_ndvi is not None and prev.mean_ndvi != 0:
-            ndvi_change = float(ndvi_data["mean_ndvi"]) - float(prev.mean_ndvi)
-            ndvi_change_pct = (ndvi_change / float(prev.mean_ndvi)) * 100
-
-        row = db.execute(
-            text("""
-                INSERT INTO ndvi_records (
-                    field_id,
-                    captured_date,
-                    mean_ndvi,
-                    min_ndvi,
-                    max_ndvi,
-                    std_ndvi,
-                    p10_ndvi,
-                    p90_ndvi,
-                    cloud_cover_pct,
-                    valid_pixels_pct,
-                    satellite,
-                    ndvi_change,
-                    ndvi_change_pct,
-                    processed_at
-                )
-                VALUES (
-                    :field_id,
-                    :captured_date,
-                    :mean_ndvi,
-                    :min_ndvi,
-                    :max_ndvi,
-                    :std_ndvi,
-                    :p10_ndvi,
-                    :p90_ndvi,
-                    :cloud_cover_pct,
-                    :valid_pixels_pct,
-                    :satellite,
-                    :ndvi_change,
-                    :ndvi_change_pct,
-                    NOW()
-                )
-                RETURNING id, mean_ndvi
-            """),
-            {
-                "field_id": field_id,
-                "captured_date": captured_date,
-                "mean_ndvi": ndvi_data.get("mean_ndvi"),
-                "min_ndvi": ndvi_data.get("min_ndvi"),
-                "max_ndvi": ndvi_data.get("max_ndvi"),
-                "std_ndvi": ndvi_data.get("std_ndvi"),
-                "p10_ndvi": ndvi_data.get("p10_ndvi"),
-                "p90_ndvi": ndvi_data.get("p90_ndvi"),
-                "cloud_cover_pct": ndvi_data.get("cloud_cover_pct"),
-                "valid_pixels_pct": ndvi_data.get("valid_pixels_pct"),
-                "satellite": require_payload_provenance(ndvi_data),
-                "ndvi_change": ndvi_change,
-                "ndvi_change_pct": ndvi_change_pct,
-            },
-        ).fetchone()
-        db.commit()
-
-        return {
-            "status": "ok",
-            "message": "NDVI updated",
-            "record_id": row.id,
-            "ndvi": float(row.mean_ndvi) if row.mean_ndvi is not None else None,
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        db.rollback()
-        logger.error(f"NDVI refresh error for field {field_id}: {e}")
-        raise HTTPException(status_code=500, detail="NDVI refresh failed")

@@ -65,14 +65,12 @@ def user(role="admin", enterprise_id=None):
 def test_legacy_ndvi_history_rejects_unbounded_days(days):
     db = RecordingSession()
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(
-            get_ndvi_history(
-                field_id=4,
-                days=days,
-                include_cloudy=False,
-                db=db,
-                _auth_field=auth_field(),
-            )
+        get_ndvi_history(
+            field_id=4,
+            days=days,
+            include_cloudy=False,
+            db=db,
+            _auth_field=auth_field(),
         )
 
     assert exc.value.status_code == 422
@@ -81,14 +79,12 @@ def test_legacy_ndvi_history_rejects_unbounded_days(days):
 
 def test_legacy_ndvi_history_query_has_explicit_limit():
     db = RecordingSession()
-    result = asyncio.run(
-        get_ndvi_history(
-            field_id=4,
-            days=90,
-            include_cloudy=False,
-            db=db,
-            _auth_field=auth_field(),
-        )
+    result = get_ndvi_history(
+        field_id=4,
+        days=90,
+        include_cloudy=False,
+        db=db,
+        _auth_field=auth_field(),
     )
 
     statement, params = db.calls[0]

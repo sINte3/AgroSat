@@ -1,6 +1,5 @@
 """TASK_209 read-only route, role, tenant, and boundedness contract matrix."""
 
-import asyncio
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -319,5 +318,5 @@ def test_manager_field_object_query_contains_tenant_predicate():
 def test_unknown_active_role_is_rejected_by_shared_auth_dependency():
     unknown = SimpleNamespace(is_active=True, role="unexpected")
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(get_current_active_user(unknown))
+        get_current_active_user(unknown)
     assert exc.value.status_code == 403

@@ -178,8 +178,8 @@ class JWTSecretValidationTests(unittest.TestCase):
         mock_db = MagicMock()
 
         with self.assertRaises(RuntimeError):
-            import asyncio
-            asyncio.run(get_current_user(token=token, db=mock_db))
+            # A plain dependency since TASK_225 (runs in the threadpool).
+            get_current_user(token=token, db=mock_db)
 
         # DB should NOT have been queried — failure is in config, not DB lookup.
         mock_db.query.assert_not_called()
@@ -214,8 +214,7 @@ class TokenValidationTests(unittest.TestCase):
         else:
             mock_filter.first.return_value = None
 
-        import asyncio
-        return asyncio.run(get_current_user(token=token, db=mock_db))
+        return get_current_user(token=token, db=mock_db)
 
     def _make_fake_user(self, **kwargs):
         user = MagicMock()
