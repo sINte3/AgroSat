@@ -298,6 +298,23 @@ def test_state_identity_and_terminal_refusal(tmp_path):
     assert "R-state-0001" in used_release_ids(tmp_path)
 
 
+def test_gate_record_left_by_an_interrupted_run_is_kept_and_the_resume_records_the_next_attempt(tmp_path):
+    identity = {"release_id": "R-state-0002", "candidate_sha": CANDIDATE, "expected_current_sha": CURRENT}
+    state = ReleaseState.open(tmp_path, "R-state-0002", identity, ("A", "B"), operation="release")
+    state.begin("A")
+    orphan = state.directory / "gates" / "01_A-attempt1.json"
+    orphan.parent.mkdir(parents=True)
+    orphan.write_text('{"gate": "A", "status": "passed", "from": "interrupted run"}', encoding="utf-8")
+    # The interrupted run died before saving the state: on disk, gate A is running with no attempt.
+    resumed = ReleaseState.open(tmp_path, "R-state-0002", identity, ("A", "B"), operation="release")
+    resumed.begin("A")
+    resumed.record("A", "passed", {"summary": {"resumed": True}})
+    result = resumed.data["gate_results"]["A"]
+    assert result["interruptions"] == 1 and result["starts"] == 2
+    assert result["evidence"] == ["gates/01_A-attempt2.json"]
+    assert "interrupted run" in orphan.read_text(encoding="utf-8")
+
+
 def test_evidence_refuses_credentials(tmp_path):
     assert find_secrets({"url": "postgresql://u:p@host/db"}) == ["$.url"]
     assert find_secrets({"DATABASE_URL": "anything"}) == ["$.DATABASE_URL"]

@@ -119,9 +119,15 @@ class ReleaseState:
 
     def _attempt_path(self, gate: str) -> Path:
         result = self.data["gate_results"].setdefault(gate, {"status": "pending", "attempts": 0, "evidence": []})
-        result["attempts"] += 1
         index = self.gates.index(gate) + 1 if gate in self.gates else 99
-        return self.directory / "gates" / f"{index:02d}_{gate}-attempt{result['attempts']}.json"
+        while True:
+            result["attempts"] += 1
+            path = self.directory / "gates" / f"{index:02d}_{gate}-attempt{result['attempts']}.json"
+            # A run interrupted between writing its immutable attempt record and saving
+            # the state leaves that record behind; it stays as evidence and the resumed
+            # run records the next attempt.
+            if not path.exists():
+                return path
 
     def begin(self, gate: str) -> None:
         self.data["current_gate"] = gate
