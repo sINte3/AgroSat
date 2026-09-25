@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -54,6 +55,14 @@ PROVIDER_COUNTER_FIELDS = (
     "quality_blocked_count",
     "timeout_count",
 )
+# Windows system error codes of a sharing collision on a file replacement.
+ERROR_ACCESS_DENIED = 5
+ERROR_SHARING_VIOLATION = 32
+# Pauses between attempts to replace a published file that a reader or a
+# scanner holds open: doubling from 5 ms to 80 ms, then every 80 ms, so 15
+# attempts within 0.875 s. A reader holds a status file for one bounded read;
+# the flat tail keeps finding such a gap even while readers keep returning.
+REPLACE_RETRY_DELAYS_SECONDS = (0.005, 0.01, 0.02, 0.04, *(0.08,) * 10)
 MAX_CAPTURE_BYTES = 16384
 MUTEX_NAME = "Global\\AgroSatCanonicalSatelliteCollector_v1"
 
@@ -173,7 +182,64 @@ def resolve_dates(
     return start, end
 
 
-def atomic_json(path: Path, value: dict[str, Any]) -> None:
+def transient_replace_error(error: OSError, destination: Path) -> bool:
+    """Whether a failed replacement is a collision that clears by itself.
+
+    Python opens files on Windows without FILE_SHARE_DELETE. While any reader
+    holds the destination open (services.health reads status files that
+    way), replacing it fails with ERROR_ACCESS_DENIED; while another process,
+    such as a scanner, holds the new temporary file, with
+    ERROR_SHARING_VIOLATION. A directory or read-only destination also fails
+    with ERROR_ACCESS_DENIED and never clears, so that code counts only while
+    the destination is a regular, writable file. An access-control denial on
+    the file itself looks the same; it is raised once the schedule is spent.
+    Other platforms replace an open file without error, so nothing is retried
+    there.
+    """
+    code = getattr(error, "winerror", None)
+    if code == ERROR_SHARING_VIOLATION:
+        return True
+    if code != ERROR_ACCESS_DENIED:
+        return False
+    try:
+        state = os.stat(destination)
+    except OSError:
+        return False
+    return stat.S_ISREG(state.st_mode) and not (
+        getattr(state, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_READONLY
+    )
+
+
+def replace_file(
+    source: str,
+    destination: Path,
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Atomically replace ``destination`` with ``source``.
+
+    A transient collision is retried on REPLACE_RETRY_DELAYS_SECONDS with the
+    same source file; the destination keeps its previous complete content until
+    the one replacement that succeeds. Any other error, or a collision that
+    outlasts the schedule, is raised.
+    """
+    for delay in REPLACE_RETRY_DELAYS_SECONDS:
+        try:
+            os.replace(source, destination)
+            return
+        except OSError as error:
+            if not transient_replace_error(error, destination):
+                raise
+        sleep(delay)
+    os.replace(source, destination)
+
+
+def atomic_json(
+    path: Path,
+    value: dict[str, Any],
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(
         prefix=".tmp-",
@@ -185,13 +251,41 @@ def atomic_json(path: Path, value: dict[str, Any]) -> None:
             json.dump(sanitize(value), handle, ensure_ascii=False, sort_keys=True)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    except Exception:
+        replace_file(temporary, path, sleep=sleep)
+    except BaseException:
+        # Also when interrupted during a pause between attempts.
         try:
             os.unlink(temporary)
         except OSError:
             pass
         raise
+
+
+def persistence_failure(label: str, error: BaseException) -> str:
+    """Why publishing ``label`` failed: the error and its code, never a path.
+
+    An OSError's text carries the full paths of both files of a replacement;
+    the directories are known from the configuration, so only the name of the
+    file concerned is kept.
+    """
+    if not isinstance(error, OSError):
+        return sanitize_text(f"{label} persistence failed: {type(error).__name__}: {error}", 500)
+    code = getattr(error, "winerror", None)
+    target = error.filename2 if error.filename2 is not None else error.filename
+    parts = [
+        type(error).__name__,
+        f"[WinError {code}]"
+        if code is not None
+        else f"[Errno {error.errno}]"
+        if error.errno is not None
+        else "",
+        error.strerror if error.strerror is not None else str(error),
+        f"({os.path.basename(os.fsdecode(target))})"
+        if isinstance(target, (str, bytes, os.PathLike))
+        else "",
+    ]
+    detail = " ".join(part for part in parts if part)
+    return sanitize_text(f"{label} persistence failed: {detail}", 500)
 
 
 def classify_failure(summary: dict[str, Any]) -> str | None:
@@ -519,6 +613,10 @@ class HeartbeatPublisher:
         self.path = path
         self.run_id = run_id
         self.release_commit = release_commit
+        # Scheduled beats that could not be persisted, and why the last one
+        # could not.
+        self.missed_beats = 0
+        self.last_miss: str | None = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._loop, name="collector-heartbeat", daemon=True)
 
@@ -528,9 +626,22 @@ class HeartbeatPublisher:
             "release_commit": self.release_commit, "heartbeat_at": utc_now(),
         })
 
+    def _beat(self) -> None:
+        """One scheduled beat.
+
+        A beat that cannot be persisted must not end the heartbeat: the next
+        one is due at the same cadence, and stop() decides whether the final
+        one persisted.
+        """
+        try:
+            self._publish()
+        except Exception as exc:
+            self.missed_beats += 1
+            self.last_miss = persistence_failure("heartbeat", exc)
+
     def _loop(self) -> None:
         while not self._stop.wait(30):
-            self._publish()
+            self._beat()
 
     def start(self) -> None:
         self._publish()
@@ -725,12 +836,22 @@ def run(
             "LOCK_CONTENTION" if final_code == 3 else detail
         )
     finally:
+        # The heartbeat and status files are operational state, published
+        # around the collection and never into it. Failing to persist them is
+        # still an operational failure (exit code 4), but it is applied only
+        # after the database run is terminalized with its own outcome.
+        state_persistence_failed = False
         if heartbeat_publisher is not None:
             try:
                 heartbeat_publisher.stop()
             except Exception as exc:
-                final_code = 4
-                summary["diagnostics"].append(sanitize_text(f"heartbeat persistence failed: {exc}"))
+                state_persistence_failed = True
+                summary["diagnostics"].append(persistence_failure("heartbeat", exc))
+            if heartbeat_publisher.missed_beats:
+                summary["diagnostics"].append(
+                    f"{heartbeat_publisher.last_miss} "
+                    f"({heartbeat_publisher.missed_beats} scheduled beat(s) missed)"
+                )
         if apply_run is not None:
             from services.autonomous_monitoring import finish_apply_run
 
@@ -797,6 +918,8 @@ def run(
                 summary["diagnostics"].append(
                     sanitize_text(f"lock release failed: {exc}")
                 )
+        if state_persistence_failed:
+            final_code = 4
         summary.update(
             {
                 "finished_at": utc_now(),
@@ -804,15 +927,15 @@ def run(
                 "exit_code": final_code,
             }
         )
+        summary_persisted = False
         if summary_path is not None:
             try:
                 atomic_json(summary_path, summary)
+                summary_persisted = True
             except Exception as exc:
                 final_code = 4
                 summary["exit_code"] = final_code
-                summary["diagnostics"].append(
-                    sanitize_text(f"summary persistence failed: {exc}")
-                )
+                summary["diagnostics"].append(persistence_failure("summary", exc))
         if latest_status_path is not None:
             try:
                 snapshot = operational_snapshot(summary)
@@ -826,9 +949,13 @@ def run(
             except Exception as exc:
                 final_code = 4
                 summary["exit_code"] = final_code
-                summary["diagnostics"].append(
-                    sanitize_text(f"latest status persistence failed: {exc}")
-                )
+                summary["diagnostics"].append(persistence_failure("latest status", exc))
+                if summary_persisted:
+                    # The run's forensic record states the failure as well.
+                    try:
+                        atomic_json(summary_path, summary)
+                    except Exception as error:
+                        summary["diagnostics"].append(persistence_failure("summary", error))
     return final_code, sanitize(summary)
 
 
