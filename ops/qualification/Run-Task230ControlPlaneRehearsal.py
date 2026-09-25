@@ -9,8 +9,10 @@ Phases (all by default, in this order; each writes machine-readable evidence):
 ``release``   Run 1. Release A = 4cd8ea7 (production's SHA) runs with a
               production-shaped legacy supervisor on spare ports against
               agrosat_task230_rel1_<run> (restored from the backup). The control
-              plane releases B (the TASK_230 commit), then rolls back to A with
-              the explicit rollback operation.
+              plane releases B (the TASK_230 commit); the controller process is
+              ended right after SWITCH_BACKEND and the same command resumes it;
+              the same command once more is refused without side effects. Then
+              it rolls back to A with the explicit rollback operation.
 ``failure``   Run 2. Release A' = 387eaeda (Alembic head 0015) against
               agrosat_task230_rel2_<run> at 0015. The control plane releases B
               with an authorized 0015->0016 migration and a forced post-switch
@@ -59,6 +61,10 @@ PRODUCTION_RELEASES = Path(r"C:\AgroSat_releases\PROGRAM_R3")
 PG_BIN = Path(r"C:\Program Files\PostgreSQL\16\bin")
 NODE = Path(r"C:\Program Files\nodejs\node.exe")
 DEV_PYTHON = Path(r"C:\AgroSat\backend\venv\Scripts\python.exe")
+# The control plane is stdlib-only. A controller that must be interrupted runs on the
+# base interpreter, so the process ended is the controller itself and not a venv
+# launcher whose interpreter child would carry on.
+BASE_PYTHON = Path(getattr(sys, "_base_executable", sys.executable))
 CLI = REPOSITORY / "ops" / "release" / "Invoke-AgroSatControlPlane.py"
 THUMBPRINT = "816767BE400FE53327432B12B29FE4B5809CA4CA"
 A_SHA = "4cd8ea7240bbd2307488ad4871e504a672a812a6"
@@ -117,6 +123,26 @@ def cli(*arguments: str, evidence: Path | None = None, timeout: int = 3600) -> t
         write_json_atomic(evidence, {"arguments": list(arguments), "exit_code": result.returncode, "output": document},
                           check_secrets=True)
     return result.returncode, document
+
+
+def interrupt_controller(arguments: list[str], gate_file: Path, state_file: Path, evidence: Path) -> dict:
+    """Start the controller and end its process as soon as `gate_file` is recorded (TerminateProcess
+    on the handle of the process started here; nothing is looked up by name)."""
+    process = subprocess.Popen([str(BASE_PYTHON), "-B", str(CLI), *arguments], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+    deadline = time.monotonic() + 1800
+    while time.monotonic() < deadline and process.poll() is None and not gate_file.exists():
+        time.sleep(0.05)
+    exited_by_itself = process.poll() is not None
+    if not exited_by_itself:
+        process.terminate()
+        process.wait(timeout=60)
+    state = read_json(state_file, "X")
+    report = {"controller_pid": process.pid, "interrupted": not exited_by_itself, "exit_code": process.returncode,
+              "trigger": gate_file.name, "state_status": state["status"], "interrupted_in_gate": state["current_gate"],
+              "gate_status_on_disk": state["gate_results"].get(state["current_gate"], {}).get("status")}
+    write_json_atomic(evidence, report)
+    return report
 
 
 def restrict_acl(path: Path) -> None:
@@ -420,12 +446,14 @@ def write_bom_json(path: Path, value: dict) -> None:
     path.write_bytes(b"\xef\xbb\xbf" + text.replace("\r\n", "\n").replace("\n", "\r\n").encode("utf-8"))
 
 
+def stops_from_evidence(state_directory: Path, gate_prefix: str) -> list[dict]:
+    """The stop records of every attempt of a switch gate (a resumed attempt may find the switch done)."""
+    records = [read_json(path, "X") for path in sorted((state_directory / "gates").glob(f"*_{gate_prefix}-attempt*.json"))]
+    return [record["stop"] for record in records if record.get("stop")]
+
+
 def alive_from_evidence(state_directory: Path, gate_prefix: str) -> list:
-    files = sorted((state_directory / "gates").glob(f"*_{gate_prefix}-attempt*.json"))
-    if not files:
-        return []
-    record = read_json(files[-1], "X")
-    rows = (record.get("stop") or {}).get("captured", [])
+    rows = [row for stop in stops_from_evidence(state_directory, gate_prefix) for row in stop.get("captured", [])]
     return [identity.evidence() for identity in winproc.alive([winproc.ProcessIdentity(**row) for row in rows])]
 
 
@@ -525,20 +553,39 @@ def phase_release(context: dict) -> dict:
     auth, auth_sha = authorize(context["root"] / "authorizations" / f"{release_id}.json", operation="release",
                                release_id=release_id, candidate=candidate, current=A_SHA, database=rehearsal.database,
                                evidence=evidence / "01-authorize-release.json")
-    started = time.monotonic()
-    code, result = cli("release", "--mode", "rehearsal", "--profile", str(profile), "--release-id", release_id,
-                       "--candidate", candidate, "--expected-current", A_SHA, "--authorization", str(auth),
-                       "--authorization-sha256", auth_sha, "--repository", str(REPOSITORY), "--backup-policy", str(policy),
-                       evidence=evidence / "02-release.json")
-    release_seconds = round(time.monotonic() - started, 1)
+    arguments = ["release", "--mode", "rehearsal", "--profile", str(profile), "--release-id", release_id,
+                 "--candidate", candidate, "--expected-current", A_SHA, "--authorization", str(auth),
+                 "--authorization-sha256", auth_sha, "--repository", str(REPOSITORY), "--backup-policy", str(policy)]
     state_directory = rehearsal.control / "releases" / release_id
+    started = time.monotonic()
+    interruption = interrupt_controller(arguments, state_directory / "gates" / "07_SWITCH_BACKEND-attempt1.json",
+                                        state_directory / "state.json", evidence / "02a-interrupted-release.json")
+    code, result = cli(*arguments, evidence=evidence / "02-release.json")  # the same command resumes it
+    release_seconds = round(time.monotonic() - started, 1)
+    state = read_json(state_directory / "state.json", "X")
+    interrupted_gate = state["gate_results"].get(interruption["interrupted_in_gate"], {})
+    lifecycle = rehearsal.runtimes / candidate / "application" / "backend-lifecycle.jsonl"
+    resume = {**interruption, "resumed_exit": code, "resumed_status": state["status"],
+              "interrupted_gate_starts": interrupted_gate.get("starts"),
+              "interrupted_gate_interruptions": interrupted_gate.get("interruptions"),
+              "gate_starts": {gate: value.get("starts") for gate, value in state["gate_results"].items()},
+              "candidate_backend_supervisor_starts": sum(
+                  1 for line in lifecycle.read_text(encoding="utf-8").splitlines()
+                  if json.loads(line).get("status") == "started") if lifecycle.exists() else None}
+    # The same command for the completed release id must change nothing.
+    before = (sha256_file(state_directory / "state.json"), rehearsal.bindings())
+    code_again, again = cli(*arguments, evidence=evidence / "02b-rerun-completed-release.json")
+    idempotent = {"exit": code_again, "error": (again.get("error") or {}).get("code"),
+                  "state_and_bindings_unchanged": (sha256_file(state_directory / "state.json"),
+                                                   rehearsal.bindings()) == before}
     b_health = rehearsal.wait_healthy(candidate, head, rehearsal.releases / candidate, seconds=30)
     after_release = {"cli_exit": code, "status": result.get("status"), "seconds": release_seconds, "health": b_health,
+                     "resume": resume, "rerun_of_completed_release": idempotent,
                      "listeners": rehearsal.listener_ownership(), "bindings": rehearsal.bindings(),
                      "release_a_backend_processes_alive": alive_from_evidence(state_directory, "SWITCH_BACKEND"),
                      "release_a_frontend_processes_alive": alive_from_evidence(state_directory, "SWITCH_FRONTEND"),
-                     "legacy_handoff": read_json(sorted((state_directory / "gates").glob("*_SWITCH_BACKEND-attempt*.json"))[-1],
-                                                 "X")["stop"]["terminated_by_legacy_handoff"],
+                     "legacy_handoff": [row for stop in stops_from_evidence(state_directory, "SWITCH_BACKEND")
+                                        for row in stop.get("terminated_by_legacy_handoff", [])],
                      "evidence": evidence_inventory(state_directory)}
     write_json_atomic(evidence / "03-after-release.json", after_release)
     rollback_id = f"R230-{run}-rollback"
@@ -565,6 +612,13 @@ def phase_release(context: dict) -> dict:
     write_json_atomic(evidence / "06-after-rollback.json", after_rollback)
     context["run1"] = {"rehearsal": rehearsal, "policy": policy}
     passed = (code == 0 and result.get("status") == "PASS" and b_health["pass"]
+              and resume["interrupted"] and resume["state_status"] == "in_progress"
+              # A gate that was running when the controller ended counts one interruption; a
+              # kill between two gates leaves nothing running and nothing to count.
+              and resume["interrupted_gate_interruptions"] == (1 if resume["gate_status_on_disk"] == "running" else None)
+              and resume["resumed_status"] == "completed"
+              and resume["candidate_backend_supervisor_starts"] == 1
+              and code_again == 2 and idempotent["state_and_bindings_unchanged"]
               and all(item["owned_by_task_lineage"] for item in after_release["listeners"].values())
               and not after_release["release_a_backend_processes_alive"]
               and not after_release["release_a_frontend_processes_alive"]
@@ -574,6 +628,10 @@ def phase_release(context: dict) -> dict:
               and not after_rollback["release_b_backend_processes_alive"]
               and not after_rollback["release_b_frontend_processes_alive"])
     return {"release": {key: after_release[key] for key in ("cli_exit", "status", "seconds", "legacy_handoff")},
+            "resume": {key: resume[key] for key in ("interrupted", "interrupted_in_gate", "gate_status_on_disk",
+                                                    "interrupted_gate_starts", "interrupted_gate_interruptions",
+                                                    "candidate_backend_supervisor_starts", "resumed_status")},
+            "rerun_of_completed_release": idempotent,
             "rollback": {key: after_rollback[key] for key in ("cli_exit", "status", "rollback_case",
                                                               "db_revision_before_after", "bindings_equal_recorded_A")},
             "pass": passed}
