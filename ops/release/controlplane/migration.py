@@ -63,6 +63,11 @@ print(json.dumps({"heads": sorted(script.get_heads()), "revisions": revisions}))
 
 def alembic_graph(python: Path, backend_directory: Path) -> dict[str, Any]:
     """The migration graph shipped in ``backend_directory``, read by its own Alembic."""
+    # The script runs inside the backend directory: relative paths are resolved here, once.
+    backend_directory = Path(backend_directory).resolve()
+    python = Path(python)
+    if python.parent != Path("."):
+        python = python.resolve()
     result = subprocess.run([str(python), "-B", "-c", GRAPH_SCRIPT, str(backend_directory)],
                             capture_output=True, text=True, cwd=str(backend_directory), timeout=300,
                             env={key: value for key, value in os.environ.items()

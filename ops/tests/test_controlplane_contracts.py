@@ -111,6 +111,14 @@ def test_shipped_migrations_are_all_classified_by_alembic_graph_semantics():
     assert migration.verify_contract_covers_graph(CONTRACT, graph) == {"classified": 17, "graph_revisions": 17}
 
 
+def test_relative_backend_path_reads_the_same_graph_as_ci_invokes_it(monkeypatch):
+    # ci.yml runs `rollback-contract --backend backend` from the repository root.
+    root = Path(__file__).resolve().parents[2]
+    monkeypatch.chdir(root)
+    graph = migration.alembic_graph(Path(sys.executable), Path("backend"))
+    assert graph == migration.alembic_graph(Path(sys.executable), root / "backend")
+
+
 def test_destructive_migrations_can_never_auto_downgrade():
     for item in CONTRACT["migrations"]:
         automatic = item["classification"] == "reversible_without_data_loss"
