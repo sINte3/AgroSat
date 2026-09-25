@@ -33,6 +33,10 @@ def test_example_configuration_is_bounded_and_secret_free():
     assert "<DOMAIN>" in configuration["execution_identity"]
     assert configuration["expected_windows_timezone_id"] == "West Asia Standard Time"
     assert configuration["schedule"]["multiple_instances"] == "IgnoreNew"
+    # The canonical production Sentinel cycle runs once a day at 06:00:00 only (no 18:00 run).
+    assert configuration["task_name"] == "\\AgroSat_PROGRAM_R3_SentinelCycle"
+    assert configuration["schedule"]["daily_at_local_times"] == ["06:00:00"]
+    assert configuration["execution_sid"] == "S-1-5-18"
     assert 1 <= configuration["collector"]["batch_size"] <= 100
     assert 1 <= configuration["collector"]["lookback_days"] <= 30
     assert 1 <= configuration["collector"]["max_attempts"] <= 5

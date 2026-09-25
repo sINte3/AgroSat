@@ -13,7 +13,7 @@
   "runtime_env_file": "C:\\AgroSat\\backend\\.env",
   "runner_script": "C:\\AgroSat_runtime\\PROGRAM_R3\\scheduler\\Invoke-Collector.ps1",
   "schedule": {
-    "daily_at_local_times": ["06:00:00", "18:00:00"],
+    "daily_at_local_times": ["06:00:00"],
     "start_when_available": true,
     "restart_count": 3,
     "restart_interval_minutes": 15,

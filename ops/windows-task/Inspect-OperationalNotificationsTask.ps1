@@ -13,6 +13,8 @@ if ($null -eq $registered) {
 }
 $info = Get-ScheduledTaskInfo -TaskPath $task.TaskPath -TaskName $task.TaskName
 $action = @($registered.Actions)[0]
+$productionIdentity = Test-AgroSatNotificationsProductionIdentity -TaskName ([string]$configuration.task_name)
+$violations = if ($productionIdentity) { @(Get-AgroSatNotificationsRegisteredContractViolations -RegisteredTask $registered) } else { @() }
 [pscustomobject]@{
     installed = $true
     task_name = $configuration.task_name
@@ -24,4 +26,10 @@ $action = @($registered.Actions)[0]
     last_task_result = $info.LastTaskResult
     next_run_time = $info.NextRunTime.ToString("o")
     missed_runs = $info.NumberOfMissedRuns
+    production_identity = $productionIdentity
+    production_contract_violations = $violations
+    production_contract_ok = ($productionIdentity -and $violations.Count -eq 0)
 } | ConvertTo-Json
+if ($productionIdentity -and $violations.Count -ne 0) {
+    exit 2
+}

@@ -13,6 +13,8 @@ $configuration = Get-Task209CollectorConfiguration `
     -ConfigurationPath $ConfigurationPath `
     -RequireResolved:$Apply
 $task = Split-Task209TaskName -TaskName $configuration.task_name
+$productionIdentity = Test-AgroSatSentinelProductionIdentity -TaskName ([string]$configuration.task_name)
+$triggerTimes = @($configuration.schedule.daily_at_local_times | ForEach-Object { [string]$_ })
 
 if (-not $Apply) {
     [pscustomobject]@{
@@ -22,6 +24,8 @@ if (-not $Apply) {
         execution_identity = $configuration.execution_identity
         mode = "apply"
         single_instance = $configuration.schedule.multiple_instances
+        production_identity = $productionIdentity
+        daily_at_local_times = $triggerTimes
         applied = $false
     } | ConvertTo-Json
     exit 0
@@ -54,6 +58,10 @@ $triggers = @($configuration.schedule.daily_at_local_times | ForEach-Object {
     if ($firstRun -le (Get-Date)) { $firstRun = $firstRun.AddDays(1) }
     New-ScheduledTaskTrigger -Daily -At $firstRun
 })
+if ($productionIdentity -and ($triggers.Count -ne 1 -or $triggerTimes[0] -cne $script:AgroSatSentinelProductionDailyTime)) {
+    # Defense in depth: the validator already refused this configuration.
+    throw "SENTINEL_PRODUCTION_TRIGGER_COUNT_REJECTED"
+}
 $principal = New-ScheduledTaskPrincipal `
     -UserId $configuration.execution_sid `
     -LogonType ServiceAccount `

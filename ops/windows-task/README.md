@@ -25,6 +25,33 @@ timeout, and total cycle timeout.
 unless `-Apply` is present. All mutating scripts also use PowerShell
 `ShouldProcess`.
 
+## Production schedule contracts (TASK_230)
+
+The canonical production Sentinel task `\AgroSat_PROGRAM_R3_SentinelCycle`
+runs exactly once a day at 06:00:00 local time: no 18:00 run. Its
+configuration must carry exactly `["06:00:00"]`, SYSTEM (`S-1-5-18`),
+IgnoreNew, StartWhenAvailable and the current limits (6 h, 3 restarts every
+15 minutes); zero triggers, two triggers or any other time fails closed in
+the validator and again in the installer. `Inspect-CollectorTask.ps1` reports
+any drift of the registered task and exits 2.
+
+The canonical notification task `\AgroSat_PROGRAM_R3_OperationalNotifications`
+stays every 15 minutes, IgnoreNew, SYSTEM, 10-minute limit, 3 restarts every 5
+minutes. A release or rebind changes only a task's action; changing any
+schedule value is an explicit edit of the contract constants.
+
+Explicit `\AgroSat_TASKnnn_*` rehearsal identities keep the bounded generic
+validation (one or two triggers); every other name is refused.
+
+## Process ownership (TASK_230 Part C)
+
+Measured with real temporary tasks: stopping these runners ends the whole
+worker tree (runner, collector or reconciler Python, provider child Python)
+within a second, because every worker process shares the task's console and
+Task Scheduler's stop tears that console down. A child started with its own
+console would survive; the canonical workers never create one. The runners
+therefore need no Job Object and are unchanged.
+
 Do not apply these scripts until the program branch, isolated database,
 credentials, execution identity, ACLs, timezone, and log retention have been
 reviewed.
