@@ -1,10 +1,19 @@
 """Sanitized liveness, readiness, and collector operational state.
 
-The standalone collector's status files are read in the format the collector
-writes, strictly and within fixed bounds, and published as at most one bounded
-summary per provider path. Collector state is operational information; it never
-decides API readiness. No file content, exception text, path or credential is
-echoed.
+Readiness answers two independent questions:
+
+* Is the database reachable and at exactly the schema revision this code
+  requires? That revision is the head of the migration graph shipped with the
+  running code (``services.migration_head``). Anything else makes the API
+  unready.
+* What did the standalone collector last report? The collector's status files
+  are read in the format the collector writes, strictly and within fixed
+  bounds. Collector state is operational information; it never decides API
+  readiness.
+
+Every value published here is validated against a fixed vocabulary or
+pattern, or is computed here. No file content, exception text, path or
+credential is echoed.
 """
 
 from __future__ import annotations
@@ -20,6 +29,7 @@ from sqlalchemy import text
 
 from config import settings
 from services.collection_failure import RUN_FAILURE_CATEGORIES
+from services.migration_head import MigrationHead, expected_migration_head
 
 
 MAX_STATUS_FILE_BYTES = 64 * 1024
@@ -63,6 +73,11 @@ MAX_COUNTER_VALUE = 10_000_000
 # (MAX_ACTIVE_FIELDS) in batches of at least 2, so at most 5,000 batches per
 # provider path. The byte cap above applies first and is tighter in practice.
 MAX_BATCHES_PER_PROVIDER = 5_000
+CODE_HEAD_REASONS = {
+    "no_head": "code_head_missing",
+    "multiple_heads": "code_head_multiple",
+    "unreadable": "code_head_unreadable",
+}
 
 
 def utc_now() -> datetime:
@@ -84,29 +99,77 @@ def liveness_snapshot() -> dict[str, Any]:
     }
 
 
-def database_readiness(engine) -> dict[str, Any]:
+def _database_component(
+    status: str,
+    reason: str | None,
+    migration_revision: str,
+    expected_migration_revision: str,
+    started: float,
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "migration_revision": migration_revision,
+        "expected_migration_revision": expected_migration_revision,
+        "revision_match": status == "ready",
+        "reason": reason,
+        "latency_ms": round((time.perf_counter() - started) * 1000, 3),
+    }
+
+
+def database_readiness(
+    engine,
+    *,
+    migration_head: MigrationHead | None = None,
+) -> dict[str, Any]:
+    """Prove the database is reachable and at the revision this code requires.
+
+    Two constant, read-only statements. The expected revision comes from the
+    code's own migration graph, never from the release identity.
+    """
+    head = migration_head if migration_head is not None else expected_migration_head()
+    expected = head.revision if head.resolved else "unknown"
     started = time.perf_counter()
     try:
         with engine.connect() as connection:
             connection.execute(text("SELECT 1")).scalar_one()
             revisions = list(
                 connection.execute(
-                    text("SELECT version_num FROM alembic_version")
+                    text("SELECT version_num FROM alembic_version LIMIT 2")
                 ).scalars()
             )
-        if len(revisions) != 1:
-            raise RuntimeError("migration revision is not singular")
-        return {
-            "status": "ready",
-            "migration_revision": safe_revision(revisions[0]),
-            "latency_ms": round((time.perf_counter() - started) * 1000, 3),
-        }
     except Exception:
-        return {
-            "status": "unavailable",
-            "migration_revision": "unknown",
-            "latency_ms": round((time.perf_counter() - started) * 1000, 3),
-        }
+        return _database_component(
+            "unavailable", "database_unreachable", "unknown", expected, started
+        )
+    observed = revisions[0] if len(revisions) == 1 else None
+    published = "unknown" if observed is None else safe_revision(observed)
+    if not head.resolved:
+        return _database_component(
+            "schema_unverified",
+            CODE_HEAD_REASONS.get(head.problem, "code_head_unreadable"),
+            published,
+            "unknown",
+            started,
+        )
+    if observed is None:
+        return _database_component(
+            "schema_mismatch",
+            "database_revision_multiple" if revisions else "database_revision_missing",
+            "unknown",
+            expected,
+            started,
+        )
+    if observed == head.revision:
+        return _database_component("ready", None, published, expected, started)
+    return _database_component(
+        "schema_mismatch",
+        "database_behind_code"
+        if observed in head.known_revisions
+        else "database_revision_unknown_to_code",
+        published,
+        expected,
+        started,
+    )
 
 
 def _parse_timestamp(value: Any) -> datetime | None:
@@ -385,8 +448,9 @@ def readiness_snapshot(
     cache_check: Callable[[], bool],
     collector_directory: str,
     collector_stale_after_seconds: int,
+    migration_head: MigrationHead | None = None,
 ) -> dict[str, Any]:
-    database = database_readiness(engine)
+    database = database_readiness(engine, migration_head=migration_head)
     try:
         cache_available = bool(cache_check())
     except Exception:

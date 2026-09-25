@@ -11,6 +11,11 @@ from fastapi.testclient import TestClient
 
 from api.health import router
 from services import health
+from services.migration_head import resolve_migration_head
+
+
+# TASK_228: a database is ready only at the head of the shipped migration graph.
+CODE_HEAD = resolve_migration_head().revision
 
 
 class ScalarResult:
@@ -25,8 +30,8 @@ class ScalarResult:
 
 
 class Connection:
-    def __init__(self, revision="0005_field_inspections"):
-        self.revision = revision
+    def __init__(self, revision=None):
+        self.revision = revision or CODE_HEAD
         self.calls = []
 
     def __enter__(self):
@@ -88,10 +93,10 @@ def test_database_readiness_uses_two_bounded_statements():
     engine.connect.return_value = connection
     result = health.database_readiness(engine)
     assert result["status"] == "ready"
-    assert result["migration_revision"] == "0005_field_inspections"
+    assert result["migration_revision"] == CODE_HEAD
     assert connection.calls == [
         "SELECT 1",
-        "SELECT version_num FROM alembic_version",
+        "SELECT version_num FROM alembic_version LIMIT 2",
     ]
 
 
