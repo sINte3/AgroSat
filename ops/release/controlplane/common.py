@@ -9,6 +9,7 @@ import ntpath
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
 import sys
 import tempfile
@@ -227,6 +228,37 @@ def assert_no_reparse_points(root: Path, code: str) -> None:
         for name in directories + files:
             if is_reparse_point(Path(directory) / name):
                 raise ControlPlaneError(code, f"reparse point below {root.name}: {name}")
+
+
+MAX_PATH = 260
+
+
+def extended(path: str | os.PathLike) -> str:
+    """A path Win32 file APIs accept beyond MAX_PATH (\\\\?\\ prefix on Windows)."""
+    text = str(Path(path).resolve(strict=False))
+    if sys.platform == "win32" and not text.startswith("\\\\?\\"):
+        return "\\\\?\\" + text
+    return text
+
+
+def copy_tree(source: Path, destination: Path) -> None:
+    """Copy a directory tree whose deep paths may exceed MAX_PATH (a venv)."""
+    shutil.copytree(extended(source), extended(destination), symlinks=True)
+
+
+def remove_tree(path: Path) -> None:
+    shutil.rmtree(extended(path))
+
+
+def longest_path(root: Path, final_root: Path) -> int:
+    """The longest file path ``root``'s contents will have once it lives at ``final_root``."""
+    base = len(str(Path(final_root)))
+    prefix = len(extended(root))
+    longest = base
+    for directory, _, files in os.walk(extended(root)):
+        for name in files:
+            longest = max(longest, base + len(os.path.join(directory, name)) - prefix)
+    return longest
 
 
 def absolute(value: Any, code: str) -> Path:

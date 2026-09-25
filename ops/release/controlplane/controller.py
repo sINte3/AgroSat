@@ -37,8 +37,8 @@ from . import backup as backup_module
 from . import health, manifest as manifest_module, migration
 from .authorization import identity_of, validate_authorization
 from .common import (
-    ControlPlaneError, assert_no_reparse_points, is_reparse_point, iso, read_json, sha256_file,
-    write_json_atomic, write_json_immutable,
+    MAX_PATH, ControlPlaneError, assert_no_reparse_points, copy_tree, is_reparse_point, iso, longest_path,
+    read_json, remove_tree, sha256_file, write_json_atomic, write_json_immutable,
 )
 from .gitmaterial import Git, extract_archive
 from .profiles import Profile
@@ -84,6 +84,16 @@ class Request:
     repository: Path | None
     backup_policy_path: Path | None
     fetch: bool = True
+
+
+def long_paths_enabled() -> bool:
+    """Whether Windows lets processes open paths beyond MAX_PATH (LongPathsEnabled)."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\FileSystem") as key:
+            return winreg.QueryValueEx(key, "LongPathsEnabled")[0] == 1
+    except (ImportError, OSError):
+        return True  # not Windows: no MAX_PATH limit
 
 
 class GateStop(Exception):
@@ -416,14 +426,15 @@ class Controller:
         return evidence
 
     def _clean_own_staging(self, staging: Path) -> None:
+        """Only the controller (holding the control-root lock) creates staging directories."""
         if staging.exists():
             assert_no_reparse_points(staging, "STAGING_REPARSE_POINT")
-            shutil.rmtree(staging)
+            remove_tree(staging)
 
     def _materialize_release(self, state: ReleaseState, git: Git, release: Path) -> dict[str, Any]:
         candidate, current = state.data["candidate_sha"], state.data["previous_sha"]
         source = state.data["facts"]["source"]
-        staging = self.profile.release_root / ".staging" / f"{candidate}-{state.data['release_id']}"
+        staging = self.profile.release_root / ".staging" / candidate[:12]
         self._clean_own_staging(staging)
         archive_path = state.directory / "material" / f"source-{candidate[:12]}.zip"
         if archive_path.exists():
@@ -434,9 +445,9 @@ class Controller:
         if source["requirements_blob_sha"] != source["current_requirements_blob_sha"]:
             raise ControlPlaneError("VENV_REBUILD_REQUIRED",
                                     "backend/requirements.txt changed; provide a qualified venv release first")
-        shutil.copytree(previous / "backend" / "venv", staging / "backend" / "venv")
+        copy_tree(previous / "backend" / "venv", staging / "backend" / "venv")
         if source["frontend_tree_sha"] == source["current_frontend_tree_sha"]:
-            shutil.copytree(previous / "frontend" / "dist", staging / "frontend" / "dist")
+            copy_tree(previous / "frontend" / "dist", staging / "frontend" / "dist")
             dist = {"origin": "copied_from_previous_release", "reason": "frontend tree unchanged"}
         else:
             dist = self._build_frontend(staging)
@@ -447,8 +458,13 @@ class Controller:
             runtime_contract=manifest_module.load_runtime_contract(), release_id=state.data["release_id"])
         write_json_immutable(staging / "release-manifest.json", manifest)
         verification = git.verify_worktree_material(candidate, staging)
+        longest = longest_path(staging, release)
+        if longest >= MAX_PATH and not long_paths_enabled():
+            raise ControlPlaneError("RELEASE_PATH_TOO_LONG", f"{longest} characters at the final location",
+                                    longest=longest)
         os.replace(staging, release)
-        return {"directory": str(release), "archive": archive, "extracted_files": files, "venv": "copied_from_previous_release",
+        return {"directory": str(release), "archive": archive, "extracted_files": files, "longest_path": longest,
+                "venv": "copied_from_previous_release",
                 "dist": dist, "alembic_head": manifest["alembic"]["head"], "verification": verification}
 
     def _build_frontend(self, staging: Path) -> dict[str, Any]:
@@ -462,9 +478,9 @@ class Controller:
             result = self.platform.run([npm, *arguments], cwd=workspace, timeout=1800)
             if result.returncode != 0:
                 raise ControlPlaneError("FRONTEND_BUILD_FAILED", " ".join(arguments))
-        shutil.copytree(workspace / "dist", staging / "frontend" / "dist")
         assert_no_reparse_points(workspace / "dist", "STAGING_REPARSE_POINT")
-        shutil.rmtree(workspace, ignore_errors=False)
+        copy_tree(workspace / "dist", staging / "frontend" / "dist")
+        self._clean_own_staging(workspace)
         return {"origin": "built_from_candidate", "command": "npm ci && npm run build",
                 "index_sha256": sha256_file(staging / "frontend" / "dist" / "index.html")}
 
@@ -477,7 +493,7 @@ class Controller:
     def _materialize_runtime(self, state: ReleaseState, release: Path, runtime: Path, manifest_sha256: str,
                              current: str) -> dict[str, Any]:
         candidate = state.data["candidate_sha"]
-        staging = self.profile.runtime_root / ".staging" / f"{candidate}-{state.data['release_id']}"
+        staging = self.profile.runtime_root / ".staging" / candidate[:12]
         self._clean_own_staging(staging)
         application = staging / "application"
         application.mkdir(parents=True)

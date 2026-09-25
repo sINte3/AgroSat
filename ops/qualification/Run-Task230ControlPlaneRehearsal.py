@@ -47,12 +47,13 @@ REPOSITORY = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY / "ops" / "release"))
 
 from controlplane import health, winproc  # noqa: E402
-from controlplane.common import read_json, sha256_file, write_json_atomic  # noqa: E402
+from controlplane.common import copy_tree, read_json, sha256_file, write_json_atomic  # noqa: E402
 from controlplane.gitmaterial import Git, extract_archive  # noqa: E402
 from controlplane.pgclient import DatabaseTarget, read_env_value  # noqa: E402
 from controlplane.tasks import WindowsTasks, powershell  # noqa: E402
 
-BASE = Path(r"C:\AgroSat_rehearsal\TASK_230\controlplane")
+# Short on purpose: release venvs nest ~165 characters deep and long paths are disabled on this host.
+BASE = Path(r"C:\AgroSat_rehearsal\T230")
 PRODUCTION_ENV = Path(r"C:\AgroSat\backend\.env")
 PRODUCTION_RELEASES = Path(r"C:\AgroSat_releases\PROGRAM_R3")
 PG_BIN = Path(r"C:\Program Files\PostgreSQL\16\bin")
@@ -292,8 +293,8 @@ class Rehearsal:
         Git(REPOSITORY).archive(sha, archive)
         extract_archive(archive, release)
         source = PRODUCTION_RELEASES / sha
-        shutil.copytree(source / "backend" / "venv", release / "backend" / "venv")
-        shutil.copytree(source / "frontend" / "dist", release / "frontend" / "dist")
+        copy_tree(source / "backend" / "venv", release / "backend" / "venv")
+        copy_tree(source / "frontend" / "dist", release / "frontend" / "dist")
         write_json_atomic(release / "release-manifest.json", {
             "schema_version": 1, "git_sha": sha, "purpose": f"TASK_230 rehearsal {self.label} release A",
             "alembic_head": head, "created_utc": now()})
@@ -497,7 +498,7 @@ def restored_database(context: dict, env: Path, database: str, evidence: Path) -
 def phase_release(context: dict) -> dict:
     run, candidate = context["run"], context["candidate"]
     ports = spare_ports(2, context["ports"])
-    rehearsal = Rehearsal(context["root"] / "run1", "R1", f"agrosat_task230_rel1_{run}", ports)
+    rehearsal = Rehearsal(context["root"] / "r1", "R1", f"agrosat_task230_rel1_{run}", ports)
     context["rehearsals"].append(rehearsal)
     evidence = context["evidence"] / "run1"
     write_env(rehearsal.env, rehearsal.database)
@@ -575,7 +576,7 @@ def phase_release(context: dict) -> dict:
 def phase_failure(context: dict) -> dict:
     run, candidate = context["run"], context["candidate"]
     ports = spare_ports(2, context["ports"])
-    rehearsal = Rehearsal(context["root"] / "run2", "R2", f"agrosat_task230_rel2_{run}", ports)
+    rehearsal = Rehearsal(context["root"] / "r2", "R2", f"agrosat_task230_rel2_{run}", ports)
     context["rehearsals"].append(rehearsal)
     evidence = context["evidence"] / "run2"
     write_env(rehearsal.env, rehearsal.database)
@@ -695,7 +696,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument("--candidate", required=True)
-    parser.add_argument("--run-id", default=datetime.now().strftime("%m%d%H%M"))
+    parser.add_argument("--run-id", default=datetime.now().strftime("%d%H%M"))
     parser.add_argument("--phases", default="database,release,failure,backuptask,cleanup")
     args = parser.parse_args()
     if not re.fullmatch(r"[0-9a-f]{40}", args.candidate):
