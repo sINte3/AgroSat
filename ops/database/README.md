@@ -1,32 +1,69 @@
-# TASK_209 database backup and isolated restore
+# AgroSat database backup contract (TASK_230)
 
-These scripts provide a reviewable PostgreSQL backup/restore contract. They do
-not read environment files, accept connection URLs, accept credentials on the
-command line, print server names, or automatically remove a failed restore.
-Authentication is delegated to the execution identity and a separately managed
-libpq credential mechanism.
+One contract, implemented in `ops/release/controlplane/backup.py` and driven by
+`ops/release/Invoke-AgroSatControlPlane.py backup <action> --policy <json>`.
+It replaces the TASK_209 review scripts.
 
-All commands are preview-only unless `-Apply` is supplied. Backup apply also
-requires `-ConfirmReadOnlySource`. Restore and validation reject every mutable
-target that does not match `agrosat_task209_*`. Artifact paths must remain below
-`C:\AgroSat_backups\task209_global_program`.
+## Policy
 
-A data-bearing archive is rejected when its apply path is below the sanitized
-`evidence` directory. Use a separate `database_archives` child and exclude it
-from evidence packaging. Password hashes and business rows make a real archive
-non-sanitized even when the archive has no connection credentials.
+Everything comes from an explicit policy file; nothing has a default.
+`database-backup-policy.example.json` is an example only (`example_only: true`
+is refused, and its placeholders are refused). Its retention numbers are
+illustrations, not the company's retention policy. No production backup time,
+backup root or secondary destination exists in this repository: they are
+deployment prerequisites (TASK_231).
 
-The backup is a custom-format schema-and-data archive without owners or ACLs.
-The script creates a restore list, rejects an empty list, calculates SHA-256,
-and writes sanitized metadata. Restore verifies SHA-256 and the restore list
-before creating a new isolated database. It refuses to overwrite an existing
-database and uses a single restore transaction.
+## Backup
 
-Post-restore validation records the Alembic revision, exact counts for critical
-tables, invalid constraint/index counts, and a schema-only SHA-256. A critical
-API smoke must then run with an isolated synthetic user; this is intentionally
-not embedded in the database script.
+`pg_dump --format=custom --no-owner --no-acl` of one database, read-only.
+Credentials are read from the runtime environment file's `DATABASE_URL` and
+reach `pg_dump`/`pg_restore` only through PG* variables of the child process,
+never argv, output or evidence. A backup is valid only when the dump proves
+itself:
 
-Current TASK_209 execution status: contract and preview validation only.
-PostgreSQL client tools and an isolated PostGIS server are unavailable (B-001),
-so no backup, restore, database creation, migration, or smoke was executed.
+* the restore list parses and every public table carries table data;
+* the Alembic revision (exactly one) and per-table row counts are read back
+  from the dump's own COPY data;
+* a normalized schema hash is computed from the dump;
+* the file's SHA-256 is recorded.
+
+Each backup is sealed in `<backup_root>/<backup_id>/` with an immutable
+`metadata.json`; an invalid dump is moved to `.quarantine/` for inspection.
+`pg_dump` exiting 0 is never enough.
+
+## Retention
+
+`backup retention-plan` previews; `backup retention-apply --plan-sha256`
+executes exactly that plan. The newest validated backup, the minimum count,
+the daily and weekly keepers, backups younger than the minimum age and every
+backup a live or current/previous release or rollback record references are
+kept. Unvalidated or foreign entries are never deleted. Deletion happens only
+for direct children of the backup root without reparse points, re-verified by
+SHA-256, and every deletion is appended to `retention-log.jsonl`.
+
+## Secondary copy
+
+With `secondary.required: true` a backup is fully protected only after the
+dump and metadata are copied to the configured absolute or UNC destination and
+the copy's SHA-256 equals the primary's (`secondary.json` in both places). No
+destination is assumed; TASK_230 qualified the mechanism with two local roots
+only, which is not off-host protection.
+
+## Restore rehearsal
+
+`backup restore-rehearsal --backup-id <id> --target agrosat_taskNNN_*` restores
+into a new database (never an existing one), then validates the Alembic
+revision, constraints, indexes, per-table row counts and schema hash against
+the dump. A failed target is kept for inspection. `backup
+drop-rehearsal-target` removes a target only with its recorded evidence.
+
+## Scheduled backups
+
+`Install-DatabaseBackupTask.ps1 -PolicyPath -ReleaseDirectory -ControlRoot`
+previews, and with `-Apply` registers the policy's task (SYSTEM or the
+policy's explicit SID, one daily trigger at the policy's explicit time,
+IgnoreNew, bounded execution limit and retries), installed disabled. It runs
+`backup scheduled`: backup, secondary copy, retention, one immutable
+execution record in `<backup_root>/executions/`. The release controller rebinds
+an installed backup task to each new release. `Inspect-DatabaseBackupTask.ps1`
+compares the registered task with its policy (read-only).

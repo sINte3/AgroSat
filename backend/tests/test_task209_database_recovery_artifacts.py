@@ -1,180 +1,96 @@
-"""Safety and preview contracts for TASK_209 database recovery artifacts."""
+"""Safety contracts of the one database backup contract (TASK_209 intent, TASK_230 implementation).
+
+The TASK_209 review scripts were replaced by ops/release/controlplane/backup.py
+(driven by ``Invoke-AgroSatControlPlane.py backup ...``) plus the Scheduled Task
+installer and inspector in ops/database. These tests keep TASK_209's
+guarantees: custom-format dump, restore-list validation, SHA-256, sanitized
+metadata, isolated non-overwriting restores that are never dropped
+automatically, and no credential on any command line or in any evidence.
+"""
+from __future__ import annotations
 
 import json
 from pathlib import Path
+import shutil
 import subprocess
+import sys
 
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 OPS = ROOT / "ops" / "database"
+BACKUP = ROOT / "ops" / "release" / "controlplane" / "backup.py"
+PGCLIENT = ROOT / "ops" / "release" / "controlplane" / "pgclient.py"
+POWERSHELL = shutil.which("powershell") or shutil.which("pwsh")
+if str(ROOT / "ops" / "release") not in sys.path:
+    sys.path.insert(0, str(ROOT / "ops" / "release"))
+
+from controlplane import backup  # noqa: E402
 
 
-def read(name: str) -> str:
-    return (OPS / name).read_text(encoding="utf-8-sig")
+def test_database_ops_directory_holds_only_the_current_contract():
+    assert {path.name for path in OPS.iterdir()} == {
+        "README.md", "database-backup-policy.example.json", "Install-DatabaseBackupTask.ps1",
+        "Inspect-DatabaseBackupTask.ps1"}
 
 
-def run_preview(script: str, *arguments: str) -> dict:
-    result = subprocess.run(
-        [
-            "powershell",
-            "-NoProfile",
-            "-NonInteractive",
-            "-File",
-            str(OPS / script),
-            *arguments,
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
-    return json.loads(result.stdout)
+def test_backup_is_valid_only_when_the_dump_proves_itself():
+    source = BACKUP.read_text(encoding="utf-8")
+    for fragment in ('"--format=custom"', '"--no-owner"', '"--no-acl"', '"--list"', "TABLE DATA public",
+                     "every_table_has_data", "single_alembic_revision", "critical_tables_present", "schema_sha256",
+                     "sha256_file(dump)", '"validation"', '"PASS" if passed else "FAIL"', ".quarantine",
+                     "write_json_immutable"):
+        assert fragment in source, fragment
+    assert "pg_dump_exit_zero" in source  # recorded, but never sufficient on its own
 
 
-def run_script(script: str, *arguments: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [
-            "powershell",
-            "-NoProfile",
-            "-NonInteractive",
-            "-File",
-            str(OPS / script),
-            *arguments,
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
+def test_restore_creates_new_isolated_targets_and_never_drops_automatically():
+    for accepted in ("agrosat_task230_restore", "agrosat_task209_preview", "agrosat_restore_rehearsal_nightly"):
+        assert backup.REHEARSAL_TARGET_PATTERN.fullmatch(accepted)
+    for rejected in ("agrosat", "postgres", "agrosat_h0a_task229", "agrosat_task23_x", "agrosat_task230"):
+        assert not backup.REHEARSAL_TARGET_PATTERN.fullmatch(rejected)
+    source = BACKUP.read_text(encoding="utf-8")
+    restore = source[source.index("def restore_rehearsal"):source.index("def drop_rehearsal_target")]
+    assert "dropdb" not in restore and "RESTORE_TARGET_EXISTS" in source and "--single-transaction" in source
+    assert "target_retained" in restore
+    drop = source[source.index("def drop_rehearsal_target"):source.index("def restore_swap")]
+    assert "RESTORE_EVIDENCE_REQUIRED" in drop and "target_created_by_tool" in drop
+    swap = source[source.index("def restore_swap"):]
+    assert "previous_live_database_kept_as" in swap and '"data_destroyed": False' in swap
+    assert "pg_stat_activity" in swap and "DROP DATABASE" not in swap.upper() and "RENAME TO" in swap
 
 
-def test_all_powershell_artifacts_parse():
-    scripts = sorted(OPS.glob("*.ps1"))
-    assert {path.name for path in scripts} == {
-        "Backup-Database.ps1",
-        "Restore-Database.ps1",
-        "Task209-Database.Common.ps1",
-        "Validate-RestoredDatabase.ps1",
-    }
-    for script in scripts:
-        command = (
-            "$errors=$null; "
-            "[System.Management.Automation.Language.Parser]::ParseFile("
-            f"'{script}',[ref]$null,[ref]$errors) | Out-Null; "
-            "if($errors.Count){exit 2}"
-        )
-        subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
+def test_credentials_never_reach_a_command_line_or_evidence():
+    backup_source, client = BACKUP.read_text(encoding="utf-8"), PGCLIENT.read_text(encoding="utf-8")
+    assert "PGPASSWORD" not in backup_source and "DATABASE_URL" not in backup_source
+    assert client.count('"PGPASSWORD"') == 1  # set only in the child environment builder
+    environment = client[client.index("def environment"):client.index("def run(")]
+    assert '"PGPASSWORD": password' in environment
+    assert "environment.clear()" in client and '"credential_values_logged": False' in backup_source
 
 
-def test_backup_preview_is_read_only_and_tool_independent():
-    report = run_preview(
-        "Backup-Database.ps1",
-        "-DatabaseName",
-        "agrosat",
-        "-OutputDirectory",
-        r"C:\AgroSat_backups\task209_global_program\evidence\phase_04_reliability_recovery\backup_preview",
-    )
-    assert report["status"] == "preview"
-    assert report["database_mutation"] is False
-    assert report["source_confirmed_read_only"] is False
+def test_backup_task_installer_needs_an_explicit_schedule_and_installs_disabled():
+    source = (OPS / "Install-DatabaseBackupTask.ps1").read_text(encoding="utf-8")
+    for fragment in ("BACKUP_POLICY_IS_EXAMPLE", "BACKUP_POLICY_PLACEHOLDER", "BACKUP_SCHEDULE_REQUIRED",
+                     "BACKUP_SCHEDULE_TIME_REJECTED", "-MultipleInstances IgnoreNew", "-ExecutionTimeLimit",
+                     "-RestartCount", "Disable-ScheduledTask", "if (-not $Apply)", "$PSCmdlet.ShouldProcess",
+                     "backup scheduled --policy"):
+        assert fragment in source, fragment
+    assert "-Force" not in source and "Unregister-ScheduledTask" not in source
 
 
-def test_restore_preview_enforces_isolated_target_without_tools():
-    report = run_preview(
-        "Restore-Database.ps1",
-        "-DatabaseName",
-        "agrosat_task209_preview",
-        "-BackupPath",
-        r"C:\AgroSat_backups\task209_global_program\evidence\phase_04_reliability_recovery\preview.dump",
-        "-ExpectedSha256",
-        "a" * 64,
-        "-OutputDirectory",
-        r"C:\AgroSat_backups\task209_global_program\evidence\phase_04_reliability_recovery\restore_preview",
-    )
-    assert report["status"] == "preview"
-    assert report["database_mutation"] is True
-    assert report["target_isolation_enforced"] is True
-    assert report["automatic_drop_on_failure"] is False
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is required")
+def test_backup_task_installer_refuses_the_example_policy(tmp_path):
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
+                             str(OPS / "Install-DatabaseBackupTask.ps1"), "-PolicyPath",
+                             str(OPS / "database-backup-policy.example.json"), "-ReleaseDirectory", str(tmp_path),
+                             "-ControlRoot", str(tmp_path)], capture_output=True, text=True, timeout=60)
+    assert result.returncode != 0 and "BACKUP_POLICY_IS_EXAMPLE" in result.stderr + result.stdout
 
 
-def test_restore_rejects_nonisolated_target_before_tool_resolution():
-    result = run_script(
-        "Restore-Database.ps1",
-        "-DatabaseName",
-        "agrosat",
-        "-BackupPath",
-        r"C:\AgroSat_backups\task209_global_program\evidence\phase_04_reliability_recovery\preview.dump",
-        "-ExpectedSha256",
-        "a" * 64,
-        "-OutputDirectory",
-        r"C:\AgroSat_backups\task209_global_program\evidence\phase_04_reliability_recovery\restore_preview",
-    )
-    assert result.returncode != 0
-    assert result.stdout == ""
-
-
-def test_backup_apply_requires_read_only_source_confirmation():
-    result = run_script(
-        "Backup-Database.ps1",
-        "-DatabaseName",
-        "agrosat",
-        "-OutputDirectory",
-        r"C:\AgroSat_backups\task209_global_program\evidence\phase_04_reliability_recovery\backup_preview",
-        "-Apply",
-    )
-    assert result.returncode != 0
-    assert result.stdout == ""
-
-
-def test_restore_validation_preview_is_read_only():
-    report = run_preview(
-        "Validate-RestoredDatabase.ps1",
-        "-DatabaseName",
-        "agrosat_task209_preview",
-        "-OutputDirectory",
-        r"C:\AgroSat_backups\task209_global_program\evidence\phase_04_reliability_recovery\restore_preview",
-    )
-    assert report["status"] == "preview"
-    assert report["read_only"] is True
-
-
-def test_recovery_contract_has_checksum_list_revision_counts_and_schema_hash():
-    backup = read("Backup-Database.ps1")
-    restore = read("Restore-Database.ps1")
-    validate = read("Validate-RestoredDatabase.ps1")
-    assert "Get-FileHash" in backup
-    assert "--list" in backup
-    assert "--format=custom" in backup
-    assert "Get-FileHash" in restore
-    assert "--single-transaction" in restore
-    assert "Assert-OutsideSanitizedEvidence" in backup
-    assert "Assert-OutsideSanitizedEvidence" in restore
-    assert "Alembic" in validate
-    assert "table_counts" in validate
-    assert "invalid_constraint_count" in validate
-    assert "invalid_index_count" in validate
-    assert "schema_sha256" in validate
-
-
-def test_recovery_scripts_have_no_destructive_or_credential_arguments():
-    combined = "\n".join(
-        read(name)
-        for name in (
-            "Backup-Database.ps1",
-            "Restore-Database.ps1",
-            "Validate-RestoredDatabase.ps1",
-        )
-    ).lower()
-    assert "dropdb" not in combined
-    assert "drop database" not in combined
-    assert "remove-item" not in combined
-    assert "database_url" not in combined
-    assert "redis_url" not in combined
-    assert "credential" not in combined
-    assert "--no-password" in combined
+def test_example_policy_invents_no_production_schedule_or_destination():
+    example = json.loads((OPS / "database-backup-policy.example.json").read_text(encoding="utf-8"))
+    assert example["example_only"] is True
+    assert example["schedule"]["daily_at_local_time"].startswith("<CONFIGURE")
+    assert example["backup_root"].startswith("<CONFIGURE")
+    assert example["secondary"]["destination"].startswith("<CONFIGURE")

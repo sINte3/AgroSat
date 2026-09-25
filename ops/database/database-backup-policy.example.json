@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "kind": "agrosat_database_backup_policy",
+  "example_only": true,
+  "database_name": "agrosat",
+  "source_classification": "production",
+  "runtime_env_file": "C:\\AgroSat\\backend\\.env",
+  "pg_bin": "C:\\Program Files\\PostgreSQL\\16\\bin",
+  "backup_root": "<CONFIGURE: absolute primary backup directory outside C:\\AgroSat, C:\\AgroSat_releases and C:\\AgroSat_runtime>",
+  "retention": {
+    "keep_daily_count": 7,
+    "keep_weekly_count": 4,
+    "minimum_backup_count": 3,
+    "minimum_age_before_delete_hours": 72
+  },
+  "secondary": {
+    "required": true,
+    "destination": "<CONFIGURE: absolute or UNC destination on a different host or disk>"
+  },
+  "schedule": {
+    "task_name": "\\AgroSat_PROGRAM_R3_DatabaseBackup",
+    "daily_at_local_time": "<CONFIGURE: HH:MM:SS decided by the operator>",
+    "execution_sid": "S-1-5-18",
+    "execution_time_limit_minutes": 120,
+    "restart_count": 2,
+    "restart_interval_minutes": 15
+  }
+}
