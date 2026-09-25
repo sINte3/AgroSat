@@ -376,11 +376,14 @@ class Rehearsal:
         tasks = WindowsTasks()
         for kind in ("backend", "frontend"):
             tasks.start(self.tasks[kind])
-        return self.wait_healthy(sha, head, self.releases / sha)
+        # Releases A predate TASK_228 and publish the older readiness payload.
+        return self.wait_healthy(sha, head, self.releases / sha, pre_task228=True)
 
-    def wait_healthy(self, sha: str, head: str, release: Path, seconds: float = 180) -> dict:
+    def wait_healthy(self, sha: str, head: str, release: Path, seconds: float = 180, *, pre_task228: bool = False) -> dict:
         index = sha256_file(release / "frontend" / "dist" / "index.html")
-        backend = health.wait_for(lambda: health.probe_backend(self.backend_port, sha, head), deadline_seconds=seconds)
+        backend = health.wait_for(lambda: health.probe_backend(self.backend_port, sha, head,
+                                                               pre_task228_compatible=pre_task228),
+                                  deadline_seconds=seconds)
         frontend = health.wait_for(lambda: health.probe_frontend(self.frontend_port, index, sha), deadline_seconds=seconds)
         return {"backend": backend, "frontend": frontend, "pass": backend["pass"] and frontend["pass"]}
 
@@ -546,7 +549,7 @@ def phase_release(context: dict) -> dict:
     rollback_directory = rehearsal.control / "releases" / rollback_id
     rollback_state = read_json(rollback_directory / "state.json", "X")
     snapshot = read_json(state_directory / "snapshots" / "tasks-before.json", "X")
-    a_after = rehearsal.wait_healthy(A_SHA, head, rehearsal.releases / A_SHA, seconds=30)
+    a_after = rehearsal.wait_healthy(A_SHA, head, rehearsal.releases / A_SHA, seconds=30, pre_task228=True)
     bindings = rehearsal.bindings()
     after_rollback = {"cli_exit": code2, "status": rolled.get("status"), "health": a_after,
                       "listeners": rehearsal.listener_ownership(), "bindings_equal_recorded_A": all(
@@ -610,7 +613,7 @@ def phase_failure(context: dict) -> dict:
     kept = database.query(f"SELECT datname FROM pg_database WHERE datname LIKE '{rehearsal.database}_pre_rb_%'",
                           database="postgres")
     kept_revision = database.revisions(database=kept[0]) if kept else None
-    a_after = rehearsal.wait_healthy(A2_SHA, head_a, rehearsal.releases / A2_SHA, seconds=60)
+    a_after = rehearsal.wait_healthy(A2_SHA, head_a, rehearsal.releases / A2_SHA, seconds=60, pre_task228=True)
     report = {
         "cli_exit": code, "status": result.get("status"), "state_status": state["status"],
         "failed_gate": state["rollback_result"]["cause_gate"] if state.get("rollback_result") else None,
