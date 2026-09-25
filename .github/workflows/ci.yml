@@ -1,0 +1,125 @@
+# AgroSat CI: fast required checks (TASK_230).
+#
+# Runs on the production OS (Windows) with the repository's runtime contract
+# (ops/release/runtime-contract.json: Python 3.14, Node 24). No production
+# secret, provider call, production database or production Scheduled Task is
+# used: backend tests run against an unreachable database URL, PostgreSQL
+# suites skip here and run in postgres.yml, and the release control plane is
+# exercised on an in-memory host plus real Windows Job Objects.
+name: CI
+
+on:
+  push:
+    branches: [main, "task/**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUTF8: "1"
+
+jobs:
+  guards:
+    name: Guards (migrations, schedulers, retired endpoints)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      - name: Install backend dependencies
+        run: python -m pip install -r backend/requirements-dev.txt
+      - name: Alembic single head and complete rollback classification
+        run: python -B ops/release/Invoke-AgroSatControlPlane.py rollback-contract --backend backend
+      - name: No APScheduler or web-embedded scheduler
+        working-directory: backend
+        run: python -m pytest tests/test_web_startup_safety.py -q -p no:cacheprovider
+      - name: No retired production mutation endpoint returns
+        working-directory: backend
+        run: >-
+          python -m pytest -q -p no:cacheprovider
+          tests/test_field_inspections.py
+          tests/test_satellite_write_safety.py
+          tests/test_task209_operational_closure_backend.py
+          tests/test_task225_contracts.py
+
+  backend:
+    name: Backend deterministic and contract suite
+    needs: guards
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # release-manifest tests read commit ancestry
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      - name: Install backend dependencies
+        run: python -m pip install -r backend/requirements-dev.txt
+      - name: Backend suite
+        working-directory: backend
+        run: python -m pytest tests -q -p no:cacheprovider
+
+  ops:
+    name: Ops control plane, PowerShell and Job Objects
+    needs: guards
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+      - name: Install backend dependencies (Alembic for migration graphs, pytest)
+        run: python -m pip install -r backend/requirements-dev.txt
+      - name: PowerShell syntax of every ops script
+        shell: powershell
+        run: |
+          $failed = @()
+          Get-ChildItem -Path ops -Recurse -Filter *.ps1 | ForEach-Object {
+              $errors = $null
+              [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errors) | Out-Null
+              if ($errors.Count) { $failed += $_.FullName }
+          }
+          if ($failed.Count) { $failed; exit 1 }
+      - name: Control plane, schedule contracts, backup contract and real Job Object tests
+        run: python -m pytest ops/tests -q -p no:cacheprovider
+
+  frontend:
+    name: Frontend contracts, production build and audit
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install from the lockfile
+        run: npm ci --no-fund --no-audit
+      - name: Contract suites
+        run: npm run test:contracts
+      - name: Production build
+        run: npm run build
+      - name: npm audit (never --force)
+        run: npm audit --audit-level=high
