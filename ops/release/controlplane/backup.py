@@ -166,14 +166,31 @@ def load_policy(path: Path) -> BackupPolicy:
 
 # ------------------------------------------------------------------ dump facts
 
+_CHECK = re.compile(r"^(\s*(?:ALTER TABLE .* ADD )?CONSTRAINT \S+ CHECK) .*?(,|;)?$")
+
+
 def normalize_schema_sql(text: str) -> str:
-    """Schema SQL without comments, blank lines and per-dump restrict keys."""
+    """A schema fingerprint that survives a dump/restore round trip.
+
+    Comments, blank lines and per-dump restrict keys are dropped. PostgreSQL
+    re-deparses CHECK and partial-index predicate expressions after they are
+    replayed from a dump (cast placement inside ARRAY[...] changes), so those
+    two are reduced to the constraint name and the index definition up to its
+    predicate. Every table, column, type, default, key, foreign key, index
+    column list, trigger, function and extension is compared as written.
+    """
     kept = []
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("--") or stripped.startswith(("\\restrict", "\\unrestrict")):
             continue
-        kept.append(line.rstrip())
+        line = line.rstrip()
+        check = _CHECK.match(line)
+        if check:
+            line = f"{check.group(1)} <expression>{check.group(2) or ''}"
+        elif re.match(r"^CREATE (UNIQUE )?INDEX ", line) and " WHERE " in line:
+            line = line.split(" WHERE ", 1)[0] + " WHERE <predicate>;"
+        kept.append(line)
     return "\n".join(kept) + "\n"
 
 
@@ -466,8 +483,15 @@ def validate_restored(target: DatabaseTarget, database: str, metadata: dict[str,
         "SELECT count(*) FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
         "JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND NOT i.indisvalid",
         database=database)[0])
+    # Extension-owned tables (PostGIS spatial_ref_sys) are repopulated by CREATE
+    # EXTENSION on restore; the dump holds only their user rows.
+    extension_tables = set(target.query(
+        "SELECT c.relname FROM pg_class c JOIN pg_depend d ON d.classid = 'pg_class'::regclass "
+        "AND d.objid = c.oid AND d.deptype = 'e' WHERE c.relnamespace = 'public'::regnamespace "
+        "AND c.relkind = 'r'", database=database))
+    expected_counts = {table: count for table, count in metadata["row_counts"].items() if table not in extension_tables}
     counts = {}
-    for table in sorted(metadata["row_counts"]):
+    for table in sorted(expected_counts):
         if not re.fullmatch(r"[a-z_][a-z0-9_]*", table):
             raise ControlPlaneError("RESTORE_TABLE_NAME_REJECTED", table)
         counts[table] = int(target.query(f'SELECT count(*) FROM public."{table}"', database=database)[0])
@@ -482,14 +506,14 @@ def validate_restored(target: DatabaseTarget, database: str, metadata: dict[str,
         "alembic_revision_matches_backup": revisions == [metadata["db_revision"]],
         "no_invalid_constraints": invalid_constraints == 0,
         "no_invalid_indexes": invalid_indexes == 0,
-        "row_counts_match_backup": counts == metadata["row_counts"],
+        "row_counts_match_backup": counts == expected_counts,
         "critical_tables_restored": all(name in counts for name in CRITICAL_TABLES),
         "schema_hash_matches_backup": schema_sha256 == metadata["schema_sha256"],
         "postgis_extension_present": postgis == ["1"],
     }
     return {"database": database, "alembic_revisions": revisions, "invalid_constraint_count": invalid_constraints,
             "invalid_index_count": invalid_indexes, "row_counts": counts, "schema_sha256": schema_sha256,
-            "checks": checks, "pass": all(checks.values())}
+            "extension_tables_not_compared": sorted(extension_tables), "checks": checks, "pass": all(checks.values())}
 
 
 def restore_rehearsal(policy: BackupPolicy, backup_id: str, target_database: str, evidence_directory: Path) -> dict[str, Any]:

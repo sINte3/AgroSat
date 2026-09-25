@@ -210,3 +210,24 @@ def test_schema_normalization_ignores_dump_noise_only():
     second = "-- Dumped by pg_dump 16.15\n\\restrict xyz\nCREATE TABLE a (id int);\n"
     assert backup.normalize_schema_sql(first) == backup.normalize_schema_sql(second)
     assert backup.normalize_schema_sql(first) != backup.normalize_schema_sql("CREATE TABLE a (id bigint);\n")
+
+
+def schema(check: str, predicate: str, *, column="status character varying(20) NOT NULL", name="ck_status",
+           index_columns="(field_id)") -> str:
+    return (f"CREATE TABLE public.t (\n    id integer NOT NULL,\n    {column},\n"
+            f"    CONSTRAINT {name} CHECK ({check})\n);\n"
+            f"CREATE UNIQUE INDEX uq_active ON public.t USING btree {index_columns} WHERE ({predicate});\n")
+
+
+def test_schema_fingerprint_survives_expression_redeparse_but_not_real_changes():
+    # What pg_dump prints for the source catalog, and for the same constraint after a restore.
+    source = schema("((status)::text = ANY ((ARRAY['a'::character varying, 'b'::character varying])::text[]))",
+                    "(status)::text = ANY ((ARRAY['a'::character varying])::text[])")
+    restored = schema("((status)::text = ANY (ARRAY[('a'::character varying)::text, ('b'::character varying)::text]))",
+                      "(status)::text = ANY (ARRAY[('a'::character varying)::text])")
+    fingerprint = backup.normalize_schema_sql
+    assert fingerprint(source) == fingerprint(restored)
+    assert fingerprint(source) != fingerprint(schema("true", "true", column="status text NOT NULL"))
+    assert fingerprint(source) != fingerprint(schema("true", "true", name="ck_other"))
+    assert fingerprint(source) != fingerprint(schema("true", "true", index_columns="(id)"))
+    assert fingerprint(source) != fingerprint(source.replace("    CONSTRAINT ck_status CHECK", "    -- dropped"))
