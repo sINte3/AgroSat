@@ -523,7 +523,8 @@ INCONSISTENT_STATES = {
     "duration_boolean": {"duration_seconds": True},
     "duration_negative": {"duration_seconds": -1},
     "duration_above_cycle_cap": {"duration_seconds": 21_601},
-    "schema_version_unknown": {"schema_version": 2},
+    # Schema 2 is the compact format since TASK_229; see test_task229_compact_status.py.
+    "schema_version_unknown": {"schema_version": 3},
 }
 
 

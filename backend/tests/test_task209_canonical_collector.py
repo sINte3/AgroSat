@@ -148,8 +148,12 @@ def test_success_writes_one_sanitized_parent_summary():
     assert persisted["run_id"] == "run123"
     assert latest["status"] == "succeeded"
     assert latest["failure_category"] is None
+    # Status schema 2 (TASK_229): one summary per provider path; the batch
+    # children stay in collector_summary.json.
+    assert latest["schema_version"] == 2
     assert latest["providers"] == [
         {
+            "batch_count": 1,
             "counters": {
                 "failure_count": 0,
                 "inserted_count": 0,
@@ -158,24 +162,18 @@ def test_success_writes_one_sanitized_parent_summary():
                 "success_count": 1,
                 "timeout_count": 0,
             },
+            "counters_batch_count": 1,
             "exit_code": 0,
-            "provider": "ndvi",
+            "failed_batch_count": 0,
+            "provider": provider,
+            "status": "succeeded",
+            "succeeded_batch_count": 1,
             "timed_out": False,
-        },
-        {
-            "counters": {
-                "failure_count": 0,
-                "inserted_count": 0,
-                "quality_blocked_count": 0,
-                "skipped_existing_count": 1,
-                "success_count": 1,
-                "timeout_count": 0,
-            },
-            "exit_code": 0,
-            "provider": "multi",
-            "timed_out": False,
-        },
+            "timed_out_batch_count": 0,
+        }
+        for provider in ("ndvi", "multi")
     ]
+    assert len(persisted["children"]) == 2
     assert "stdout" not in json.dumps(latest)
     assert "stderr" not in json.dumps(latest)
     assert "diagnostics" not in latest

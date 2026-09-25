@@ -31,6 +31,12 @@ if str(BACKEND) not in sys.path:
 
 from services.collection_failure import canonical_failure_category
 from services.collector_locking import acquire_lock, release_lock
+from services.collector_status import (
+    PROVIDER_COUNTER_FIELDS,
+    STATUS_SCHEMA_VERSION,
+    batch_record,
+    summarize_provider_batches,
+)
 
 
 SCHEMA_VERSION = 1
@@ -47,14 +53,6 @@ LAST_SUCCESS_FILENAME = "collector_last_success.json"
 LAST_FAILURE_FILENAME = "collector_last_failure.json"
 HEARTBEAT_FILENAME = "collector_heartbeat.json"
 MAX_CYCLE_SUMMARY_BYTES = 1024 * 1024
-PROVIDER_COUNTER_FIELDS = (
-    "success_count",
-    "failure_count",
-    "inserted_count",
-    "skipped_existing_count",
-    "quality_blocked_count",
-    "timeout_count",
-)
 # Windows system error codes of a sharing collision on a file replacement.
 ERROR_ACCESS_DENIED = 5
 ERROR_SHARING_VIOLATION = 32
@@ -353,7 +351,7 @@ def operational_snapshot(
         else "failed"
     )
     snapshot = {
-        "schema_version": 1,
+        "schema_version": STATUS_SCHEMA_VERSION,
         "run_id": summary["run_id"],
         "mode": summary.get("mode"),
         "status": status,
@@ -362,15 +360,14 @@ def operational_snapshot(
         "duration_seconds": None if running else summary.get("duration_seconds"),
         "exit_code": exit_code,
         "failure_category": None if running else classify_failure(summary),
-        "providers": [
-            {
-                "provider": child.get("provider"),
-                "exit_code": child.get("exit_code"),
-                "timed_out": bool(child.get("timed_out")),
-                "counters": child.get("counters"),
-            }
-            for child in summary.get("children", [])
-        ],
+        # One bounded summary per provider path, whatever the field count;
+        # every batch child stays in the run's collector_summary.json. run()
+        # records only valid batches, so nothing is left out of a real run.
+        "providers": summarize_provider_batches(
+            record
+            for record in map(batch_record, summary.get("children", []))
+            if record is not None
+        ),
     }
     return sanitize(snapshot)
 

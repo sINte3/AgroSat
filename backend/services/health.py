@@ -7,8 +7,9 @@ Readiness answers two independent questions:
   running code (``services.migration_head``). Anything else makes the API
   unready.
 * What did the standalone collector last report? The collector's status files
-  are read in the format the collector writes, strictly and within fixed
-  bounds. Collector state is operational information; it never decides API
+  are read in the formats the collector writes (schema 2, and schema 1 files
+  still on disk), strictly and within fixed bounds, and published in one
+  shape. Collector state is operational information; it never decides API
   readiness.
 
 Every value published here is validated against a fixed vocabulary or
@@ -29,6 +30,21 @@ from sqlalchemy import text
 
 from config import settings
 from services.collection_failure import RUN_FAILURE_CATEGORIES
+# The reader and the collector share one contract for provider batches and
+# their summaries (services/collector_status.py). Its constants are the
+# reader's own, so they stay importable from here (PROVIDER_COUNTER_FIELDS,
+# for one, is not otherwise used in this module).
+from services.collector_status import (
+    CHILD_EXIT_CODES,
+    COLLECTOR_PROVIDERS,
+    MAX_COUNTER_VALUE,
+    PROVIDER_COUNTER_FIELDS,
+    STATUS_SCHEMA_VERSION,
+    batch_record,
+    provider_summary,
+    summarize_provider_batches,
+    valid_counters,
+)
 from services.migration_head import MigrationHead, expected_migration_head
 
 
@@ -53,25 +69,16 @@ ALLOWED_MODES = {"dry-run", "diagnostic", "apply"}
 # store. Any second list here is a third vocabulary, which is the defect this
 # indirection exists to prevent; see services/collection_failure.py.
 ALLOWED_FAILURE_CATEGORIES = RUN_FAILURE_CATEGORIES
-# The collector's provider paths, in the order it runs them.
-COLLECTOR_PROVIDERS = ("ndvi", "multi")
-# Exit codes of one provider child, i.e. one field batch. Only the run as a
-# whole can also end with 130 (cancelled).
-CHILD_EXIT_CODES = (0, 1, 2, 3, 4)
-PROVIDER_COUNTER_FIELDS = {
-    "success_count",
-    "failure_count",
-    "inserted_count",
-    "skipped_existing_count",
-    "quality_blocked_count",
-    "timeout_count",
-}
-MAX_COUNTER_VALUE = 10_000_000
-# The collector writes one ``providers`` entry per provider path per field
-# batch: 275 active fields at --batch-size 25 are 11 NDVI plus 11 multi-index
-# entries. Its own limits bound the list: at most 10,000 active fields
-# (MAX_ACTIVE_FIELDS) in batches of at least 2, so at most 5,000 batches per
-# provider path. The byte cap above applies first and is tighter in practice.
+# Status schemas the reader accepts: the one the collector writes, and schema
+# 1, which files written before TASK_229 still carry (``schema_version`` 1 or
+# absent).
+LEGACY_STATUS_SCHEMA_VERSION = 1
+# The collector's own limits bound a provider path's batches: at most 10,000
+# active fields (MAX_ACTIVE_FIELDS) in batches of at least 2, so at most 5,000
+# batches. A schema 1 file lists one ``providers`` entry per provider path per
+# batch (275 active fields at --batch-size 25 are 11 NDVI plus 11 multi-index
+# entries); there the byte cap above applies first and is tighter. A schema 2
+# summary states its ``batch_count``, which has the same bound.
 MAX_BATCHES_PER_PROVIDER = 5_000
 CODE_HEAD_REASONS = {
     "no_head": "code_head_missing",
@@ -196,112 +203,107 @@ def _exit_code_agrees(status: str, exit_code: Any) -> bool:
     return exit_code in (1, 2, 3, 4)
 
 
-def _valid_counters(value: Any) -> bool:
-    return (
-        isinstance(value, dict)
-        and set(value) == PROVIDER_COUNTER_FIELDS
-        and all(
-            type(item) is int and 0 <= item <= MAX_COUNTER_VALUE
-            for item in value.values()
-        )
-    )
-
-
-def _batch_record(entry: Any) -> dict[str, Any] | None:
-    """One ``providers`` entry exactly as the collector writes it, or None."""
-    if not isinstance(entry, dict):
-        return None
-    provider = entry.get("provider")
-    exit_code = entry.get("exit_code")
-    timed_out = entry.get("timed_out")
-    # Absent in files written before the collector reported counters.
-    counters = entry.get("counters")
-    if (
-        not isinstance(provider, str)
-        or provider not in COLLECTOR_PROVIDERS
-        or type(exit_code) is not int
-        or exit_code not in CHILD_EXIT_CODES
-        or type(timed_out) is not bool
-        or (counters is not None and not _valid_counters(counters))
-    ):
-        return None
-    return {
-        "provider": provider,
-        "exit_code": exit_code,
-        "timed_out": timed_out,
-        "counters": counters,
-    }
-
-
 def _provider_summaries(entries: Any) -> list[dict[str, Any]] | None:
-    """Fold per-batch entries into at most one summary per provider path.
+    """Schema 1: validate every batch entry, then fold them per provider path.
 
-    A batch succeeded when its child exited 0 without timing out. Every other
-    batch failed: exit 1 means some of its fields failed, 2-4 that the child
-    itself did, and a timed-out batch is counted as timed out as well. A
-    provider is ``succeeded`` when all its batches succeeded, ``failed`` when
-    none did, and ``partial`` otherwise. ``exit_code`` is the highest batch
-    exit code, which for anything the collector writes is how it folds its own
-    run: a stopping code 2-4, else 1 if any batch lost fields, else 0.
-    Counters are summed only over the batches that reported them, and
-    ``counters_batch_count`` says how many did: a batch that left no counters
-    is never counted as zero fields.
+    Each entry must be a ``batch_record``; the fold is the collector's own
+    (``summarize_provider_batches``).
     """
     if not isinstance(entries, list) or len(entries) > (
         MAX_BATCHES_PER_PROVIDER * len(COLLECTOR_PROVIDERS)
     ):
         return None
-    batches: dict[str, list[dict[str, Any]]] = {
-        provider: [] for provider in COLLECTOR_PROVIDERS
-    }
+    records = []
+    per_provider = dict.fromkeys(COLLECTOR_PROVIDERS, 0)
     for entry in entries:
-        record = _batch_record(entry)
+        record = batch_record(entry)
         if record is None:
             return None
-        own = batches[record["provider"]]
-        if len(own) >= MAX_BATCHES_PER_PROVIDER:
+        per_provider[record["provider"]] += 1
+        if per_provider[record["provider"]] > MAX_BATCHES_PER_PROVIDER:
             return None
-        own.append(record)
-    summaries = []
-    for provider, own in batches.items():
-        if not own:
-            continue
-        succeeded = sum(
-            1 for item in own if item["exit_code"] == 0 and not item["timed_out"]
+        records.append(record)
+    return summarize_provider_batches(records)
+
+
+def _count(value: Any, upper: int) -> bool:
+    return type(value) is int and 0 <= value <= upper
+
+
+def _compact_summary(entry: Any) -> dict[str, Any] | None:
+    """One schema 2 ``providers`` entry, or None.
+
+    The entry must be exactly what the collector's fold publishes for the
+    batch counts it states: its status, failed batch count and timeout flag
+    are derived again and must match in value and type. An exit code or
+    counter totals that no set of batches could produce are rejected.
+    """
+    if not isinstance(entry, dict):
+        return None
+    provider = entry.get("provider")
+    batches = entry.get("batch_count")
+    succeeded = entry.get("succeeded_batch_count")
+    timed_out = entry.get("timed_out_batch_count")
+    exit_code = entry.get("exit_code")
+    counters = entry.get("counters")
+    covered = entry.get("counters_batch_count")
+    if not (
+        isinstance(provider, str)
+        and provider in COLLECTOR_PROVIDERS
+        and _count(batches, MAX_BATCHES_PER_PROVIDER)
+        and batches > 0
+        and _count(succeeded, batches)
+        # A timed-out batch is always a failed one.
+        and _count(timed_out, batches - succeeded)
+        and _count(covered, batches)
+        and type(exit_code) is int
+        and exit_code in CHILD_EXIT_CODES
+        # Clean batches exit 0; a failed batch that did not time out did not.
+        and (exit_code == 0 or succeeded < batches)
+        and (exit_code != 0 or batches - succeeded == timed_out)
+        # Totals over the batches that reported counters, each at most
+        # MAX_COUNTER_VALUE; none reported means no totals at all.
+        and (
+            counters is None
+            if covered == 0
+            else valid_counters(counters, covered * MAX_COUNTER_VALUE)
         )
-        timed_out = sum(1 for item in own if item["timed_out"])
-        reported = [item["counters"] for item in own if item["counters"] is not None]
-        summaries.append(
-            {
-                "provider": provider,
-                "status": "succeeded"
-                if succeeded == len(own)
-                else "failed"
-                if succeeded == 0
-                else "partial",
-                "batch_count": len(own),
-                "succeeded_batch_count": succeeded,
-                "failed_batch_count": len(own) - succeeded,
-                "timed_out_batch_count": timed_out,
-                "exit_code": max(item["exit_code"] for item in own),
-                "timed_out": timed_out > 0,
-                "counters": {
-                    field: sum(values[field] for values in reported)
-                    for field in sorted(PROVIDER_COUNTER_FIELDS)
-                }
-                if reported
-                else None,
-                "counters_batch_count": len(reported),
-            }
-        )
-    return summaries
+    ):
+        return None
+    summary = provider_summary(
+        provider,
+        batch_count=batches,
+        succeeded_batch_count=succeeded,
+        timed_out_batch_count=timed_out,
+        exit_code=exit_code,
+        counters=counters,
+        counters_batch_count=covered,
+    )
+    for key in ("status", "failed_batch_count", "timed_out"):
+        stated = entry.get(key)
+        if type(stated) is not type(summary[key]) or stated != summary[key]:
+            return None
+    return summary
+
+
+def _compact_summaries(entries: Any) -> list[dict[str, Any]] | None:
+    """Schema 2: at most one summary per provider path, published in run order."""
+    if not isinstance(entries, list) or len(entries) > len(COLLECTOR_PROVIDERS):
+        return None
+    summaries: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        summary = _compact_summary(entry)
+        if summary is None or summary["provider"] in summaries:
+            return None
+        summaries[summary["provider"]] = summary
+    return [summaries[provider] for provider in COLLECTOR_PROVIDERS if provider in summaries]
 
 
 def _collector_snapshot(payload: Any, now: datetime) -> dict[str, Any] | None:
     """Validate one decoded status document against the collector's contract."""
     if not isinstance(payload, dict):
         return None
-    schema_version = payload.get("schema_version", 1)
+    schema_version = payload.get("schema_version", LEGACY_STATUS_SCHEMA_VERSION)
     run_id = payload.get("run_id")
     status = payload.get("status")
     exit_code = payload.get("exit_code")
@@ -313,7 +315,7 @@ def _collector_snapshot(payload: Any, now: datetime) -> dict[str, Any] | None:
     horizon = now + timedelta(seconds=MAX_FUTURE_SKEW_SECONDS)
     if (
         type(schema_version) is not int
-        or schema_version != 1
+        or schema_version not in (LEGACY_STATUS_SCHEMA_VERSION, STATUS_SCHEMA_VERSION)
         or not isinstance(run_id, str)
         or not RUN_ID_PATTERN.fullmatch(run_id)
         or not isinstance(status, str)
@@ -343,7 +345,12 @@ def _collector_snapshot(payload: Any, now: datetime) -> dict[str, Any] | None:
         )
     ):
         return None
-    providers = _provider_summaries(payload.get("providers", []))
+    summarize = (
+        _compact_summaries
+        if schema_version == STATUS_SCHEMA_VERSION
+        else _provider_summaries
+    )
+    providers = summarize(payload.get("providers", []))
     if providers is None:
         return None
     mode = payload.get("mode")

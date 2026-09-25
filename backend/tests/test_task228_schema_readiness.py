@@ -505,6 +505,8 @@ HEALTH_SOURCES = (
     BACKEND / "services" / "health.py",
     BACKEND / "services" / "migration_head.py",
     BACKEND / "api" / "health.py",
+    # Read by health for the collector's status contract (TASK_229).
+    BACKEND / "services" / "collector_status.py",
 )
 FORBIDDEN_MODULES = {"subprocess", "git", "alembic.command", "multiprocessing", "sched"}
 FORBIDDEN_CALLS = {"system", "popen", "Popen", "run", "upgrade", "downgrade", "stamp", "create_all"}
