@@ -172,7 +172,9 @@ def test_invalid_or_oversized_collector_status_is_not_exposed():
             encoding="utf-8",
         )
         snapshot = health.collector_readiness(directory, 3600)
-    assert snapshot["status"] == "missing"
+    # TASK_228: a present but untrusted file is rejected, not reported absent.
+    assert snapshot["status"] == "rejected"
+    assert snapshot["reason"] == "oversized"
     assert snapshot["latest"] is None
 
 

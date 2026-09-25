@@ -1,8 +1,15 @@
-"""Sanitized liveness, readiness, and collector operational state."""
+"""Sanitized liveness, readiness, and collector operational state.
+
+The standalone collector's status files are read in the format the collector
+writes, strictly and within fixed bounds, and published as at most one bounded
+summary per provider path. Collector state is operational information; it never
+decides API readiness. No file content, exception text, path or credential is
+echoed.
+"""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import re
@@ -18,6 +25,11 @@ from services.collection_failure import RUN_FAILURE_CATEGORIES
 MAX_STATUS_FILE_BYTES = 64 * 1024
 MIN_STALE_AFTER_SECONDS = 60
 MAX_STALE_AFTER_SECONDS = 30 * 24 * 60 * 60
+# The collector's cycle timeout cap (MAX_CYCLE_TIMEOUT_SECONDS).
+MAX_DURATION_SECONDS = 21600
+# The collector writes its status on this host's clock. A time further ahead
+# than this was not written by the collector, and would read as fresh forever.
+MAX_FUTURE_SKEW_SECONDS = 300
 STATUS_FILES = {
     "latest": "collector_latest_status.json",
     "last_success": "collector_last_success.json",
@@ -26,10 +38,16 @@ STATUS_FILES = {
 RUN_ID_PATTERN = re.compile(r"^[a-f0-9]{32}$")
 REVISION_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 ALLOWED_COLLECTOR_STATUSES = {"running", "succeeded", "failed", "cancelled"}
+ALLOWED_MODES = {"dry-run", "diagnostic", "apply"}
 # The reader accepts exactly what the collector can write and the database can
 # store. Any second list here is a third vocabulary, which is the defect this
 # indirection exists to prevent; see services/collection_failure.py.
 ALLOWED_FAILURE_CATEGORIES = RUN_FAILURE_CATEGORIES
+# The collector's provider paths, in the order it runs them.
+COLLECTOR_PROVIDERS = ("ndvi", "multi")
+# Exit codes of one provider child, i.e. one field batch. Only the run as a
+# whole can also end with 130 (cancelled).
+CHILD_EXIT_CODES = (0, 1, 2, 3, 4)
 PROVIDER_COUNTER_FIELDS = {
     "success_count",
     "failure_count",
@@ -38,6 +56,13 @@ PROVIDER_COUNTER_FIELDS = {
     "quality_blocked_count",
     "timeout_count",
 }
+MAX_COUNTER_VALUE = 10_000_000
+# The collector writes one ``providers`` entry per provider path per field
+# batch: 275 active fields at --batch-size 25 are 11 NDVI plus 11 multi-index
+# entries. Its own limits bound the list: at most 10,000 active fields
+# (MAX_ACTIVE_FIELDS) in batches of at least 2, so at most 5,000 batches per
+# provider path. The byte cap above applies first and is tighter in practice.
+MAX_BATCHES_PER_PROVIDER = 5_000
 
 
 def utc_now() -> datetime:
@@ -89,87 +114,179 @@ def _parse_timestamp(value: Any) -> datetime | None:
         return None
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
+        # An offset at either end of the calendar overflows on conversion.
+        return None if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+    except (ValueError, OverflowError):
         return None
-    if parsed.tzinfo is None:
-        return None
-    return parsed.astimezone(timezone.utc)
 
 
-def _read_collector_file(path: Path) -> dict[str, Any] | None:
-    try:
-        if not path.is_file() or path.stat().st_size > MAX_STATUS_FILE_BYTES:
-            return None
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    run_id = payload.get("run_id")
-    status = payload.get("status")
-    started_at = _parse_timestamp(payload.get("started_at"))
-    finished_at = _parse_timestamp(payload.get("finished_at"))
-    failure_category = payload.get("failure_category")
-    if (
-        not isinstance(run_id, str)
-        or not RUN_ID_PATTERN.fullmatch(run_id)
-        or status not in ALLOWED_COLLECTOR_STATUSES
-        or started_at is None
-        or (status != "running" and finished_at is None)
-        or (
-            failure_category is not None
-            and failure_category not in ALLOWED_FAILURE_CATEGORIES
+def _exit_code_agrees(status: str, exit_code: Any) -> bool:
+    """The collector derives its status from its exit code; both must agree."""
+    if status == "running":
+        return exit_code is None
+    if type(exit_code) is not int:
+        return False
+    if status == "succeeded":
+        return exit_code == 0
+    if status == "cancelled":
+        return exit_code == 130
+    return exit_code in (1, 2, 3, 4)
+
+
+def _valid_counters(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == PROVIDER_COUNTER_FIELDS
+        and all(
+            type(item) is int and 0 <= item <= MAX_COUNTER_VALUE
+            for item in value.values()
         )
+    )
+
+
+def _batch_record(entry: Any) -> dict[str, Any] | None:
+    """One ``providers`` entry exactly as the collector writes it, or None."""
+    if not isinstance(entry, dict):
+        return None
+    provider = entry.get("provider")
+    exit_code = entry.get("exit_code")
+    timed_out = entry.get("timed_out")
+    # Absent in files written before the collector reported counters.
+    counters = entry.get("counters")
+    if (
+        not isinstance(provider, str)
+        or provider not in COLLECTOR_PROVIDERS
+        or type(exit_code) is not int
+        or exit_code not in CHILD_EXIT_CODES
+        or type(timed_out) is not bool
+        or (counters is not None and not _valid_counters(counters))
     ):
         return None
-    exit_code = payload.get("exit_code")
-    if exit_code is not None and (
-        type(exit_code) is not int or exit_code not in (0, 1, 2, 3, 4, 130)
+    return {
+        "provider": provider,
+        "exit_code": exit_code,
+        "timed_out": timed_out,
+        "counters": counters,
+    }
+
+
+def _provider_summaries(entries: Any) -> list[dict[str, Any]] | None:
+    """Fold per-batch entries into at most one summary per provider path.
+
+    A batch succeeded when its child exited 0 without timing out. Every other
+    batch failed: exit 1 means some of its fields failed, 2-4 that the child
+    itself did, and a timed-out batch is counted as timed out as well. A
+    provider is ``succeeded`` when all its batches succeeded, ``failed`` when
+    none did, and ``partial`` otherwise. ``exit_code`` is the highest batch
+    exit code, which for anything the collector writes is how it folds its own
+    run: a stopping code 2-4, else 1 if any batch lost fields, else 0.
+    Counters are summed only over the batches that reported them, and
+    ``counters_batch_count`` says how many did: a batch that left no counters
+    is never counted as zero fields.
+    """
+    if not isinstance(entries, list) or len(entries) > (
+        MAX_BATCHES_PER_PROVIDER * len(COLLECTOR_PROVIDERS)
     ):
         return None
-    duration = payload.get("duration_seconds")
-    if duration is not None and (
-        not isinstance(duration, (int, float)) or not 0 <= duration <= 21600
-    ):
-        return None
-    providers_payload = payload.get("providers", [])
-    if not isinstance(providers_payload, list) or len(providers_payload) > 2:
-        return None
-    providers = []
-    for provider in providers_payload:
-        if not isinstance(provider, dict) or provider.get("provider") not in {
-            "ndvi",
-            "multi",
-        }:
+    batches: dict[str, list[dict[str, Any]]] = {
+        provider: [] for provider in COLLECTOR_PROVIDERS
+    }
+    for entry in entries:
+        record = _batch_record(entry)
+        if record is None:
             return None
-        counters_payload = provider.get("counters")
-        counters = None
-        if counters_payload is not None:
-            if (
-                not isinstance(counters_payload, dict)
-                or set(counters_payload) != PROVIDER_COUNTER_FIELDS
-                or any(
-                    type(value) is not int or not 0 <= value <= 10_000_000
-                    for value in counters_payload.values()
-                )
-            ):
-                return None
-            counters = counters_payload
-        providers.append(
+        own = batches[record["provider"]]
+        if len(own) >= MAX_BATCHES_PER_PROVIDER:
+            return None
+        own.append(record)
+    summaries = []
+    for provider, own in batches.items():
+        if not own:
+            continue
+        succeeded = sum(
+            1 for item in own if item["exit_code"] == 0 and not item["timed_out"]
+        )
+        timed_out = sum(1 for item in own if item["timed_out"])
+        reported = [item["counters"] for item in own if item["counters"] is not None]
+        summaries.append(
             {
-                "provider": provider["provider"],
-                "exit_code": provider.get("exit_code")
-                if provider.get("exit_code") in (0, 1, 2, 3, 4)
+                "provider": provider,
+                "status": "succeeded"
+                if succeeded == len(own)
+                else "failed"
+                if succeeded == 0
+                else "partial",
+                "batch_count": len(own),
+                "succeeded_batch_count": succeeded,
+                "failed_batch_count": len(own) - succeeded,
+                "timed_out_batch_count": timed_out,
+                "exit_code": max(item["exit_code"] for item in own),
+                "timed_out": timed_out > 0,
+                "counters": {
+                    field: sum(values[field] for values in reported)
+                    for field in sorted(PROVIDER_COUNTER_FIELDS)
+                }
+                if reported
                 else None,
-                "timed_out": bool(provider.get("timed_out")),
-                "counters": counters,
+                "counters_batch_count": len(reported),
             }
         )
+    return summaries
+
+
+def _collector_snapshot(payload: Any, now: datetime) -> dict[str, Any] | None:
+    """Validate one decoded status document against the collector's contract."""
+    if not isinstance(payload, dict):
+        return None
+    schema_version = payload.get("schema_version", 1)
+    run_id = payload.get("run_id")
+    status = payload.get("status")
+    exit_code = payload.get("exit_code")
+    failure_category = payload.get("failure_category")
+    duration = payload.get("duration_seconds")
+    started_at = _parse_timestamp(payload.get("started_at"))
+    finished_value = payload.get("finished_at")
+    finished_at = _parse_timestamp(finished_value)
+    horizon = now + timedelta(seconds=MAX_FUTURE_SKEW_SECONDS)
+    if (
+        type(schema_version) is not int
+        or schema_version != 1
+        or not isinstance(run_id, str)
+        or not RUN_ID_PATTERN.fullmatch(run_id)
+        or not isinstance(status, str)
+        or status not in ALLOWED_COLLECTOR_STATUSES
+        or not _exit_code_agrees(status, exit_code)
+        or started_at is None
+        or started_at > horizon
+        or (finished_value is None) != (status == "running")
+        or (
+            finished_value is not None
+            and (finished_at is None or finished_at > horizon)
+        )
+        or (
+            failure_category is not None
+            and (
+                not isinstance(failure_category, str)
+                or failure_category not in ALLOWED_FAILURE_CATEGORIES
+                or status in {"running", "succeeded"}
+            )
+        )
+        or (
+            duration is not None
+            and (
+                type(duration) not in (int, float)
+                or not 0 <= duration <= MAX_DURATION_SECONDS
+            )
+        )
+    ):
+        return None
+    providers = _provider_summaries(payload.get("providers", []))
+    if providers is None:
+        return None
+    mode = payload.get("mode")
     return {
         "run_id": run_id,
-        "mode": payload.get("mode")
-        if payload.get("mode") in {"dry-run", "diagnostic", "apply"}
-        else "unknown",
+        "mode": mode if isinstance(mode, str) and mode in ALLOWED_MODES else "unknown",
         "status": status,
         "started_at": started_at.isoformat(),
         "finished_at": finished_at.isoformat() if finished_at else None,
@@ -178,6 +295,35 @@ def _read_collector_file(path: Path) -> dict[str, Any] | None:
         "duration_seconds": duration,
         "providers": providers,
     }
+
+
+def _read_collector_file(
+    path: Path,
+    now: datetime,
+) -> tuple[str, dict[str, Any] | None]:
+    """Return ``("valid", snapshot)``, ``("absent", None)`` or a rejection.
+
+    A rejection is ``(reason, None)`` with reason ``unreadable``,
+    ``oversized``, ``malformed_json`` or ``invalid_contract``. At most
+    ``MAX_STATUS_FILE_BYTES`` + 1 bytes are ever read.
+    """
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(MAX_STATUS_FILE_BYTES + 1)
+    except FileNotFoundError:
+        return "absent", None
+    except OSError:
+        return "unreadable", None
+    if len(raw) > MAX_STATUS_FILE_BYTES:
+        return "oversized", None
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError):
+        return "malformed_json", None
+    snapshot = _collector_snapshot(payload, now)
+    if snapshot is None:
+        return "invalid_contract", None
+    return "valid", snapshot
 
 
 def collector_readiness(
@@ -195,21 +341,32 @@ def collector_readiness(
         max(int(stale_after_seconds), MIN_STALE_AFTER_SECONDS),
         MAX_STALE_AFTER_SECONDS,
     )
-    snapshots = {
-        label: _read_collector_file(root / filename)
+    current = (now or utc_now()).astimezone(timezone.utc)
+    loaded = {
+        label: _read_collector_file(root / filename, current)
         for label, filename in STATUS_FILES.items()
     }
-    latest = snapshots["latest"]
+    state, latest = loaded["latest"]
+    history = {
+        "last_success": loaded["last_success"][1],
+        "last_failure": loaded["last_failure"][1],
+    }
     if latest is None:
+        if state == "absent":
+            return {
+                "status": "missing",
+                "required_for_api_readiness": False,
+                "latest": None,
+                **history,
+            }
         return {
-            "status": "missing",
+            "status": "rejected",
+            "reason": state,
             "required_for_api_readiness": False,
             "latest": None,
-            "last_success": snapshots["last_success"],
-            "last_failure": snapshots["last_failure"],
+            **history,
         }
     reference = _parse_timestamp(latest["finished_at"] or latest["started_at"])
-    current = (now or utc_now()).astimezone(timezone.utc)
     age_seconds = max(0, int((current - reference).total_seconds()))
     component_status = "stale" if age_seconds > stale_after else latest["status"]
     return {
@@ -218,8 +375,7 @@ def collector_readiness(
         "age_seconds": age_seconds,
         "stale_after_seconds": stale_after,
         "latest": latest,
-        "last_success": snapshots["last_success"],
-        "last_failure": snapshots["last_failure"],
+        **history,
     }
 
 

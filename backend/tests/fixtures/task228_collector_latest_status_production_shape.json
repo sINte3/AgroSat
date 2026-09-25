@@ -1,0 +1,299 @@
+{
+  "duration_seconds": 1660.575,
+  "exit_code": 0,
+  "failure_category": null,
+  "finished_at": "2026-09-25T01:27:42+00:00",
+  "mode": "apply",
+  "providers": [
+    {
+      "counters": {
+        "failure_count": 0,
+        "inserted_count": 8,
+        "quality_blocked_count": 0,
+        "skipped_existing_count": 17,
+        "success_count": 25,
+        "timeout_count": 0
+      },
+      "exit_code": 0,
+      "provider": "ndvi",
+      "timed_out": false
+    },
+    {
+      "counters": {
+        "failure_count": 0,
+        "inserted_count": 19,
+        "quality_blocked_count": 0,
+        "skipped_existing_count": 6,
+        "success_count": 25,
+        "timeout_count": 0
+      },
+      "exit_code": 0,
+      "provider": "ndvi",
+      "timed_out": false
+    },
+    {
+      "counters": {
+        "failure_count": 0,
+        "inserted_count": 17,
+        "quality_blocked_count": 0,
+        "skipped_existing_count": 8,
+        "success_count": 25,
+        "timeout_count": 0
+      },
+      "exit_code": 0,
+      "provider": "ndvi",
+      "timed_out": false
+    },
+    {
+      "counters": {
+        "failure_count": 0,
+        "inserted_count": 12,
+        "quality_blocked_count": 0,
+        "skipped_existing_count": 13,
+        "success_count": 25,
+        "timeout_count": 0
+      },
+      "exit_code": 0,
+      "provider": "ndvi",
+      "timed_out": false
+    },
+    {
+      "counters": {
+        "failure_count": 0,
+        "inserted_count": 9,
+        "quality_blocked_count": 2,
+        "skipped_existing_count": 14,
+        "success_count": 25,
+        "timeout_count": 0
+      },
+      "exit_code": 0,
+      "provider": "ndvi",
+      "timed_out": false
+    },
+    {
+      "counters": {
+        "failure_count": 0,
+        "inserted_count": 15,
+        "quality_blocked_count": 2,
+        "skipped_existing_count": 8,
+        "success_count": 25,
+        "timeout_count": 0
+      },
+      "exit_code": 0,
+      "provider": "ndvi",
+      "timed_out": false
+    },
+    {
+      "counters": {
+        "failure_count": 0,
+        "inserted_count": 18,
+        "quality_blocked_count": 0,
+        "skipped_existing_count": 7,
+        "success_count": 25,
+        "timeout_count": 0
+      },
+      "exit_code": 0,
+      "provider": "ndvi",
+      "timed_out": false
+    },
+    {
+      "counters": {
+        "failure_count": 0,
+        "inserted_count": 13,
+        "quality_blocked_count": 0,
+        "skipped_existing_count": 12,
+        "success_count": 25,
+        "timeout_count": 0
+      },
+      "exit_code": 0,
+      "provider": "ndvi",
+      "timed_out": false
+    },
+    {
+      "counters": {
+        "failure_count": 0,
+        "inserted_count": 13,
+        "quality_blocked_count": 0,
+        "skipped_existing_count": 12,
+        "success_count": 25,
+        "timeout_count": 0
+      },
+      "exit_code": 0,
+      "provider": "ndvi",
+      "timed_out": false
+    },
+    {
+      "counters": {
+        "failure_count": 0,
+        "inserted_count": 13,
+        "quality_blocked_count": 1,
+        "skipped_existing_count": 11,
+        "success_count": 25,
+        "timeout_count": 0
+      },
+      "exit_code": 0,
+      "provider": "ndvi",
+      "timed_out": false
+    },
+    {
+      "counters": {
+        "failure_count": 0,
+        "inserted_count": 9,
+        "quality_blocked_count": 0,
+        "skipped_existing_count": 16,
+        "success_count": 25,
+        "timeout_count": 0
+      },
+      "exit_code": 0,
+      "provider": "ndvi",
+      "timed_out": false
+    },
+    {
+      "counters": {
+        "failure_count": 0,
+        "inserted_count": 0,
+        "quality_blocked_count": 0,
+        "skipped_existing_count": 308,
+        "success_count": 25,
+        "timeout_count": 0
+      },
+      "exit_code": 0,
+      "provider": "multi",
+      "timed_out": false
+    },
+    {
+      "counters": {
+        "failure_count": 0,
+        "inserted_count": 0,
+        "quality_blocked_count": 0,
+        "skipped_existing_count": 300,
+        "success_count": 25,
+        "timeout_count": 0
+      },
+      "exit_code": 0,
+      "provider": "multi",
+      "timed_out": false
+    },
+    {
+      "counters": {
+        "failure_count": 0,
+        "inserted_count": 0,
+        "quality_blocked_count": 0,
+        "skipped_existing_count": 308,
+        "success_count": 25,
+        "timeout_count": 0
+      },
+      "exit_code": 0,
+      "provider": "multi",
+      "timed_out": false
+    },
+    {
+      "counters": {
+        "failure_count": 0,
+        "inserted_count": 0,
+        "quality_blocked_count": 0,
+        "skipped_existing_count": 380,
+        "success_count": 25,
+        "timeout_count": 0
+      },
+      "exit_code": 0,
+      "provider": "multi",
+      "timed_out": false
+    },
+    {
+      "counters": {
+        "failure_count": 0,
+        "inserted_count": 0,
+        "quality_blocked_count": 0,
+        "skipped_existing_count": 380,
+        "success_count": 25,
+        "timeout_count": 0
+      },
+      "exit_code": 0,
+      "provider": "multi",
+      "timed_out": false
+    },
+    {
+      "counters": {
+        "failure_count": 0,
+        "inserted_count": 0,
+        "quality_blocked_count": 0,
+        "skipped_existing_count": 464,
+        "success_count": 25,
+        "timeout_count": 0
+      },
+      "exit_code": 0,
+      "provider": "multi",
+      "timed_out": false
+    },
+    {
+      "counters": {
+        "failure_count": 0,
+        "inserted_count": 0,
+        "quality_blocked_count": 0,
+        "skipped_existing_count": 452,
+        "success_count": 25,
+        "timeout_count": 0
+      },
+      "exit_code": 0,
+      "provider": "multi",
+      "timed_out": false
+    },
+    {
+      "counters": {
+        "failure_count": 0,
+        "inserted_count": 0,
+        "quality_blocked_count": 0,
+        "skipped_existing_count": 436,
+        "success_count": 25,
+        "timeout_count": 0
+      },
+      "exit_code": 0,
+      "provider": "multi",
+      "timed_out": false
+    },
+    {
+      "counters": {
+        "failure_count": 0,
+        "inserted_count": 0,
+        "quality_blocked_count": 0,
+        "skipped_existing_count": 400,
+        "success_count": 25,
+        "timeout_count": 0
+      },
+      "exit_code": 0,
+      "provider": "multi",
+      "timed_out": false
+    },
+    {
+      "counters": {
+        "failure_count": 0,
+        "inserted_count": 0,
+        "quality_blocked_count": 0,
+        "skipped_existing_count": 476,
+        "success_count": 25,
+        "timeout_count": 0
+      },
+      "exit_code": 0,
+      "provider": "multi",
+      "timed_out": false
+    },
+    {
+      "counters": {
+        "failure_count": 0,
+        "inserted_count": 0,
+        "quality_blocked_count": 0,
+        "skipped_existing_count": 476,
+        "success_count": 25,
+        "timeout_count": 0
+      },
+      "exit_code": 0,
+      "provider": "multi",
+      "timed_out": false
+    }
+  ],
+  "run_id": "00000000000000000000000000000228",
+  "schema_version": 1,
+  "started_at": "2026-09-25T01:00:02+00:00",
+  "status": "succeeded"
+}
