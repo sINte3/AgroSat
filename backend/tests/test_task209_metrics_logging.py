@@ -102,6 +102,10 @@ def test_collector_metrics_have_only_provider_and_outcome_labels():
                             "success_count": 4,
                             "failure_count": 1,
                         },
+                        # Counters from every batch (TASK_229): only complete
+                        # totals are published as field series.
+                        "batch_count": 1,
+                        "counters_batch_count": 1,
                     }
                 ],
             }

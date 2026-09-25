@@ -266,11 +266,32 @@ def collector_metrics(collector: dict[str, Any]) -> str:
             "agrosat_collector_last_run_duration_seconds"
             f'{{failure_category="{failure}",status="{status}"}} {duration:g}'
         )
+    published = set()
     for provider in latest.get("providers", []):
-        counters = provider.get("counters")
-        if not isinstance(counters, dict):
+        if not isinstance(provider, dict):
             continue
         provider_name = _label(provider.get("provider"))
+        if provider_name in published:
+            continue
+        published.add(provider_name)
+        counters = provider.get("counters")
+        batch_count = provider.get("batch_count")
+        covered = provider.get("counters_batch_count")
+        # Totals over only some of a provider's batches are not field counts:
+        # publish them only when every batch reported counters, and say which
+        # case this is.
+        complete = (
+            isinstance(counters, dict)
+            and type(batch_count) is int
+            and type(covered) is int
+            and 0 < batch_count == covered
+        )
+        lines.append(
+            "agrosat_collector_last_run_provider_counters_complete"
+            f'{{provider="{provider_name}"}} {int(complete)}'
+        )
+        if not complete:
+            continue
         for outcome, value in sorted(counters.items()):
             lines.append(
                 "agrosat_collector_last_run_fields"
