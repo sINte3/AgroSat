@@ -645,7 +645,6 @@ def phase_backuptask(context: dict) -> dict:
     release = run1.releases / context["candidate"]
     root = context["root"] / "backuptask"
     task = f"{TASK_PREFIX}DatabaseBackup"
-    at = (datetime.now().replace(second=0, microsecond=0)).strftime("%H:%M:%S")
     policy = backup_policy(root / "backup-policy.json", database=context["source_db"], env=context["source_env"],
                            root=root / "backups", schedule={"task_name": task, "daily_at_local_time": "03:17:00",
                                                             "execution_sid": "S-1-5-18",
@@ -653,33 +652,48 @@ def phase_backuptask(context: dict) -> dict:
                                                             "restart_interval_minutes": 5})
     evidence = context["evidence"] / "backuptask"
     evidence.mkdir(parents=True, exist_ok=True)
-    installer = REPOSITORY / "ops" / "database" / "Install-DatabaseBackupTask.ps1"
-    base = [POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(installer),
-            "-PolicyPath", str(policy), "-ReleaseDirectory", str(release), "-ControlRoot", str(run1.control)]
-    preview = subprocess.run(base, capture_output=True, text=True)
-    applied = subprocess.run(base + ["-Apply", "-Confirm:$false"], capture_output=True, text=True)
-    powershell(f"Enable-ScheduledTask -TaskPath '\\' -TaskName '{task[1:]}' | Out-Null; "
-               f"Start-ScheduledTask -TaskPath '\\' -TaskName '{task[1:]}'")
-    deadline = time.monotonic() + 600
-    while time.monotonic() < deadline and WindowsTasks().state(task) == "Running":
+    # The installer and inspector of the materialized release, as the deployment plan runs them.
+    installer = release / "ops" / "database" / "Install-DatabaseBackupTask.ps1"
+    inspector = release / "ops" / "database" / "Inspect-DatabaseBackupTask.ps1"
+    arguments = f"-PolicyPath '{policy}' -ReleaseDirectory '{release}' -ControlRoot '{run1.control}'"
+    report: dict = {"note": "03:17:00 is a rehearsal value only; no production backup time is defined"}
+    try:
+        preview = subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
+                                  str(installer), "-PolicyPath", str(policy), "-ReleaseDirectory", str(release),
+                                  "-ControlRoot", str(run1.control)], capture_output=True, text=True)
+        # Windows PowerShell 5.1 cannot pass -Confirm:$false through -File; the non-interactive confirmation
+        # of the ShouldProcess installer therefore goes through -Command.
+        applied = subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+                                  f"& '{installer}' {arguments} -Apply -Confirm:$false"], capture_output=True, text=True)
+        report.update({"preview_exit": preview.returncode, "preview": preview.stdout[-2000:],
+                       "apply_exit": applied.returncode, "apply": applied.stdout[-1000:] + applied.stderr[-1000:],
+                       "state_after_install": WindowsTasks().state(task)})
+        if applied.returncode != 0 or report["state_after_install"] != "Disabled":
+            raise SystemExit("TASK230_BACKUP_TASK_NOT_INSTALLED_DISABLED")
+        powershell(f"Enable-ScheduledTask -TaskPath '\\' -TaskName '{task[1:]}' | Out-Null; "
+                   f"Start-ScheduledTask -TaskPath '\\' -TaskName '{task[1:]}'")
+        deadline = time.monotonic() + 600
+        while time.monotonic() < deadline and WindowsTasks().state(task) == "Running":
+            time.sleep(2)
         time.sleep(2)
-    time.sleep(2)
-    last_result = WindowsTasks().last_result(task)
-    inspect = subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
-                              str(REPOSITORY / "ops" / "database" / "Inspect-DatabaseBackupTask.ps1"), "-PolicyPath",
-                              str(policy)], capture_output=True, text=True)
-    executions = sorted((root / "backups" / "primary" / "executions").glob("*.json"))
-    execution = read_json(executions[-1], "X") if executions else None
-    unregister(task)
-    report = {"preview_exit": preview.returncode, "preview": preview.stdout[-2000:], "apply_exit": applied.returncode,
-              "apply": applied.stdout[-1000:] + applied.stderr[-1000:], "last_task_result": last_result,
-              "inspect_exit": inspect.returncode, "inspect": inspect.stdout[-2000:], "execution": execution,
-              "note": "03:17:00 is a rehearsal value only; no production backup time is defined"}
-    write_json_atomic(evidence / "backup-task.json", report)
-    return {"install_exit": applied.returncode, "last_task_result": last_result, "inspect_exit": inspect.returncode,
+        report["last_task_result"] = WindowsTasks().last_result(task)
+        inspect = subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
+                                  str(inspector), "-PolicyPath", str(policy)], capture_output=True, text=True)
+        report.update({"inspect_exit": inspect.returncode, "inspect": inspect.stdout[-2000:]})
+        executions = sorted((root / "backups" / "primary" / "executions").glob("*.json"))
+        report["execution"] = read_json(executions[-1], "X") if executions else None
+    finally:
+        unregister(task)
+        report["unregistered"] = WindowsTasks().state(task) is None
+        write_json_atomic(evidence / "backup-task.json", report)
+    execution = report["execution"]
+    return {"install_exit": report["apply_exit"], "state_after_install": report["state_after_install"],
+            "last_task_result": report["last_task_result"], "inspect_exit": report["inspect_exit"],
             "execution_result": None if execution is None else execution.get("result"),
-            "pass": preview.returncode == 0 and applied.returncode == 0 and last_result == 0 and inspect.returncode == 0
-            and execution is not None and execution.get("result") == "PASS"}
+            "unregistered": report["unregistered"],
+            "pass": report["preview_exit"] == 0 and report["apply_exit"] == 0 and report["last_task_result"] == 0
+            and report["inspect_exit"] == 0 and execution is not None and execution.get("result") == "PASS"
+            and report["unregistered"]}
 
 
 def phase_cleanup(context: dict) -> dict:
