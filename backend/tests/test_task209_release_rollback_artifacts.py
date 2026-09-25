@@ -72,7 +72,7 @@ def test_release_tooling_compiles_and_every_ops_powershell_file_parses():
         command = ("$errors=$null; [System.Management.Automation.Language.Parser]::ParseFile("
                    f"'{script}',[ref]$null,[ref]$errors) | Out-Null; if($errors.Count){{exit 2}}")
         subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", command], check=True,
-                       capture_output=True, text=True, timeout=30)
+                       capture_output=True, text=True, errors="replace", timeout=30)
 
 
 def test_release_archive_extraction_covers_the_safe_immutable_archive_contract(tmp_path):

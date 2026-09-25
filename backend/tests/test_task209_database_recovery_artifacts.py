@@ -84,7 +84,7 @@ def test_backup_task_installer_refuses_the_example_policy(tmp_path):
     result = subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
                              str(OPS / "Install-DatabaseBackupTask.ps1"), "-PolicyPath",
                              str(OPS / "database-backup-policy.example.json"), "-ReleaseDirectory", str(tmp_path),
-                             "-ControlRoot", str(tmp_path)], capture_output=True, text=True, timeout=60)
+                             "-ControlRoot", str(tmp_path)], capture_output=True, text=True, errors="replace", timeout=60)
     assert result.returncode != 0 and "BACKUP_POLICY_IS_EXAMPLE" in result.stderr + result.stdout
 
 

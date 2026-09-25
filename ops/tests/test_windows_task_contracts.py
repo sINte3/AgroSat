@@ -24,7 +24,7 @@ def run_validator(tmp_path: Path, common: str, function: str, document: dict) ->
     path.write_text(json.dumps(document), encoding="utf-8")
     return subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
                            f". '{TASKS / common}'; {function} -ConfigurationPath '{path}' | Out-Null"],
-                          capture_output=True, text=True, timeout=60)
+                          capture_output=True, text=True, errors="replace", timeout=60)
 
 
 def sentinel(**schedule) -> dict:
@@ -97,7 +97,7 @@ def test_installer_preview_refuses_the_historical_two_trigger_template(tmp_path)
     path.write_text(json.dumps(sentinel(daily_at_local_times=["06:00:00", "18:00:00"])), encoding="utf-8")
     result = subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
                              str(TASKS / "Install-CollectorTask.ps1"), "-ConfigurationPath", str(path)],
-                            capture_output=True, text=True, timeout=60)
+                            capture_output=True, text=True, errors="replace", timeout=60)
     assert result.returncode != 0 and "SENTINEL_PRODUCTION_TRIGGER_COUNT_REJECTED" in result.stderr + result.stdout
 
 

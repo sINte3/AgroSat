@@ -69,7 +69,7 @@ def alembic_graph(python: Path, backend_directory: Path) -> dict[str, Any]:
     if python.parent != Path("."):
         python = python.resolve()
     result = subprocess.run([str(python), "-B", "-c", GRAPH_SCRIPT, str(backend_directory)],
-                            capture_output=True, text=True, cwd=str(backend_directory), timeout=300,
+                            capture_output=True, text=True, errors="replace", cwd=str(backend_directory), timeout=300,
                             env={key: value for key, value in os.environ.items()
                                  if key.upper() not in {"DATABASE_URL", "PYTHONPATH"}})
     if result.returncode != 0:
@@ -216,4 +216,4 @@ def run_alembic(python: Path, backend_directory: Path, env_file: Path, arguments
     environment["AGROSAT_RUNTIME_ENV_FILE"] = str(env_file)
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     return subprocess.run([str(python), "-B", "-m", "alembic", *arguments], cwd=str(backend_directory),
-                          env=environment, capture_output=True, text=True, timeout=timeout)
+                          env=environment, capture_output=True, text=True, errors="replace", timeout=timeout)

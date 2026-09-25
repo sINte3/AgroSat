@@ -147,5 +147,5 @@ def _bounded(stderr: bytes | str | None) -> str:
 
 
 def tool_version(target: DatabaseTarget, tool: str) -> str:
-    result = subprocess.run([str(target.tool(tool)), "--version"], capture_output=True, text=True, timeout=60)
+    result = subprocess.run([str(target.tool(tool)), "--version"], capture_output=True, text=True, errors="replace", timeout=60)
     return result.stdout.strip()
