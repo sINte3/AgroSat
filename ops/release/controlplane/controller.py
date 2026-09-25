@@ -305,7 +305,8 @@ class Controller:
         state.data["facts"]["tasks_before"] = {kind: definition.actions[0].evidence()
                                                for kind, definition in definitions.items()}
         health_now = {
-            "backend": health.probe_backend(profile.backend_port, current, previous_head, get=self.platform.http_get),
+            "backend": health.probe_backend(profile.backend_port, current, previous_head, get=self.platform.http_get,
+                                            pre_task228_compatible=True),
             "frontend": health.probe_frontend(profile.frontend_port, state.data["facts"]["previous"]["dist_index_sha256"],
                                               current, get=self.platform.http_get),
         }
@@ -769,7 +770,9 @@ class Controller:
 
     def gate_verify_backend(self, state: ReleaseState) -> dict[str, Any]:
         sha, head, _ = self._expected(state)
-        result = health.wait_for(lambda: health.probe_backend(self.profile.backend_port, sha, head, get=self.platform.http_get),
+        compatible = self.request.operation == "rollback"  # a rollback target may predate TASK_228
+        result = health.wait_for(lambda: health.probe_backend(self.profile.backend_port, sha, head, get=self.platform.http_get,
+                                                              pre_task228_compatible=compatible),
                                  deadline_seconds=self.deadlines.health_seconds, interval_seconds=1.0,
                                  clock=self.platform.monotonic, sleep=self.platform.sleep)
         if not result["pass"]:
@@ -844,7 +847,8 @@ class Controller:
     # ================================================================ FINAL / COMMIT
     def gate_final_health(self, state: ReleaseState) -> dict[str, Any]:
         sha, head, index = self._expected(state)
-        backend = health.probe_backend(self.profile.backend_port, sha, head, get=self.platform.http_get)
+        backend = health.probe_backend(self.profile.backend_port, sha, head, get=self.platform.http_get,
+                                       pre_task228_compatible=self.request.operation == "rollback")
         frontend = health.probe_frontend(self.profile.frontend_port, index, sha, get=self.platform.http_get)
         if not backend["pass"] or not frontend["pass"]:
             raise ControlPlaneError("FINAL_HEALTH_FAILED", facts={"backend": backend["checks"], "frontend": frontend["checks"]})
@@ -1024,7 +1028,8 @@ class Controller:
                         raise ControlPlaneError("MANUAL_RECOVERY_REQUIRED", "worker rebind violated schedule identity")
                     result["steps"].append({"restore_binding": kind})
             backend = health.wait_for(lambda: health.probe_backend(self.profile.backend_port, previous["sha"],
-                                                                   previous["alembic_head"], get=self.platform.http_get),
+                                                                   previous["alembic_head"], get=self.platform.http_get,
+                                                                   pre_task228_compatible=True),
                                       deadline_seconds=self.deadlines.health_seconds, interval_seconds=1.0,
                                       clock=self.platform.monotonic, sleep=self.platform.sleep)
             frontend = health.wait_for(lambda: health.probe_frontend(self.profile.frontend_port, previous["dist_index_sha256"],

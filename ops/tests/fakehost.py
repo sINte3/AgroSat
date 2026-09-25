@@ -224,7 +224,13 @@ class FakeHost:
             database.update(status="unavailable", migration_revision="unknown", reason="database_unreachable")
         elif self.revisions != [serving.head]:
             database.update(status="schema_mismatch", reason="database_behind_code")
-        database["revision_match"] = database["status"] == "ready"
+        if serving.sha == self.world.current and self.world.extra.get("current_pre_task228", True):
+            # Production 4cd8ea7 predates TASK_228: status and migration_revision only.
+            database.pop("expected_migration_revision")
+            if database["status"] == "schema_mismatch":
+                database["status"] = "ready"  # the old readiness never compared revisions
+        else:
+            database["revision_match"] = database["status"] == "ready"
         ready = database["status"] == "ready"
         body = {"status": "ready" if ready else "not_ready", "release_revision": serving.sha,
                 "components": {"database": database,

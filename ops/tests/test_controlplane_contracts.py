@@ -254,6 +254,20 @@ def test_backend_health_requires_exact_release_and_schema_but_not_collector_or_c
     assert not wrong_expected["pass"]
 
 
+def test_pre_task228_payload_is_accepted_only_for_previous_releases_and_still_needs_the_exact_head():
+    live = result(200, {"status": "alive", "release_revision": CANDIDATE})
+    legacy = {"status": "ready", "release_revision": CANDIDATE,
+              "components": {"database": {"status": "ready", "migration_revision": "0016"}}}
+    assert not health.evaluate_backend(live, result(200, legacy), CANDIDATE, "0016")["pass"]
+    compatible = health.evaluate_backend(live, result(200, legacy), CANDIDATE, "0016", pre_task228_compatible=True)
+    assert compatible["pass"] and compatible["readiness_contract"] == "pre_task228_compatible"
+    behind = health.evaluate_backend(live, result(200, legacy), CANDIDATE, "0017", pre_task228_compatible=True)
+    assert not behind["pass"]
+    modern_mismatch = health.evaluate_backend(live, result(503, ready_body(status="schema_mismatch", revision_match=False)),
+                                              CANDIDATE, "0016", pre_task228_compatible=True)
+    assert not modern_mismatch["pass"] and modern_mismatch["readiness_contract"] == "task228"
+
+
 def test_frontend_health_requires_the_release_bundle_and_candidate_backend():
     index = b"<!doctype html>"
     import hashlib

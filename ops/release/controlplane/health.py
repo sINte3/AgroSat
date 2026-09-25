@@ -60,11 +60,22 @@ def http_get(url: str, timeout: float = 10.0) -> HttpResult:
 
 
 def evaluate_backend(live: HttpResult, ready: HttpResult, candidate_sha: str,
-                     expected_migration_revision: str) -> dict[str, Any]:
+                     expected_migration_revision: str, *, pre_task228_compatible: bool = False) -> dict[str, Any]:
+    """The backend contract.
+
+    A candidate is always held to the full TASK_228 contract. A release that
+    predates TASK_228 (production 4cd8ea7 and earlier) does not publish
+    ``revision_match`` or ``expected_migration_revision``; when such a release
+    is the previous release or a rollback target, ``pre_task228_compatible``
+    accepts their absence, but only their absence: its ``migration_revision``
+    must still equal the head the caller derived from that release's own
+    migration graph, and fields it does publish are checked strictly.
+    """
     live_body = live.json() if isinstance(live.json(), dict) else {}
     ready_body = ready.json() if isinstance(ready.json(), dict) else {}
     components = ready_body.get("components") if isinstance(ready_body.get("components"), dict) else {}
     database = components.get("database") if isinstance(components.get("database"), dict) else {}
+    legacy = pre_task228_compatible and "revision_match" not in database and "expected_migration_revision" not in database
     checks = {
         "live_http_200": live.status == 200,
         "live_status_alive": live_body.get("status") == "alive",
@@ -73,15 +84,17 @@ def evaluate_backend(live: HttpResult, ready: HttpResult, candidate_sha: str,
         "ready_status_ready": ready_body.get("status") == "ready",
         "ready_release_revision": ready_body.get("release_revision") == candidate_sha,
         "database_status_ready": database.get("status") == "ready",
-        "database_revision_match": database.get("revision_match") is True,
+        "database_revision_match": legacy or database.get("revision_match") is True,
         "database_migration_revision": database.get("migration_revision") == expected_migration_revision,
-        "database_expected_migration_revision": database.get("expected_migration_revision") == expected_migration_revision,
+        "database_expected_migration_revision": legacy or
+        database.get("expected_migration_revision") == expected_migration_revision,
     }
     collector = components.get("collector") if isinstance(components.get("collector"), dict) else None
     cache = components.get("cache") if isinstance(components.get("cache"), dict) else None
     return {
         "pass": all(checks.values()),
         "checks": checks,
+        "readiness_contract": "pre_task228_compatible" if legacy else "task228",
         "observed": {
             "live_http_status": live.status, "ready_http_status": ready.status,
             "live_error": live.error, "ready_error": ready.error,
@@ -115,10 +128,11 @@ def evaluate_frontend(index: HttpResult, proxied_live: HttpResult, dist_index_sh
 
 
 def probe_backend(port: int, candidate_sha: str, expected_migration_revision: str,
-                  get: Callable[[str], HttpResult] = http_get) -> dict[str, Any]:
+                  get: Callable[[str], HttpResult] = http_get, *, pre_task228_compatible: bool = False) -> dict[str, Any]:
     base = f"http://127.0.0.1:{port}"
     return evaluate_backend(get(f"{base}/health/live"), get(f"{base}/health/ready"),
-                            candidate_sha, expected_migration_revision)
+                            candidate_sha, expected_migration_revision,
+                            pre_task228_compatible=pre_task228_compatible)
 
 
 def probe_frontend(port: int, dist_index_sha256: str, candidate_sha: str,
