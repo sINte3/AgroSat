@@ -1,77 +1,274 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "kind": "agrosat_rollback_contract",
+  "audited_at": "2026-09-25",
+  "audited_head": "0016_operational_command_center",
+  "audit_basis": "TASK_230 Part J: every shipped migration's upgrade() and downgrade() read in full; a downgrade is never called safe merely because downgrade() exists",
+  "classes": {
+    "reversible_without_data_loss": {
+      "automatic_downgrade_allowed": true,
+      "rollback_strategy": "alembic_downgrade",
+      "meaning": "downgrade removes only structural objects (constraints, indexes) and the upgrade destroyed nothing"
+    },
+    "destructive_after_data": {
+      "automatic_downgrade_allowed": false,
+      "rollback_strategy": "restore_validated_pre_release_backup_or_roll_forward",
+      "meaning": "downgrade works before new data exists but drops data the application writes under the new schema"
+    },
+    "restore_backup_or_roll_forward_only": {
+      "automatic_downgrade_allowed": false,
+      "rollback_strategy": "restore_validated_pre_release_backup_or_roll_forward",
+      "meaning": "downgrade is lossy even without new data, rewrites or deletes retained rows, or removes the baseline schema"
+    }
+  },
   "components": [
     {
       "name": "application",
-      "strategy": "redeploy the previously approved immutable backend artifact",
-      "automatic": false
-    },
-    {
-      "name": "migration",
-      "strategy": "follow the reviewed per-revision downgrade classification; never downgrade automatically",
-      "automatic": false
-    },
-    {
-      "name": "collector",
-      "strategy": "disable new collection starts, allow or cancel the bounded run, then restore the prior CLI artifact",
-      "automatic": false
+      "strategy": "stop the candidate backend task (its Job Object ends the whole tree), rebind the task to the exact recorded previous action, start it and verify /health/live and /health/ready against the previous SHA and migration head",
+      "automatic_on_failed_release": true
     },
     {
       "name": "frontend_assets",
-      "strategy": "switch to the previously approved immutable dist artifact and invalidate only its asset namespace",
-      "automatic": false
+      "strategy": "rebind the frontend task to the previous immutable release and verify it serves that release's exact index.html and proxies to the previous backend",
+      "automatic_on_failed_release": true
+    },
+    {
+      "name": "migration",
+      "strategy": "no migration applied: nothing; every applied step reversible_without_data_loss and authorized: alembic downgrade to the recorded revision; otherwise automatic downgrade is forbidden: restore the validated pre-release backup by non-destructive swap when authorized, else MANUAL_RECOVERY_REQUIRED",
+      "automatic_on_failed_release": "only for reversible_without_data_loss steps"
+    },
+    {
+      "name": "collector",
+      "strategy": "rebind the Sentinel task to the exact recorded previous action; its schedule contract (one 06:00:00 trigger) is verified unchanged",
+      "automatic_on_failed_release": true
     },
     {
       "name": "scheduled_task",
-      "strategy": "inspect, disable, and uninstall only the exact AgroSat collector task after human approval",
-      "automatic": false
+      "strategy": "only actions are rebound; triggers, settings and principal are proven identical to the recorded definition; tasks are never registered or removed by a release",
+      "automatic_on_failed_release": true
     }
   ],
-  "migration_classifications": [
+  "migrations": [
     {
-      "path": "backend/alembic/versions/0006_operational_closure.py",
+      "revision": "0001_baseline_existing_schema",
+      "path": "backend/alembic/versions/0001_baseline_existing_schema_baseline_existing_supabase_schema.py",
+      "down_revisions": [],
+      "classification": "restore_backup_or_roll_forward_only",
+      "automatic_downgrade_allowed": false,
+      "rollback_strategy": "restore_validated_pre_release_backup_or_roll_forward",
+      "upgrade_destroys_existing_data": false,
+      "downgrade_drops_data_written_after_upgrade": true,
+      "data_at_risk": ["enterprises", "users incl. password hashes and roles", "fields incl. boundary geometries", "crop types and crop seasons", "ndvi_records", "alerts", "scouting notes"],
+      "evidence": "upgrade :19-189 widens alembic_version.version_num to 64, creates postgis and the 8 core tables; downgrade :192-201 drops all 8 core tables",
+      "notes": "baseline: rolling back past it removes the whole core schema"
+    },
+    {
+      "revision": "0002_create_satellite_index_records",
+      "path": "backend/alembic/versions/0002_create_satellite_index_records.py",
+      "down_revisions": ["0001_baseline_existing_schema"],
+      "classification": "destructive_after_data",
+      "automatic_downgrade_allowed": false,
+      "rollback_strategy": "restore_validated_pre_release_backup_or_roll_forward",
+      "upgrade_destroys_existing_data": false,
+      "downgrade_drops_data_written_after_upgrade": true,
+      "data_at_risk": ["satellite_index_records (per-field multi-index statistics)"],
+      "evidence": "upgrade :24-66 creates satellite_index_records and 3 indexes; downgrade :69-77 drops them without a guard",
+      "notes": "rows can only be rebuilt by re-querying the imagery provider"
+    },
+    {
+      "revision": "0003_add_ndvi_unique_constraint",
+      "path": "backend/alembic/versions/0003_add_ndvi_unique_constraint.py",
+      "down_revisions": ["0002_create_satellite_index_records"],
+      "classification": "reversible_without_data_loss",
+      "automatic_downgrade_allowed": true,
+      "rollback_strategy": "alembic_downgrade",
+      "upgrade_destroys_existing_data": false,
+      "downgrade_drops_data_written_after_upgrade": false,
+      "data_at_risk": [],
+      "evidence": "upgrade :21-27 adds uq_ndvi_records_field_captured_date without dedup; downgrade :30-36 drops only that constraint",
+      "notes": "the application must roll back with the schema (ON CONFLICT (field_id, captured_date) needs the constraint). Once 0006's downgrade has narrowed alembic_version.version_num to 32, this step's version write of the 35-character 0002 id fails and the whole downgrade rolls back"
+    },
+    {
+      "revision": "478de3d1f6d0",
+      "path": "backend/alembic/versions/478de3d1f6d0_add_alert_source_source_key.py",
+      "down_revisions": ["0003_add_ndvi_unique_constraint"],
+      "classification": "destructive_after_data",
+      "automatic_downgrade_allowed": false,
+      "rollback_strategy": "restore_validated_pre_release_backup_or_roll_forward",
+      "upgrade_destroys_existing_data": false,
+      "downgrade_drops_data_written_after_upgrade": true,
+      "data_at_risk": ["alerts.source and alerts.source_key (alert provenance and idempotency keys)"],
+      "evidence": "upgrade :28-51 adds two nullable columns and a non-unique partial index named uq_*; downgrade :54-59 drops both indexes and both columns",
+      "notes": "the alert rows survive; their provenance and idempotency identity do not"
+    },
+    {
+      "revision": "0004_repair_core_constraints",
+      "path": "backend/alembic/versions/0004_repair_core_constraints.py",
+      "down_revisions": ["478de3d1f6d0"],
+      "classification": "reversible_without_data_loss",
+      "automatic_downgrade_allowed": true,
+      "rollback_strategy": "alembic_downgrade",
+      "upgrade_destroys_existing_data": false,
+      "downgrade_drops_data_written_after_upgrade": false,
+      "data_at_risk": [],
+      "evidence": "upgrade :39-74 prechecks duplicates (raises, never deletes), makes the active-alert index unique and adds uq_crop_seasons_field_season_year; downgrade :77-88 restores the previous constraint shape",
+      "notes": "after a downgrade duplicate crop seasons and duplicate active source alerts become possible again; the application must roll back with the schema"
+    },
+    {
+      "revision": "0005_field_inspections",
+      "path": "backend/alembic/versions/0005_field_inspections.py",
+      "down_revisions": ["0004_repair_core_constraints"],
+      "classification": "destructive_after_data",
+      "automatic_downgrade_allowed": false,
+      "rollback_strategy": "restore_validated_pre_release_backup_or_roll_forward",
+      "upgrade_destroys_existing_data": false,
+      "downgrade_drops_data_written_after_upgrade": true,
+      "data_at_risk": ["field inspections: assignments, instructions, due dates, lifecycle, completion and cancellation"],
+      "evidence": "upgrade :18-55 creates field_inspections and 5 indexes; downgrade :58-64 drops them without a guard",
+      "notes": "parent of the 0006-0008 and 0013-0015 inspection tables"
+    },
+    {
       "revision": "0006_operational_closure",
-      "downgrade_safety": "destructive_after_closure_data",
-      "safe_before_data": true,
-      "strategy_after_data": "roll_forward_only",
-      "human_approval_required": true,
-      "production_applied": false,
-      "data_at_risk": [
-        "inspection results",
-        "evidence metadata",
-        "corrective actions",
-        "verification history",
-        "operational audit events"
-      ]
+      "path": "backend/alembic/versions/0006_operational_closure.py",
+      "down_revisions": ["0005_field_inspections"],
+      "classification": "destructive_after_data",
+      "automatic_downgrade_allowed": false,
+      "rollback_strategy": "restore_validated_pre_release_backup_or_roll_forward",
+      "upgrade_destroys_existing_data": false,
+      "downgrade_drops_data_written_after_upgrade": true,
+      "data_at_risk": ["inspection results and findings", "inspection evidence metadata", "corrective actions", "action verification requests and outcomes", "operational audit events"],
+      "evidence": "upgrade :81-748 creates 5 tables and 13 indexes; downgrade :751-818 drops them without a guard and :820 narrows alembic_version.version_num back to VARCHAR(32)",
+      "notes": "the narrowing makes any later downgrade step below 0003 fail (35-character 0002 id); Alembic runs one transaction per invocation (env.py :104-105), so such a downgrade rolls back entirely"
     },
     {
-      "path": "backend/alembic/versions/0015_closed_loop_agronomy.py",
+      "revision": "0007_pixel_anomalies",
+      "path": "backend/alembic/versions/0007_pixel_anomalies.py",
+      "down_revisions": ["0006_operational_closure"],
+      "classification": "destructive_after_data",
+      "automatic_downgrade_allowed": false,
+      "rollback_strategy": "restore_validated_pre_release_backup_or_roll_forward",
+      "upgrade_destroys_existing_data": false,
+      "downgrade_drops_data_written_after_upgrade": true,
+      "data_at_risk": ["pixel anomaly runs", "pixel anomaly zones incl. geometry and human-set status", "anomaly-to-inspection links"],
+      "evidence": "upgrade :33-450 adds 3 composite unique constraints and 3 tables; downgrade :453-498 drops them without a guard",
+      "notes": ""
+    },
+    {
+      "revision": "0008_irrigation_context",
+      "path": "backend/alembic/versions/0008_irrigation_context.py",
+      "down_revisions": ["0007_pixel_anomalies"],
+      "classification": "destructive_after_data",
+      "automatic_downgrade_allowed": false,
+      "rollback_strategy": "restore_validated_pre_release_backup_or_roll_forward",
+      "upgrade_destroys_existing_data": false,
+      "downgrade_drops_data_written_after_upgrade": true,
+      "data_at_risk": ["irrigation_events (human-reported irrigation, interruptions, equipment issues, water amounts)"],
+      "evidence": "upgrade :39-163 widens the inspection source CHECK and creates irrigation_events; downgrade :167-207 has an online-only guard on irrigation_context inspections, then drops irrigation_events",
+      "notes": "the guard does not cover irrigation_events rows without an irrigation_context inspection; offline --sql skips it"
+    },
+    {
+      "revision": "0009_yield_map_imports",
+      "path": "backend/alembic/versions/0009_yield_map_imports.py",
+      "down_revisions": ["0008_irrigation_context"],
+      "classification": "destructive_after_data",
+      "automatic_downgrade_allowed": false,
+      "rollback_strategy": "restore_validated_pre_release_backup_or_roll_forward",
+      "upgrade_destroys_existing_data": false,
+      "downgrade_drops_data_written_after_upgrade": true,
+      "data_at_risk": ["yield map imports", "geolocated yield map points"],
+      "evidence": "upgrade :29-273 creates 2 tables; downgrade :277-304 has an online-only guard on yield_map_imports, then drops both",
+      "notes": ""
+    },
+    {
+      "revision": "0010_productivity_zones",
+      "path": "backend/alembic/versions/0010_productivity_zones.py",
+      "down_revisions": ["0009_yield_map_imports"],
+      "classification": "destructive_after_data",
+      "automatic_downgrade_allowed": false,
+      "rollback_strategy": "restore_validated_pre_release_backup_or_roll_forward",
+      "upgrade_destroys_existing_data": false,
+      "downgrade_drops_data_written_after_upgrade": true,
+      "data_at_risk": ["productivity zone runs", "productivity zone geometries and scores"],
+      "evidence": "upgrade :29-240 creates 2 tables; downgrade :244-271 has an online-only guard on runs, then drops both",
+      "notes": ""
+    },
+    {
+      "revision": "0011_variable_rate_recommendations",
+      "path": "backend/alembic/versions/0011_variable_rate_recommendations.py",
+      "down_revisions": ["0010_productivity_zones"],
+      "classification": "destructive_after_data",
+      "automatic_downgrade_allowed": false,
+      "rollback_strategy": "restore_validated_pre_release_backup_or_roll_forward",
+      "upgrade_destroys_existing_data": false,
+      "downgrade_drops_data_written_after_upgrade": true,
+      "data_at_risk": ["variable-rate recommendations and approvals", "recommendation event history"],
+      "evidence": "upgrade :21-234 creates 2 tables and a self FK; downgrade :238-261 has an online-only guard, then drops them",
+      "notes": ""
+    },
+    {
+      "revision": "0012_commercial_tenant_boundary",
+      "path": "backend/alembic/versions/0012_commercial_tenant_boundary.py",
+      "down_revisions": ["0011_variable_rate_recommendations"],
+      "classification": "destructive_after_data",
+      "automatic_downgrade_allowed": false,
+      "rollback_strategy": "restore_validated_pre_release_backup_or_roll_forward",
+      "upgrade_destroys_existing_data": false,
+      "downgrade_drops_data_written_after_upgrade": true,
+      "data_at_risk": ["enterprise memberships", "commercial profiles", "tenant provider credential references", "tenant lifecycle requests", "tenant commercial audit events"],
+      "evidence": "upgrade :51-309 creates 5 tables; downgrade :313-353 has an online-only guard over all 5, then drops them",
+      "notes": ""
+    },
+    {
+      "revision": "0013_anomaly_inspection_workflow",
+      "path": "backend/alembic/versions/0013_anomaly_inspection_workflow.py",
+      "down_revisions": ["0012_commercial_tenant_boundary"],
+      "classification": "restore_backup_or_roll_forward_only",
+      "automatic_downgrade_allowed": false,
+      "rollback_strategy": "restore_validated_pre_release_backup_or_roll_forward",
+      "upgrade_destroys_existing_data": false,
+      "downgrade_drops_data_written_after_upgrade": true,
+      "data_at_risk": ["non-legacy operational_audit_events rows (DELETEd from a table the upgrade made immutable)", "field_inspections workflow columns and status fidelity", "inspection_results workflow columns and fine-grained cause codes", "inspection_evidence storage keys and soft-delete markers", "corrective_actions workflow columns and status fidelity"],
+      "evidence": "downgrade :373-387 drops the immutability trigger and DELETEs non-legacy audit events; :400-413, :448-458 and :489-502 lossily rewrite retained rows; :503-515 drops 25 field_inspections columns",
+      "notes": "lossy even without post-upgrade writes (NULL source_priority returns as 'medium'); expected to raise on realistic canonical-workflow data"
+    },
+    {
+      "revision": "0014_autonomous_satellite_monitoring",
+      "path": "backend/alembic/versions/0014_autonomous_satellite_monitoring.py",
+      "down_revisions": ["0013_anomaly_inspection_workflow"],
+      "classification": "destructive_after_data",
+      "automatic_downgrade_allowed": false,
+      "rollback_strategy": "restore_validated_pre_release_backup_or_roll_forward",
+      "upgrade_destroys_existing_data": false,
+      "downgrade_drops_data_written_after_upgrade": true,
+      "data_at_risk": ["satellite collection run history", "per-field freshness state", "autonomous anomaly candidates", "anomaly state transitions with human decisions", "monitoring rule versions"],
+      "evidence": "upgrade :26-204 creates 5 tables and seeds rule r3-e-v1; downgrade :207-224 drops all 5 without a guard",
+      "notes": ""
+    },
+    {
       "revision": "0015_closed_loop_agronomy",
-      "downgrade_safety": "destructive_after_closed_loop_data",
-      "safe_before_data": true,
-      "strategy_after_data": "restore_validated_pre_task220_backup_or_roll_forward",
-      "human_approval_required": true,
-      "production_applied": false,
-      "data_at_risk": [
-        "agronomy plans",
-        "agronomy work items",
-        "agronomy verification history",
-        "agronomy audit events",
-        "work evidence bindings"
-      ]
+      "path": "backend/alembic/versions/0015_closed_loop_agronomy.py",
+      "down_revisions": ["0014_autonomous_satellite_monitoring"],
+      "classification": "destructive_after_data",
+      "automatic_downgrade_allowed": false,
+      "rollback_strategy": "restore_validated_pre_release_backup_or_roll_forward",
+      "upgrade_destroys_existing_data": false,
+      "downgrade_drops_data_written_after_upgrade": true,
+      "data_at_risk": ["agronomy plans", "agronomy work items", "agronomy verifications", "agronomy events", "inspection_evidence.agronomy_work_item_id links"],
+      "evidence": "upgrade :9-13 executes frozen DDL (constraints, 4 tables, evidence column); downgrade :16 raises when agronomy_plans has rows, :17-23 drops the tables and constraints",
+      "notes": "the strict candidate CHECK re-added by the downgrade can also fail on RESOLVED/SUPERSEDED candidates that keep an inspection_id"
     },
     {
-      "path": "backend/alembic/versions/0016_operational_command_center.py",
       "revision": "0016_operational_command_center",
-      "downgrade_safety": "destructive_after_operational_notification_data",
-      "safe_before_data": true,
-      "strategy_after_data": "restore_validated_pre_task221_backup_or_roll_forward",
-      "human_approval_required": true,
-      "production_applied": false,
-      "data_at_risk": [
-        "operational notifications",
-        "append-only operational notification events"
-      ]
+      "path": "backend/alembic/versions/0016_operational_command_center.py",
+      "down_revisions": ["0015_closed_loop_agronomy"],
+      "classification": "destructive_after_data",
+      "automatic_downgrade_allowed": false,
+      "rollback_strategy": "restore_validated_pre_release_backup_or_roll_forward",
+      "upgrade_destroys_existing_data": false,
+      "downgrade_drops_data_written_after_upgrade": true,
+      "data_at_risk": ["operational notifications with read/dismiss/resolve state", "operational notification event history"],
+      "evidence": "upgrade :15-221 creates 2 tables; downgrade :225-231 raises when either table has rows, :232-233 drops them",
+      "notes": "user read/dismiss/resolve state cannot be recomputed"
     }
   ]
 }

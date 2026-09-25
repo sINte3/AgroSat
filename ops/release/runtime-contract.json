@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "kind": "agrosat_runtime_contract",
+  "python": {
+    "series": "3.14",
+    "production_observed": "3.14.5",
+    "source": "TASK_047 qualified backend/requirements.txt on Python 3.14.5; production release venvs record version = 3.14.5"
+  },
+  "node": {
+    "major": 24,
+    "minimum_major": 22,
+    "production_observed": "24.16.0",
+    "source": "README requires Node.js 22+; production runs C:\\Program Files\\nodejs\\node.exe v24.16.0"
+  },
+  "npm": {
+    "lockfile_version": 3
+  },
+  "postgresql": {
+    "server_major": 16,
+    "client_major": 16,
+    "postgis_required": true
+  },
+  "windows_powershell": "5.1",
+  "git_minimum": "2.31"
+}

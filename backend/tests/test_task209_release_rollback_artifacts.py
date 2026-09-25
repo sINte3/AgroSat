@@ -1,373 +1,207 @@
-"""Read-only release manifest and rollback drill contracts."""
+"""Release manifest, archive and rollback contracts (TASK_209 intent, TASK_230 control plane).
+
+A release is identified by exact immutable facts (candidate SHA, the exact
+production SHA it replaces, fetched remote refs, ancestry, archive SHA-256,
+the candidate's own Alembic head, the runtime contract), never by historical
+branch or worktree names. Rollback classification covers every shipped
+migration, and the release tooling never rewrites Git history, registers
+Scheduled Tasks, or downgrades a destructive migration.
+"""
+from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
+import py_compile
+import shutil
 import subprocess
-import tempfile
+import sys
+import zipfile
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[2]
-OPS = ROOT / "ops" / "release"
+OPS = ROOT / "ops"
+RELEASE = OPS / "release"
+for path in (RELEASE, OPS / "tests"):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
+
+from controlplane import migration  # noqa: E402
+from controlplane.common import ControlPlaneError  # noqa: E402
+from controlplane.gitmaterial import Git, extract_archive  # noqa: E402
+from controlplane.manifest import build_manifest, load_runtime_contract, source_identity  # noqa: E402
+from controlplane.state import RELEASE_GATES, ROLLBACK_GATES  # noqa: E402
+from fakehost import graph_until  # noqa: E402
+
+POWERSHELL = shutil.which("powershell") or shutil.which("pwsh")
 
 
-def release_candidate():
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode == 0:
-        return result.stdout.strip()
-    manifest = json.loads((ROOT / "release-manifest.json").read_text(encoding="utf-8-sig"))
-    return manifest["git_sha"]
+def git(repository: Path, *arguments: str) -> str:
+    return subprocess.run(["git", "-C", str(repository), *arguments], check=True, capture_output=True,
+                          text=True).stdout.strip()
 
 
-def archive_sidecar_manifest():
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode == 0:
-        return None
-    path = os.environ.get("TASK212_CANDIDATE_MANIFEST_PATH")
-    assert path, "archive-only qualification requires the explicit candidate sidecar manifest"
-    return json.loads(Path(path).read_text(encoding="utf-8-sig"))
+def repository(tmp_path: Path, *, secret: bool = False):
+    origin, repo = tmp_path / "origin.git", tmp_path / "repo"
+    subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    git(repo, "config", "core.autocrlf", "false")
+    git(repo, "remote", "add", "origin", str(origin))
+    commits = []
+    for index in range(2):
+        (repo / "backend").mkdir(exist_ok=True)
+        (repo / "backend" / "requirements.txt").write_text("fastapi\n")
+        (repo / "frontend").mkdir(exist_ok=True)
+        (repo / "frontend" / "app.js").write_text(f"// {index}\n")
+        if secret and index == 1:
+            (repo / "backend" / ".env").write_text("SECRET_KEY=x\n")
+        git(repo, "add", "-A")
+        git(repo, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", f"c{index}")
+        commits.append(git(repo, "rev-parse", "HEAD"))
+    return repo, commits
 
 
-def require_default_manifest_origin():
-    result = subprocess.run(
-        [
-            "git",
-            "rev-parse",
-            "--verify",
-            "origin/task/program-r3-macrostage-g-operational-command-center",
-        ],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        pytest.skip("TASK_221 manifest identity is qualified after the G4 branch push")
+def test_release_tooling_compiles_and_every_ops_powershell_file_parses():
+    for path in sorted(RELEASE.rglob("*.py")):
+        py_compile.compile(str(path), doraise=True)
+    if POWERSHELL is None:
+        pytest.skip("PowerShell parser unavailable")
+    scripts = sorted(path for path in OPS.rglob("*.ps1"))
+    assert scripts
+    for script in scripts:
+        command = ("$errors=$null; [System.Management.Automation.Language.Parser]::ParseFile("
+                   f"'{script}',[ref]$null,[ref]$errors) | Out-Null; if($errors.Count){{exit 2}}")
+        subprocess.run([POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", command], check=True,
+                       capture_output=True, text=True, timeout=30)
 
 
-def powershell(script: str, *arguments: str, check: bool = True):
-    return subprocess.run(
-        [
-            "powershell",
-            "-NoProfile",
-            "-NonInteractive",
-            "-File",
-            str(OPS / script),
-            *arguments,
-        ],
-        check=check,
-        capture_output=True,
-        text=True,
-        timeout=20,
-    )
-
-
-def test_release_powershell_artifacts_parse():
-    for script in sorted(OPS.glob("*.ps1")):
-        command = (
-            "$errors=$null; "
-            "[System.Management.Automation.Language.Parser]::ParseFile("
-            f"'{script}',[ref]$null,[ref]$errors) | Out-Null; "
-            "if($errors.Count){exit 2}"
-        )
-        subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-
-
-def test_release_archive_validator_covers_safe_immutable_archive_contract(tmp_path):
-    import hashlib
-    import zipfile
-
-    candidate = release_candidate()
-    manifest = {
-        "schema_version": 1,
-        "git_sha": candidate,
-        "branch": "task/program-r3-macrostage-f-closed-loop-agronomy",
-        "accepted_source_baseline": "f3a95f4e4d97b025a967ae3812603e5aae0d969d",
-        "created_utc": "2026-08-17T00:00:00Z",
-    }
+def test_release_archive_extraction_covers_the_safe_immutable_archive_contract(tmp_path):
     archive = tmp_path / "archive with spaces.zip"
     with zipfile.ZipFile(archive, "w") as package:
-        package.writestr("release-manifest.json", json.dumps(manifest))
         package.writestr("app/readme.txt", "safe")
-    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-    destination = tmp_path / "extract with spaces"
-    result = powershell(
-        "Test-AgroSatReleaseArchive.ps1",
-        "-ArchivePath",
-        str(archive),
-        "-ExpectedSha256",
-        digest,
-        "-ReleaseCandidate",
-        candidate,
-        "-DestinationPath",
-        str(destination),
-    )
-    report = json.loads(result.stdout)
-    assert report["status"] == "PASS"
-    assert (destination / "app" / "readme.txt").read_text() == "safe"
+    assert extract_archive(archive, tmp_path / "extract with spaces") == 1
+    assert (tmp_path / "extract with spaces" / "app" / "readme.txt").read_text() == "safe"
+    with pytest.raises(ControlPlaneError) as caught:
+        extract_archive(archive, tmp_path / "extract with spaces")
+    assert caught.value.code == "IMMUTABLE_RELEASE_ALREADY_EXISTS"
+    for name, code in (("../escape.txt", "SOURCE_ARCHIVE_UNSAFE_PATH"), ("C:/escape.txt", "SOURCE_ARCHIVE_UNSAFE_PATH"),
+                       ("dir./x.txt", "SOURCE_ARCHIVE_UNSAFE_PATH")):
+        unsafe = tmp_path / f"unsafe{len(name)}.zip"
+        with zipfile.ZipFile(unsafe, "w") as package:
+            package.writestr(name, "blocked")
+        with pytest.raises(ControlPlaneError) as caught:
+            extract_archive(unsafe, tmp_path / f"out{len(name)}")
+        assert caught.value.code == code
+        assert not (tmp_path / "escape.txt").exists()
 
 
-def test_release_archive_validator_fails_closed_for_identity_and_unsafe_path(tmp_path):
-    import hashlib
-    import zipfile
-
-    candidate = release_candidate()
-    archive = tmp_path / "unsafe.zip"
-    manifest = {
-        "schema_version": 1,
-        "git_sha": candidate,
-        "branch": "task/program-r3-macrostage-f-closed-loop-agronomy",
-        "accepted_source_baseline": "f3a95f4e4d97b025a967ae3812603e5aae0d969d",
-        "created_utc": "2026-08-17T00:00:00Z",
-    }
-    with zipfile.ZipFile(archive, "w") as package:
-        package.writestr("release-manifest.json", json.dumps(manifest))
-        package.writestr("../escape.txt", "blocked")
-    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-    result = powershell(
-        "Test-AgroSatReleaseArchive.ps1",
-        "-ArchivePath",
-        str(archive),
-        "-ExpectedSha256",
-        digest,
-        "-ReleaseCandidate",
-        candidate,
-        check=False,
-    )
-    assert result.returncode != 0
-    assert "RELEASE_ARCHIVE_UNSAFE_PATH" in result.stderr
-    result = powershell(
-        "Test-AgroSatReleaseArchive.ps1",
-        "-ArchivePath",
-        str(archive),
-        "-ExpectedSha256",
-        "0" * 64,
-        "-ReleaseCandidate",
-        candidate,
-        check=False,
-    )
-    assert result.returncode != 0
-    assert "RELEASE_ARCHIVE_HASH_MISMATCH" in result.stderr
+def test_manifest_identity_is_exact_sha_ancestry_and_archive_bound(tmp_path):
+    repo, (current, candidate) = repository(tmp_path)
+    git(repo, "push", "-q", "origin", "HEAD:refs/heads/task/any-name")
+    identity = source_identity(Git(repo), candidate_sha=candidate, expected_current_sha=current, fetch=True)
+    assert identity["candidate_sha"] == candidate and identity["expected_current_sha"] == current
+    assert identity["containing_remote_refs"] == ["origin/task/any-name"]
+    assert identity["commits_since_current"] == 1 and identity["tree_sha"] == git(repo, "rev-parse", f"{candidate}^{{tree}}")
+    assert identity["changed_since_current"]["frontend_changed"] is True
+    archive = Git(repo).archive(candidate, tmp_path / "source.zip")
+    assert archive["sha256"] and archive["bytes"] > 0
+    manifest = build_manifest(identity=identity, archive=archive, graph=graph_until("0016_operational_command_center"),
+                              runtime_contract=load_runtime_contract(), release_id="R209-manifest-0001")
+    assert manifest["schema_version"] == 2 and manifest["git_sha"] == candidate
+    assert manifest["alembic"]["head"] == "0016_operational_command_center" and manifest["alembic"]["head_count"] == 1
+    assert manifest["source_archive"]["sha256"] == archive["sha256"]
+    assert manifest["runtime_contract"]["python"]["series"] == "3.14"
+    text = json.dumps(manifest)
+    for stale in ("program_branch", "macrostage", "accepted_source_baseline", "source_checkout"):
+        assert stale not in text
 
 
-def test_manifest_preview_proves_source_and_program_integrity():
-    candidate = release_candidate()
-    report = archive_sidecar_manifest()
-    if report is None:
-        require_default_manifest_origin()
-        result = powershell("New-ReleaseManifest.ps1", "-ReleaseCandidate", candidate)
-        report = json.loads(result.stdout)
-    assert report["source_baseline"] == (
-        "387eaeda6bcbcc3ef0a2e2951b8f87bbf75ad927"
-    )
-    assert report["program_branch"] == "task/program-r3-macrostage-g-operational-command-center"
-    assert report["observed_branch"] == "task/program-r3-macrostage-g-operational-command-center"
-    assert report["release_candidate"] == candidate
-    assert report["program_head"] == candidate
-    assert report["origin_program_head"] == candidate
-    assert report["source_main_unchanged"] is True
-    assert report["origin_aligned"] is True
-    assert report["production_deployed"] is False
-    assert report["production_database_changed"] is False
-    assert report["alembic_head"] == "0016_operational_command_center"
-    assert report["alembic_head_count"] == 1
-    assert report["required_runtime_versions"] == {
-        "python": "3.11+",
-        "node": "22+",
-        "backend_image": "python:3.11-slim",
-        "npm_lockfile_version": 3,
-        "sources": ["README.md", "backend/Dockerfile", "frontend/package-lock.json"],
-    }
-    assert report["first_pilot_feature_state"] == {
-        "sentinel": "ENABLED",
-        "wialon": "DISABLED",
-        "telegram": "DISABLED",
-        "mock_mode": "DISABLED_FAIL_CLOSED",
-        "web_embedded_scheduler": "DISABLED",
-        "collectors": "SEPARATE_CLI_ONLY",
-    }
-    assert len(report["apply_order"]) == 8
+def test_manifest_refuses_unpublished_non_descendant_and_unsafe_candidates(tmp_path):
+    repo, (current, candidate) = repository(tmp_path)
+    with pytest.raises(ControlPlaneError) as caught:
+        source_identity(Git(repo), candidate_sha=candidate, expected_current_sha=current, fetch=True)
+    assert caught.value.code == "CANDIDATE_NOT_PUBLISHED"
+    git(repo, "push", "-q", "origin", "HEAD:refs/heads/main")
+    with pytest.raises(ControlPlaneError) as caught:
+        source_identity(Git(repo), candidate_sha=current, expected_current_sha=candidate, fetch=True)
+    assert caught.value.code == "CANDIDATE_ANCESTRY_REJECTED"
+    with pytest.raises(ControlPlaneError) as caught:
+        source_identity(Git(repo), candidate_sha=candidate[:12], expected_current_sha=current, fetch=False)
+    assert caught.value.code == "CANDIDATE_SHA_MALFORMED"
+    secret_repo, (base, leaked) = repository(tmp_path / "secret", secret=True)
+    git(secret_repo, "push", "-q", "origin", "HEAD:refs/heads/main")
+    with pytest.raises(ControlPlaneError) as caught:
+        source_identity(Git(secret_repo), candidate_sha=leaked, expected_current_sha=base, fetch=True)
+    assert caught.value.code == "CANDIDATE_MATERIAL_UNSAFE"
 
 
-def test_manifest_binds_candidate_archive_filename_and_normalized_sha256(tmp_path):
-    import hashlib
+def test_release_cli_requires_explicit_full_shas_and_fixed_production_identity(capsys):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("controlplane_cli", RELEASE / "Invoke-AgroSatControlPlane.py")
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    common = ["--release-id", "R209-cli-000001", "--expected-current", "b" * 40, "--authorization", r"C:\x.json"]
 
-    candidate = release_candidate()
-    report = archive_sidecar_manifest()
-    if report is not None:
-        archive_path = Path(os.environ["TASK212_CANDIDATE_ARCHIVE_PATH"])
-        digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
-        assert os.environ["TASK212_CANDIDATE_ARCHIVE_SHA256"].lower() == digest
-        assert report["source_archive_filename"] == archive_path.name
-        assert report["source_archive_sha256"] == digest
-        assert report["candidate_archive"] == {
-            "filename": archive_path.name,
-            "sha256": digest,
-        }
-        assert report["release_candidate"] == candidate
-        return
-    require_default_manifest_origin()
-    archive = tmp_path / "candidate archive with spaces.zip"
-    archive.write_bytes(b"immutable candidate archive fixture")
-    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-    result = powershell(
-        "New-ReleaseManifest.ps1",
-        "-ReleaseCandidate",
-        candidate,
-        "-SourceArchive",
-        str(archive),
-        "-SourceArchiveSha256",
-        digest.upper(),
-    )
-    report = json.loads(result.stdout)
-    assert report["source_archive_filename"] == archive.name
-    assert report["source_archive_sha256"] == digest
-    assert report["candidate_archive"] == {
-        "filename": archive.name,
-        "sha256": digest,
-    }
+    def code(arguments):
+        assert cli.main(arguments) == 2
+        return json.loads(capsys.readouterr().out)["error"]["code"]
+
+    assert code(["release", "--mode", "production", "--candidate", "abc1234", *common]) == "CANDIDATE_SHA_MALFORMED"
+    assert code(["release", "--mode", "rehearsal", "--candidate", "a" * 40, *common]) == "REHEARSAL_PROFILE_REQUIRED"
+    assert code(["release", "--mode", "production", "--profile", r"C:\p.json", "--candidate", "a" * 40,
+                 *common]) == "PRODUCTION_PROFILE_IS_FIXED"
+    assert code(["release", "--mode", "production", "--no-fetch", "--candidate", "a" * 40,
+                 *common]) == "PRODUCTION_OPTION_REJECTED"
 
 
-def test_release_scripts_require_explicit_candidate_and_full_untracked_cleanliness():
-    manifest = (OPS / "New-ReleaseManifest.ps1").read_text(encoding="utf-8")
-    preflight = (OPS / "Test-AgroSatProductionPreflight.ps1").read_text(
-        encoding="utf-8"
-    )
-    health = (OPS / "Test-AgroSatReleaseHealth.ps1").read_text(encoding="utf-8")
-    release = (OPS / "Invoke-AgroSatRelease.ps1").read_text(encoding="utf-8")
-    rollback = (OPS / "Invoke-AgroSatRollback.ps1").read_text(encoding="utf-8")
-
-    assert "--untracked-files=all" in manifest
-    assert "--untracked-files=no" not in manifest
-    for script in (manifest, preflight, health, release, rollback):
-        assert "ReleaseCandidate" in script
-    for script in (preflight, health, release, rollback):
-        assert "40e8e379d9d29cb4bfb8afebdd9c489c19756fac" not in script
+def test_release_state_machine_has_explicit_ordered_gates_ending_in_commit():
+    assert RELEASE_GATES == ("PRECHECK", "BACKUP", "MATERIALIZE", "VALIDATE", "MIGRATION_PLAN", "MIGRATE",
+                             "SWITCH_BACKEND", "VERIFY_BACKEND", "SWITCH_FRONTEND", "VERIFY_FRONTEND",
+                             "REBIND_WORKERS", "VERIFY_WORKERS", "FINAL_HEALTH", "COMMIT")
+    assert ROLLBACK_GATES[0] == "PRECHECK" and ROLLBACK_GATES[-1] == "COMMIT"
+    assert ROLLBACK_GATES.index("DATABASE") < ROLLBACK_GATES.index("SWITCH_BACKEND")
 
 
-def test_release_and_rollback_contracts_require_real_isolated_pointer_mutation():
-    release = (OPS / "Invoke-AgroSatRelease.ps1").read_text(encoding="utf-8")
-    rollback = (OPS / "Invoke-AgroSatRollback.ps1").read_text(encoding="utf-8")
-    assert "current-release.json" in release
-    assert "previous-release.json" in release
-    assert "isolated_release_materialized_database_migrated_and_pointer_switched" in release
-    assert "DatabaseMigrationScript" in release
-    assert "current-release.json" in rollback
-    assert "previous-release.json" in rollback
-    assert "isolated_database_restored_and_release_pointer_restored" in rollback
-    assert "DatabaseRestoreScript" in rollback
-    assert "database_restore_executed = (-not $WhatIfPreference)" in rollback
-    assert "mutation_performed = (-not $WhatIfPreference)" in rollback
-    assert "mutation_performed=$false" not in rollback
-    assert "ISOLATED_POST_SWITCH_HEALTH_FAILED_ROLLED_BACK" in release
-    assert "ExpectedPreviousArchiveSha256" in rollback
-    assert "ISOLATED_PREVIOUS_RELEASE_HASH_MISMATCH" in rollback
-
-
-def test_rollback_contract_covers_every_required_component():
-    contract = json.loads(
-        (OPS / "rollback-contract.json").read_text(encoding="utf-8")
-    )
+def test_rollback_contract_covers_every_required_component_and_migration():
+    contract = migration.load_rollback_contract()
     assert {item["name"] for item in contract["components"]} == {
-        "application",
-        "migration",
-        "collector",
-        "frontend_assets",
-        "scheduled_task",
-    }
-    assert all(item["automatic"] is False for item in contract["components"])
-    classifications = {
-        item["revision"]: item for item in contract["migration_classifications"]
-    }
-    closure = classifications["0006_operational_closure"]
-    assert closure["strategy_after_data"] == "roll_forward_only"
-    assert closure["safe_before_data"] is True
-    assert closure["human_approval_required"] is True
-    assert closure["production_applied"] is False
+        "application", "migration", "collector", "frontend_assets", "scheduled_task"}
+    migration_component = next(item for item in contract["components"] if item["name"] == "migration")
+    assert migration_component["automatic_on_failed_release"] == "only for reversible_without_data_loss steps"
+    graph = migration.alembic_graph(Path(sys.executable), ROOT / "backend")
+    assert migration.verify_contract_covers_graph(contract, graph) == {"classified": 17, "graph_revisions": 17}
+    closure = next(item for item in contract["migrations"] if item["revision"] == "0006_operational_closure")
+    assert closure["classification"] == "destructive_after_data"
+    assert closure["automatic_downgrade_allowed"] is False
+    assert closure["rollback_strategy"] == "restore_validated_pre_release_backup_or_roll_forward"
 
 
-def test_rollback_drill_passes_for_clean_manifest_without_migrations():
-    manifest = {
-        "source_main_unchanged": True,
-        "program_worktree_clean": True,
-        "origin_aligned": True,
-        "production_deployed": False,
-        "production_database_changed": False,
-        "changed_migrations": [],
-    }
-    with tempfile.TemporaryDirectory() as directory:
-        path = Path(directory) / "manifest.json"
-        path.write_text(json.dumps(manifest), encoding="utf-8")
-        result = powershell(
-            "Test-RollbackReadiness.ps1",
-            "-ManifestPath",
-            str(path),
-        )
-    report = json.loads(result.stdout)
-    assert report["decision"] == "PASS"
-    assert report["application_rollback_executed"] is False
-    assert report["migration_downgrade_executed"] is False
-    assert report["scheduled_task_changed"] is False
+def test_rollback_contract_blocks_an_unclassified_migration():
+    graph = graph_until("0016_operational_command_center")
+    graph["revisions"].insert(0, {"revision": "example", "down_revisions": ["0016_operational_command_center"],
+                                  "dependencies": [], "branch_labels": [], "path": "backend/alembic/versions/example.py"})
+    graph["heads"] = ["example"]
+    with pytest.raises(ControlPlaneError) as caught:
+        migration.verify_contract_covers_graph(migration.load_rollback_contract(), graph)
+    assert caught.value.code == "ROLLBACK_CONTRACT_INCOMPLETE"
+    assert "unclassified:example" in caught.value.facts["problems"]
 
 
-def test_rollback_drill_blocks_unclassified_migration():
-    manifest = {
-        "source_main_unchanged": True,
-        "program_worktree_clean": True,
-        "origin_aligned": True,
-        "production_deployed": False,
-        "production_database_changed": False,
-        "changed_migrations": ["backend/alembic/versions/example.py"],
-    }
-    with tempfile.TemporaryDirectory() as directory:
-        path = Path(directory) / "manifest.json"
-        path.write_text(json.dumps(manifest), encoding="utf-8")
-        result = powershell(
-            "Test-RollbackReadiness.ps1",
-            "-ManifestPath",
-            str(path),
-            check=False,
-        )
-    assert result.returncode == 2
-    report = json.loads(result.stdout)
-    assert report["decision"] == "BLOCKED"
-    assert report["unclassified_migrations"] == [
-        "backend/alembic/versions/example.py"
-    ]
-
-
-def test_release_artifacts_contain_no_mutating_git_or_deployment_commands():
-    combined = "\n".join(
-        path.read_text(encoding="utf-8").lower()
-        for path in OPS.iterdir()
-        if path.suffix in {".ps1", ".json"}
-    )
-    for forbidden in (
-        "git reset",
-        "git rebase",
-        "git checkout",
-        "git switch",
-        "git push",
-        "alembic upgrade",
-        "alembic downgrade",
-        "register-scheduledtask",
-        "unregister-scheduledtask",
-    ):
-        assert forbidden not in combined
+def test_release_tooling_never_rewrites_history_registers_tasks_or_drops_databases():
+    sources = {path: path.read_text(encoding="utf-8").lower()
+               for path in RELEASE.rglob("*") if path.suffix in {".py", ".ps1", ".json"}}
+    combined = "\n".join(sources.values())
+    for forbidden in ("git reset", "git rebase", "git checkout", "git switch", "git push", "git commit",
+                      "git tag", "register-scheduledtask", "unregister-scheduledtask", "drop database",
+                      "pg_terminate_backend", "--force"):
+        assert forbidden not in combined, forbidden
+    alembic_callers = [path.name for path, text in sources.items() if '"-m", "alembic"' in text]
+    assert alembic_callers == ["migration.py"]
+    controller = sources[RELEASE / "controlplane" / "controller.py"]
+    assert controller.count('["upgrade", target]') == 1
+    # Downgrade is reachable only behind the reversible-only decision (case 2).
+    for fragment in ('["downgrade", target_head]', '["downgrade", state.data["db_revision_before"]]'):
+        index = controller.index(fragment)
+        assert 'decision["case"] == 2' in controller[max(0, index - 900):index]
+    dropdb = [path.name for path, text in sources.items() if '"dropdb"' in text]
+    assert dropdb == ["backup.py"]

@@ -1,72 +1,43 @@
+"""The manifest identity of this very checkout (TASK_218 intent, TASK_230 manifest).
+
+The manifest takes production's reference from fetched remote refs only, never
+from a local checkout's branch or HEAD. Once this checkout's commit is
+published, its identity against origin/main is computed exactly.
+"""
+from __future__ import annotations
+
+import importlib.util
 import json
-import shutil
-import subprocess
 from pathlib import Path
+import subprocess
 
 import pytest
 
-
 REPOSITORY = Path(__file__).resolve().parents[2]
-SOURCE_CHECKOUT = Path(r"C:\AgroSat")
-SCRIPT = REPOSITORY / "ops" / "release" / "New-ReleaseManifest.ps1"
+CLI = REPOSITORY / "ops" / "release" / "Invoke-AgroSatControlPlane.py"
 
 
-def git(repository: Path, *arguments: str) -> str:
-    return subprocess.run(
-        ["git", "-C", str(repository), *arguments],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+def git(*arguments: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", str(REPOSITORY), *arguments], capture_output=True, text=True)
 
 
-def test_task218_manifest_separates_origin_main_from_local_checkout_identity():
-    powershell = shutil.which("powershell") or shutil.which("pwsh")
-    if powershell is None or not (REPOSITORY / ".git").exists():
-        pytest.skip("TASK_218 release-branch identity test requires a Git worktree on Windows")
-    if not (SOURCE_CHECKOUT / ".git").exists():
-        pytest.skip("TASK_218 production source checkout is not available")
-
-    candidate = git(REPOSITORY, "rev-parse", "HEAD")
-    branch = git(REPOSITORY, "branch", "--show-current")
-    origin_branch = subprocess.run(
-        ["git", "-C", str(REPOSITORY), "rev-parse", "--verify", f"origin/{branch}"],
-        capture_output=True,
-        text=True,
-    )
-    if origin_branch.returncode != 0:
-        pytest.skip("release manifest requires the task branch to be pushed in G4")
-    source_head = git(SOURCE_CHECKOUT, "rev-parse", "HEAD")
-    origin_main = git(REPOSITORY, "rev-parse", "origin/main")
-    result = subprocess.run(
-        [
-            powershell,
-            "-NoProfile",
-            "-NonInteractive",
-            "-File",
-            str(SCRIPT),
-            "-ProgramWorktree",
-            str(REPOSITORY),
-            "-SourceCheckout",
-            str(SOURCE_CHECKOUT),
-            "-SourceBaseline",
-            origin_main,
-            "-SourceCheckoutBaseline",
-            source_head,
-            "-ProgramBranch",
-            branch,
-            "-ReleaseCandidate",
-            candidate,
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    report = json.loads(result.stdout.lstrip("\ufeff"))
-
-    assert report["source_baseline"] == origin_main
-    assert report["source_checkout_baseline"] == source_head
-    assert report["source_checkout_head"] == source_head
-    assert report["source_origin_main"] == origin_main
-    assert report["source_main_unchanged"] is True
-
+def test_task218_manifest_takes_production_identity_from_remote_refs_only(capsys):
+    if not (REPOSITORY / ".git").exists():
+        pytest.skip("requires a Git checkout")
+    candidate = git("rev-parse", "HEAD").stdout.strip()
+    origin_main = git("rev-parse", "--verify", "origin/main").stdout.strip()
+    published = git("for-each-ref", "--contains", candidate, "--format=%(refname)", "refs/remotes/origin/").stdout.split()
+    if not origin_main or not published or candidate == origin_main:
+        pytest.skip("the manifest identity is qualified once this commit is published beyond origin/main")
+    spec = importlib.util.spec_from_file_location("controlplane_cli", CLI)
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    assert cli.main(["manifest", "--repository", str(REPOSITORY), "--candidate", candidate,
+                     "--expected-current", origin_main, "--no-fetch"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    identity = report["identity"]
+    assert identity["candidate_sha"] == candidate and identity["expected_current_sha"] == origin_main
+    assert identity["remote_main"] == origin_main and identity["remote_main_is_expected_current"] is True
+    assert identity["candidate_fast_forwards_remote_main"] is True
+    assert identity["containing_remote_refs"] and all(ref.startswith("origin/") for ref in identity["containing_remote_refs"])
+    assert "source_checkout" not in json.dumps(report) and report["mutation_performed"] is False
