@@ -228,6 +228,9 @@ def stop_owned_tree(name: str) -> dict:
         time.sleep(0.5)
     survivors = winproc.alive(captured)
     terminated = [identity.evidence() for identity in reversed(survivors) if winproc.terminate_verified(identity)]
+    deadline = time.monotonic() + 15  # TerminateProcess completes asynchronously
+    while time.monotonic() < deadline and winproc.alive(captured):
+        time.sleep(0.25)
     return {"task": name, "captured": len(captured), "terminated_after_stop": terminated,
             "alive_after": [identity.evidence() for identity in winproc.alive(captured)]}
 
