@@ -9,10 +9,15 @@ PASS_TASK_232
 - Base: `origin/main` = `126b62ed45267e341cd727fd678ddd574e35292c`, verified after `git fetch origin` on 2026-09-26. Production runs the same SHA (TASK_231).
 - Branch: `task/232-h1-management-analytics-backend`, created from that exact SHA. The local `C:\AgroSat` `main` (97f1653) was not used.
 - Worktree: `C:\AgroSat_worktrees\task_232`. `C:\AgroSat` was left alone: `.claude\settings.json` stays modified and `task 231.md` stays untracked, exactly as they were.
-- Commits:
-  - `82fdf5a` — code and tests.
-  - `9a920a3` — classifies the endpoint in the repository's authorization matrix. This is the final code commit, and it was regressed.
-  - The docs-only commit that adds this report.
+- Commits, all on this one branch; nothing was amended or force-pushed:
+
+| commit | content |
+|---|---|
+| `82fdf5a` | code and tests |
+| `9a920a3` | classifies the endpoint in the repository's authorization matrix |
+| `cb99b66` | first report |
+| `c9be969` | acceptance review correction: one overdue meaning shared with the command center; crop is an explicit current classification; same-named figures aligned. Final code commit, regressed |
+| docs commit | this updated report |
 
 ## Scope
 
@@ -25,8 +30,8 @@ Files changed:
 | `backend/schemas/management_analytics.py` | new Pydantic response contract (`extra="forbid"`) |
 | `backend/main.py` | two lines: import and `include_router` |
 | `backend/tests/task232_support.py` | new PostgreSQL harness (extends the TASK_225 harness) |
-| `backend/tests/test_task232_management_analytics_postgres.py` | new PostgreSQL suite, 27 tests |
-| `backend/tests/test_task232_management_analytics_contract.py` | new database-free contract suite, 26 tests |
+| `backend/tests/test_task232_management_analytics_postgres.py` | new PostgreSQL suite, 29 tests |
+| `backend/tests/test_task232_management_analytics_contract.py` | new database-free contract suite, 30 tests |
 | `backend/tests/test_task209_authorization_matrix.py` | classifies `GET /api/management-analytics` (admin and manager, enterprise filter, cross-tenant 404); operation count 145 → 146 |
 | `docs/TASK_232_RESULT.md` | this report |
 
@@ -41,17 +46,90 @@ Files changed:
 | metric family | canonical source |
 |---|---|
 | coverage | `fields.is_active` (the TASK_219 collection and detection population), `satellite_field_freshness` (index `ndvi`) |
-| current problem load, funnels | TASK_221 Operational Center case model `services/operational_center.py::CASES_CTE` (inspection, candidate and alert cases), classified by the TASK_225 projection `services/remediation_status.py::inspection_status_sql`, joined 1:1 to `field_inspections` and to the case's current `agronomy_plans` row |
-| work items, plan overdue | `agronomy_work_items` of the current cycle (`w.cycle = p.cycle`) of live plans: the TASK_220 rule in `services/closed_loop_agronomy.py::queue_filter` |
-| inspection overdue | `field_inspections.due_at`, the TASK_217 rule in `services/anomaly_inspections.py`; for legacy rows that only have a date, `due_date` |
+| current problem load, state counts | TASK_221 Operational Center case model `services/operational_center.py::CASES_CTE` (inspection, candidate and alert cases), classified by the TASK_225 projection `services/remediation_status.py::inspection_status_sql`, joined 1:1 to `field_inspections` and to the case's current `agronomy_plans` row |
+| overdue cases | the same case model's own column `is_overdue`, counted verbatim (see Overdue) |
+| overdue work items, work items | `agronomy_work_items` in the current cycle (`w.cycle = p.cycle`) of live plans, with the TASK_220 item predicate `status IN ('planned','in_progress') AND due_at < now` |
 | data unavailable | Operational Center `freshness` and `external` cases (`remediation_status = data_unavailable`) |
 | period activity | `field_inspections.created_at`, `reviewed_at`, `cancelled_at`; `autonomous_anomaly_candidates.created_at`; `agronomy_plans.created_at`; `agronomy_events` (`approve`, `work_complete`, `cancel`) |
-| verified outcomes, reopen | `agronomy_events` resolution events (`close`, `override_close`, `rework`/`reinspection` from `pending_verification`, `reopen`) and the latest `agronomy_verifications` row of the same plan cycle |
+| verified outcomes, reopen events | `agronomy_events` resolution events (`close`, `override_close`, `rework`/`reinspection` from `pending_verification`, `reopen`) and the latest `agronomy_verifications` row of the same plan cycle |
 | cycle times | the canonical timestamps named per metric below |
 | completion | the same events and verification rows, grouped per plan cycle |
-| crop dimension | `crop_seasons` + `crop_types`: the field's latest season with `season_year` ≤ the generation year in Asia/Tashkent (the Operational Center rule) |
+| crop dimension | `crop_seasons` + `crop_types`, as the field's **current** classification only (see Crop classification) |
 
 Plan cycles: `agronomy_events` has no cycle column. The cycle of an event is 1 plus the number of earlier cycle-opening events of the same plan, ordered by `id`. A cycle-opening event is `rework` or `reinspection` from `pending_verification`, or `reopen` from `closed`. This mirrors `closed_loop_agronomy.transition`, where exactly these transitions increment `agronomy_plans.cycle`. The PostgreSQL tests check the derived cycles against the `cycle` column of `agronomy_verifications`.
+
+## Overdue: final behaviour
+
+**Definitions that exist in accepted code**, read at the base SHA:
+
+| accepted source | unit | rule |
+|---|---|---|
+| TASK_221 `CASES_CTE` column `is_overdue` | case | While the case has no current plan: the inspection deadline `COALESCE(i.due_at, i.due_date) < as_of`, for inspection statuses `pending/new/assigned/in_progress/submitted`. Otherwise: `due_at < as_of` of the case's primary active work item, which is in progress first, then earliest due, then lowest id. Otherwise `false`. It drives the command center's queue order, `priority_reasons`, the queue `overdue` filter and the summary figure `overdue_work` |
+| TASK_220 item predicate | work item | `status IN ('planned','in_progress') AND due_at < now`. The plan queue's `due_state=overdue` and its summary `overdue` apply it to a plan with *any* such item in the current cycle |
+| TASK_221 notification reconciler | work item / inspection | one `overdue` notification per late active work item and per open inspection past due |
+| TASK_217 inspection queue, executive backlog | inspection / work item | their own inspection and date-level variants |
+
+**Decision.** "Overdue case" is a case-level management figure, and the command center's `is_overdue` is the only accepted case-level definition. H1's current state is built on that same case model, so it uses the same flag.
+- `current.overdue_cases.total` is `count(*) FILTER (WHERE is_overdue)` over H1's active cases. It equals `/api/operational-center/summary.overdue_work` for the same user and scope.
+- It splits into `inspection_stage` (no current plan) and `work_stage` (primary work item late). These are the two branches of the command center's own expression, not new rules.
+- Breakdown rows carry the same flag as `current.overdue_cases`.
+
+**Different unit, different name.** `current.work_items.overdue_work_items` counts late active work items in the current cycle of live plans. It uses the TASK_220 item predicate, which is also the predicate of the TASK_221 per-item `overdue` notification. Breakdown rows carry it as `overdue_work_items`.
+
+**Removed.** H1 no longer has a bare `overdue` key, no plan-level "any late item" count, and no rule of its own for legacy date-only deadlines. A legacy `due_date` follows the command center: it is overdue from the first instant of that date in the session time zone (Asia/Tashkent on this server).
+
+**Required test.** `OverdueTests.test_one_plan_main_work_item_on_time_secondary_late` builds one plan with two work items:
+- The main item is in progress and due in 2 days; the secondary item is planned and was due 1 hour ago.
+- The command center returns `is_overdue = false` for the case and `overdue_work = 0`.
+- H1 returns `overdue_cases = {total: 0, inspection_stage: 0, work_stage: 0}` and `overdue_work_items = 1`.
+- The only per-item `overdue` notification the reconciler creates is the secondary item's.
+- The field row shows `overdue_cases 0`, `overdue_work_items 1`, and there is no bare `overdue` key.
+
+`test_every_stage_follows_the_operational_center_flag` covers:
+- a late main item
+- no item started and the earliest item late
+- an on-time item
+- a late new inspection
+- a late submitted inspection
+- a late inspection that already has a draft plan (plan stage, no deadline)
+- a completed plan with late but completed work
+
+H1 flags exactly the command center's four cases (2 inspection stage, 2 work stage) and 2 late work items.
+
+## Crop classification: final behaviour (option B)
+
+**Decision.** The persisted data cannot establish the crop grown when a past event happened, so no metric is attributed to a historical crop. The crop dimension is explicitly the field's **current** classification. It uses the Operational Center rule: the field's latest `crop_seasons` row with `season_year` not after the Asia/Tashkent year of `generated_at`.
+
+**Why the data is insufficient.** Facts from the model and its writers at the base SHA:
+1. **One replaceable row per field and year.** `crop_seasons` is unique on `(field_id, season_year)`. The only application writer, `POST /api/fields/{field_id}/season` ("Set or replace"), deletes the existing row for that field and year and inserts a new one. A crop change within a season therefore overwrites history instead of versioning it.
+2. **No season end.**
+   - The application writer takes an untyped body and writes only `crop_type_id`, `season_year`, `planting_date` (optional) and `variety`. The `SeasonCreate` schema declares harvest dates, but nothing uses it.
+   - `actual_harvest_date` is written nowhere. `expected_harvest_date` is written only by the PROGRAM R1 qualification seed script, for synthetic data.
+   - All three date columns are `timestamp without time zone`.
+3. **`season_year` is not the calendar year the crop was on the field.** The production import scripts (`scripts/import_kml.py`, `scripts/import_servis.py`) write `season_year = 2026` with `planting_date` 2026-04-10 for cotton, but 2025-10-15 for other crops (winter wheat). Mapping an event's year to `season_year` would therefore attribute an autumn event to the wrong season.
+4. **A second crop in the same year cannot be recorded**, because of the single row per field and year.
+5. **Plan snapshots do not help.** `agronomy_plans.input_snapshot.season` stores a crop *name* only. It looks the season up by the calendar year at draft time, so it inherits the ambiguity in point 3.
+
+**Behaviour:**
+- `crop_classification` in every response: `{basis: "current_crop_season", reference_year, rule, historical_crop_at_event: false}`. The schema types `historical_crop_at_event` as `Literal[False]`.
+- The filter is `current_crop_type_id`. A bare `crop_type_id` is refused with 422 and a message pointing to `current_crop_type_id`, instead of being silently ignored. It is not listed in OpenAPI.
+- The breakdown is `breakdowns.current_crops` with `current_crop_type_id` and `current_crop_name`. Field rows carry `current_crop_type_id` and `current_crop_name`. There is no `crops` key and no `crop_type_id` key anywhere.
+
+**What can and cannot be filtered or grouped by crop:**
+
+| section | crop filter / grouping | meaning |
+|---|---|---|
+| `coverage`, `current` | yes | the crop the field has now. Exact for current state |
+| `period_activity`, `outcomes`, `cycle_times`, `completion`, `breakdowns.current_crops[].period`, field-row `period` | yes | grouped by the field's **current** crop. It is **not** the crop grown when the event happened |
+| any metric by crop at event time | **no** | not available from the persisted data (reasons above) |
+
+**Tests:**
+- `CropSemanticsTests.test_crop_is_a_current_classification_never_crop_at_event_time` uses a field with cotton last season and wheat now, with a closure moved into last August:
+  - The August period reports the outcome under `current_crops` wheat and never under cotton.
+  - `current_crop_type_id=<cotton>` finds 0 fields and 0 outcomes.
+  - `crop_type_id` gets 422.
+  - The response carries `historical_crop_at_event: false` and no `crops` or `crop_type_id` key.
+- `test_current_crop_filter_and_grouping_use_the_current_season` pins the classification rule itself: a rotated field, a previous-year-only field, a future season that is ignored, and a null bucket.
 
 ## Metric definitions
 
@@ -70,8 +148,8 @@ All counts are counts of distinct canonical lifecycle instances or events. "In t
 | `fields_in_scope` | fields in the effective scope (authorization ∩ filters), active or not |
 | `monitored_fields` | `fields.is_active = true`: the population the TASK_219 collector, freshness refresh and detection iterate |
 | `inactive_fields` | `fields_in_scope − monitored_fields` |
-| `monitored_fields_with_active_problems` | distinct monitored fields with at least one active problem case |
-| `ndvi_freshness.*` | monitored fields by `satellite_field_freshness.status` for `ndvi` (FRESH, AGING, STALE, NEVER_COLLECTED, CLOUD/QUALITY_BLOCKED, PROVIDER_DEGRADED); `not_evaluated` means no freshness row yet |
+| `monitored_fields_with_active_problems` | distinct monitored fields with at least one active case |
+| `ndvi_freshness.*` | monitored fields by `satellite_field_freshness.status` for `ndvi`; `not_evaluated` means no freshness row yet |
 
 ### Current problem load (current)
 
@@ -85,106 +163,91 @@ Population: Operational Center case rows in scope whose root source is `inspecti
 
 | key | definition |
 |---|---|
-| `active_problems.total` | active cases in scope |
+| `active_problems.total` | active cases in scope. `/api/operational-center/summary.active_situations` = this + `data_unavailable.*` (tested) |
 | `fields_affected` | distinct fields with at least one active case |
 | `by_source.*` | active cases by root source |
-| `by_priority.*` | Operational Center `priority_rank`: 0 critical (plan/inspection `urgent`, candidate `EXTREME`, alert `critical`), 1 high, 2 normal (`normal/medium/moderate`, alert `warning`), 3 low |
-| `legacy_open_inspections` | active inspection cases whose row is a pre-0013 legacy inspection (`source_kind='legacy'`, `pending/in_progress`). The TASK_225 projection still counts them as workload to drain; they are shown separately |
+| `by_priority.*` | Operational Center `priority_rank`: 0 critical, 1 high, 2 normal, 3 low |
+| `legacy_open_inspections` | active inspection cases whose row is a pre-0013 legacy inspection. The TASK_225 projection still counts them as workload to drain |
 
-### Inspection funnel (current)
+### Cases by remediation status (current)
 
-The keys are the canonical remediation states. They map only to accepted state-machine values.
+`current.by_remediation_status` is keyed by the TASK_225 `remediation_status` values themselves, exactly the value the command center returns per queue item. Every active case is in exactly one state, and the states sum to `active_problems.total` (tested).
 
 | key | canonical mapping |
 |---|---|
-| `needs_inspection` | inspection `new`/`assigned` (legacy `pending`) without a current plan, plus candidate and alert cases. Sub-keys: `inspections`, `candidates`, `alerts`, and `unassigned_inspections` (inspection rows with `assigned_to_id IS NULL`) |
-| `inspection_active` | inspection `in_progress` (canonical or legacy) |
+| `needs_inspection` | inspection `new`/`assigned` (legacy `pending`) without a current plan, plus candidate and alert cases. Sub-keys: `inspections`, `candidates`, `alerts`, and `unassigned` (inspection cases without an assignee) |
+| `inspection_active` | inspection `in_progress` |
 | `awaiting_review` | inspection `submitted` without a current plan |
 | `awaiting_decision` | inspection `confirmed` without a current plan |
-
-### Remediation funnel (current)
-
-The case's current TASK_220 plan determines the state.
-
-| key | canonical mapping |
-|---|---|
-| `plan_active` (`draft`, `approved`) | plan `draft` / `approved` |
-| `work_active` | plan `in_progress` |
-| `awaiting_satellite_verification` (`pending_data`, `too_early`) | plan `pending_verification` with `PENDING_DATA` / `TOO_EARLY` |
-| `verification_blocked` (`cloud_blocked`, `quality_blocked`, `provider_degraded`, `inconclusive`) | plan `pending_verification` with a status that cannot conclude. This is the only blocked state that TASK_220 represents; work items have no blocked state |
-| `improved_awaiting_closure` | plan `pending_verification` with `IMPROVED` (provisional, not yet an outcome) |
+| `plan_active` (`draft`, `approved`) | current plan `draft` / `approved` |
+| `work_active` | current plan `in_progress` |
+| `awaiting_satellite_verification` (`pending_data`, `too_early`) | plan `pending_verification` with `PENDING_DATA` / `TOO_EARLY`, the TASK_225 state only |
+| `verification_blocked` (`cloud_blocked`, `quality_blocked`, `provider_degraded`, `inconclusive`) | plan `pending_verification` with a status that cannot conclude. This is the only blocked state TASK_220 represents |
+| `improved_awaiting_closure` | plan `pending_verification` with `IMPROVED` (provisional, not an outcome) |
 | `not_improved` (`unchanged` = `NO_MATERIAL_CHANGE`, `worsened`) | plan `pending_verification` with a non-improving conclusive status |
-| `reopened` | plan `rework`: returned after verification (`rework`/`reinspection`) or reopened after closure (`reopen`) |
-
-The funnel stages sum to `active_problems.total` (tested).
-
-### Work items, overdue, data availability (current)
+| `reopened` | plan `rework`: returned after verification or reopened after closure |
 
 | key | definition |
 |---|---|
-| `work_items.active/planned/in_progress/unassigned` | `planned`/`in_progress` work items in the current cycle of live plans (not `closed/cancelled/superseded`) |
-| `overdue.inspections` | inspection-stage cases (no current plan) in `pending/new/assigned/in_progress/submitted` whose deadline has passed: `due_at < as_of` (TASK_217). A legacy date-only `due_date` becomes overdue once the local due day has ended (`due_date < as_of` local date) |
-| `overdue.work_items` = `work_items.overdue` | active current-cycle work items of live plans with `due_at < as_of` (TASK_220 rule) |
-| `overdue.plans_with_overdue_work` | live plans with at least one such item (TASK_220 summary `overdue`) |
-| `overdue.cases` | `inspections + plans_with_overdue_work`. A case is either in the inspection stage or the plan stage, so nothing is double-counted |
+| `plans_pending_verification` | cases whose current plan is `pending_verification` in any verification status. This is the figure the command center summary calls `awaiting_satellite_verification` and the TASK_220 plan summary calls `pending_verification` (tested) |
+| `work_items.active/planned/in_progress/unassigned` | `planned`/`in_progress` work items in the current cycle of live plans |
+| `work_items.overdue_work_items` | see Overdue |
+| `overdue_cases.total/inspection_stage/work_stage` | see Overdue |
 | `data_unavailable.freshness_cases` | Operational Center freshness cases: field × index not FRESH without an open case on that index |
 | `data_unavailable.external_cases` | Operational Center external cases: the latest collection run is degraded, failed or a stale `running` run. One per enterprise with active fields; enterprise-level, so shown only without a field or crop filter |
-
-Stages with no deadline in the domain model are never overdue: candidates, alerts, `awaiting_decision`, draft plans whose work has no due date, and plans waiting for verification.
-
-The Operational Center's own `is_overdue` looks only at a case's primary active work item (in progress first). H1 instead applies the TASK_220 rule, so a plan is overdue if any active item of its current cycle is overdue. The two can therefore differ for a plan that has an in-progress item on time and a planned item late.
 
 ### Period activity (windowed)
 
 | key | anchor |
 |---|---|
 | `anomaly_candidates_detected` | `autonomous_anomaly_candidates.created_at` |
-| `inspections_opened.total/manual/alert/pixel_ndvi` | `field_inspections.created_at`, canonical rows only (`source_kind <> 'legacy'`) |
-| `inspections_confirmed` / `inspections_rejected` | `reviewed_at` of rows now `confirmed` / `rejected` (terminal review states) |
+| `inspections_opened.total/manual/alert/pixel_ndvi` | `field_inspections.created_at`, canonical rows only |
+| `inspections_confirmed` / `inspections_rejected` | `reviewed_at` of rows now `confirmed` / `rejected` |
 | `inspections_cancelled` | `cancelled_at`, canonical rows |
 | `plans_drafted` | `agronomy_plans.created_at` |
-| `plan_cycles_approved` | `agronomy_events.occurred_at` of `approve` (one per plan cycle) |
-| `plan_cycles_work_completed` | `occurred_at` of the `work_complete` event whose resulting status is `pending_verification`. There is one per cycle, however many work items the cycle has |
-| `plan_cycles_verified` | `agronomy_verifications.created_at` of the first conclusive row of a plan cycle (one per cycle, however many re-evaluations follow) |
+| `plan_cycles_approved` | `occurred_at` of `approve` (one per plan cycle) |
+| `plan_cycles_work_completed` | `occurred_at` of the `work_complete` event whose resulting status is `pending_verification` (one per cycle, however many items) |
+| `plan_cycles_verified` | `created_at` of the first conclusive `agronomy_verifications` row of a plan cycle |
 | `plans_cancelled` | `occurred_at` of `cancel` |
 
-### Verified outcomes and reopen (windowed)
+### Verified outcomes and reopen events (windowed)
 
 Population: plan cycles resolved in the period. A cycle is resolved when it closes (`close`, `override_close`) or is returned after verification (`rework`/`reinspection` from `pending_verification`). A verified cycle ends exactly once, so it is counted once. The anchor is the resolution event time.
 
-The outcome is the status of the cycle's latest `agronomy_verifications` row, or `PENDING_DATA` when the cycle has none. This equals `agronomy_plans.verification_status` at resolution: rows are written only while the plan is `pending_verification`, and every new row also sets that column.
+The outcome is the status of the cycle's latest verification row, or `PENDING_DATA` when the cycle has none. This equals `agronomy_plans.verification_status` at resolution.
 
 | key | definition |
 |---|---|
 | `resolved_cycles` | resolved cycles |
 | `verified.improved/unchanged/worsened/total` | outcome `IMPROVED` / `NO_MATERIAL_CHANGE` / `WORSENED` |
 | `unverified.*` | resolved with `PENDING_DATA`, `TOO_EARLY`, `CLOUD_BLOCKED`, `QUALITY_BLOCKED`, `PROVIDER_DEGRADED` or `INCONCLUSIVE`. These are never outcomes |
-| `closed.total/improved/without_improvement` | resolutions that closed the plan, split by an `IMPROVED` outcome (improved_closed vs closed_without_improvement) |
+| `closed.total/improved/without_improvement` | resolutions that closed the plan |
 | `returned_for_rework` | resolutions that opened another cycle |
-| `reopened.after_closure` | `reopen` events (closed → rework), anchored at event time |
-| `reopened.after_verification` | `rework`/`reinspection` events from `pending_verification`, anchored at event time |
+| `reopen_events.after_closure` | `reopen` events, anchored at event time |
+| `reopen_events.after_verification` | `rework`/`reinspection` events from `pending_verification`, anchored at event time |
 
-A verification that is conclusive but still waiting for a human decision is not an outcome yet. It appears in `current.remediation_funnel` and in `completion.verification_completion`.
+`reopen_events` counts events. The current state `by_remediation_status.reopened` counts cases in `rework` now, and that is the command center's `reopened` figure.
+
+A verification that is conclusive but still waiting for a human decision is not an outcome yet. It appears in `current.by_remediation_status` and in `completion.verification_completion`.
 
 ### Cycle times (windowed)
 
 Unit: hours, rounded to 2 decimals.
-- Samples are completed, correctly ordered pairs only (end ≥ start). An open cycle has no end event and contributes nothing.
+- Samples are completed, correctly ordered pairs only. An open cycle contributes nothing.
 - `median_hours` is `percentile_cont(0.5)`, reported from one sample.
-- `p90_hours` is `percentile_cont(0.9)`, reported only from 10 samples (`p90_minimum_samples`), otherwise `null`.
+- `p90_hours` is `percentile_cont(0.9)`, reported only from 10 samples, otherwise `null`.
 - `status` is `measured` or `no_samples`.
-- Each metric's `start_event`, `end_event`, `period_anchor` and `population` are also returned in the response.
 
 | metric | start event | end event (= period anchor) | population |
 |---|---|---|---|
 | `signal_to_inspection_opened` | `autonomous_anomaly_candidates.created_at` | `field_inspections.created_at` | canonical inspections opened from a candidate |
 | `inspection_opened_to_reviewed` | `field_inspections.created_at` | `field_inspections.reviewed_at` | canonical inspections confirmed or rejected |
-| `inspection_submitted_to_plan_drafted` | `field_inspections.submitted_at` | `agronomy_plans.created_at` of the inspection's first plan | inspections whose first plan was drafted. A plan may be drafted from a submitted inspection, so review time would not be a valid start |
+| `inspection_submitted_to_plan_drafted` | `field_inspections.submitted_at` | `agronomy_plans.created_at` of the inspection's first plan | inspections whose first plan was drafted |
 | `plan_approved_to_work_completed` | `approve` event of the cycle | `work_complete` → `pending_verification` event of the same cycle | plan cycles whose work was completed |
-| `work_completed_to_verified` | `agronomy_verifications.completed_at` (cycle completion) | `created_at` of the cycle's first conclusive verification | plan cycles with a conclusive verification. At least 8 days by policy r3-f-v1 |
-| `case_opened_to_verified_closure` | `field_inspections.created_at` of the case root | `agronomy_plans.closed_at` | plans currently `closed` with a conclusive verification. A reopened case leaves the population until it closes again |
+| `work_completed_to_verified` | `agronomy_verifications.completed_at` | `created_at` of the cycle's first conclusive verification | plan cycles with a conclusive verification. At least 8 days by policy r3-f-v1 |
+| `case_opened_to_verified_closure` | `field_inspections.created_at` of the case root | `agronomy_plans.closed_at` | plans currently `closed` with a conclusive verification |
 
-Unsupported: `alert_signal_to_inspection_opened`. `alerts.triggered_at` is `timestamp without time zone`, so no timezone-safe signal time is persisted for alert-origin cases. Manual cases have no signal before the inspection.
+Unsupported: `alert_signal_to_inspection_opened`. `alerts.triggered_at` is `timestamp without time zone`.
 
 ### Completion (cohorts)
 
@@ -192,119 +255,148 @@ Unsupported: `alert_signal_to_inspection_opened`. `alerts.triggered_at` is `time
 
 | key | denominator (cohort in the period) | numerator and splits (as of `generated_at`) |
 |---|---|---|
-| `work_completion` | plan cycles approved in the period | cycles whose work was completed; `ended_without_completion` (cycle cancelled or superseded); `open` |
-| `verification_completion` | plan cycles whose work was completed in the period | cycles whose latest verification is conclusive; `improved`, `unchanged`, `worsened`, `not_conclusive`; `improved_rate = improved / denominator` |
-| `plan_closure` | plans drafted in the period and not superseded (the replacement plan carries the case) | plans now `closed`; `closed_improved` (verification `IMPROVED`), `closed_without_improvement`, `cancelled`, `open` |
+| `work_completion` | plan cycles approved in the period | cycles whose work was completed; `ended_without_completion`; `open` |
+| `verification_completion` | plan cycles whose work was completed in the period | cycles whose latest verification is conclusive; `improved`, `unchanged`, `worsened`, `not_conclusive`; `improved_rate` |
+| `plan_closure` | plans drafted in the period and not superseded | plans now `closed`; `closed_improved`, `closed_without_improvement`, `cancelled`, `open` |
 
 Completed work is never reported as success. Success is only the verification outcome.
 
 ### Breakdowns
 
-- `enterprises`, `crops`, `fields`: each row has `monitored_fields`, `current` and `period` numbers.
-  - `current` holds `active_problems`, the 11 states, `overdue_cases` and `overdue_work_items`.
-  - `period` holds `inspections_opened`, `resolved_cycles`, `improved`, `unchanged`, `worsened`, `unverified` and `reopened`.
-  - Enterprise and crop rows are sums of the field rows computed in the same statement, so they reconcile exactly with the totals (tested). The crop row `crop_type_id = null` groups fields without a crop season.
-- `fields` is paged: `field_limit` 1..200 (default 50), `field_offset` 0..10000, plus `total`.
-  - Order: active problems desc, overdue cases desc, resolved cycles desc, name, id.
-  - Paging covers every field exactly once (tested).
-- Enterprise rows are capped at 500 and crop rows at 200. Above the cap the response is `422 result_too_large` (the `api/query_bounds.py` convention), never silently truncated.
-- `periods`: `granularity` `day`, `week` (ISO Monday) or `month` (default `week`) in the Asia/Tashkent local calendar.
-  - The first and last buckets are clipped to the period. Empty buckets are present with zeros.
-  - Their counts sum to the windowed totals (tested).
-- External cases are enterprise-level and appear only in `current.data_unavailable`.
+- `enterprises`, `current_crops`, `fields` rows each have `monitored_fields`, `current` and `period` numbers.
+  - `current` holds `active_problems`, `by_remediation_status` (the 11 states), `overdue_cases` and `overdue_work_items`.
+  - `period` holds `inspections_opened`, `resolved_cycles`, `improved`, `unchanged`, `worsened`, `unverified` and `reopen_events`.
+  - Enterprise and current-crop rows are sums of the field rows computed in the same statement, so they reconcile exactly with the totals (tested).
+- `fields` is paged: `field_limit` 1..200 (default 50), `field_offset` 0..10000, plus `total`. Order: active problems desc, overdue cases desc, resolved cycles desc, name, id. Paging covers every field exactly once (tested).
+- Enterprise rows are capped at 500 and current-crop rows at 200. Above the cap the response is `422 result_too_large`, never silently truncated.
+- `periods`: `granularity` `day`, `week` (ISO Monday) or `month` in the Asia/Tashkent calendar. The first and last buckets are clipped to the period, empty buckets are present with zeros, and counts sum to the windowed totals (tested).
+
+## Alignment with accepted projections (re-audit)
+
+After the two corrections, I re-checked every figure against:
+- the command center summary
+- the TASK_220 plan summary
+- the TASK_217 inspection queue summary
+- the executive backlog
+
+A figure either has exactly the same definition as the accepted figure it shares a name with, or it has its own explicit name.
+
+| H1 figure | accepted figure | relation |
+|---|---|---|
+| `current.overdue_cases.total` | command center summary `overdue_work` | identical definition (same `is_overdue`); tested |
+| `current.plans_pending_verification` | command center summary `awaiting_satellite_verification`; TASK_220 summary `pending_verification` | identical population; tested against the command center |
+| `current.by_remediation_status.reopened` / `.not_improved` / `.verification_blocked` | command center summary `reopened` / `not_improved` / `verification_blocked` | identical (same TASK_225 state); tested |
+| `current.by_remediation_status.work_active` | command center summary `awaiting_evidence` | identical population; tested |
+| `current.by_remediation_status.*` | command center queue item `remediation_status` | same vocabulary; the map is keyed by the state value |
+| `current.by_remediation_status.awaiting_satellite_verification` | command center summary `awaiting_satellite_verification` | **different concept**: the TASK_225 state only. It sits inside the explicitly named state map, and the command center figure is `plans_pending_verification` |
+| `current.by_remediation_status.awaiting_review` | TASK_217 inspection queue summary `awaiting_review` (raw `submitted`, even with a draft plan) | different concept, in the state map; H1 exposes no raw-status figure |
+| `current.active_problems.total` | command center summary `active_situations` | own name. `active_situations = active_problems.total + data_unavailable.*` (tested) |
+| `current.work_items.overdue_work_items` | TASK_220 item predicate; TASK_221 per-item `overdue` notifications | same item predicate; tested against the notifications. Like the TASK_220 queue, H1 counts only items in the current cycle of live plans. The reconciler also sees planned items left behind in a superseded plan |
+| `outcomes.reopen_events.*` | — | renamed from `reopened` so that `reopened` means only the current state, as in the command center |
+| `current.by_remediation_status.needs_inspection.unassigned` | executive backlog `unassigned_inspections` (all open statuses) | own name (differs only for legacy `in_progress` rows without an assignee) |
+| `outcomes.verified.improved/unchanged/worsened` | TASK_220 summary `improved` (current plan status, all time); executive `verification_outcomes` (retired TASK_209 history) | own path. Windowed resolved plan cycles on the canonical lifecycle, which is the H1 re-baseline |
+
+Other checks, all unchanged by the correction and covered by the tests:
+- population, anchor, current vs terminal semantics
+- one-to-many joins
+- total ↔ breakdown reconciliation
+- tenant scope
+- TASK_209 exclusion
 
 ## Legacy exclusion
 
-- The statement never references `corrective_actions`, `action_verification_requests` or `operational_audit_events`. A contract test pins this, and the PostgreSQL suite asserts it on the SQL that is actually executed. `provenance.excluded_legacy_sources` names both TASK_209 tables.
-- `period_activity` and the cycle times exclude `field_inspections` rows with `source_kind='legacy'`. Completed legacy inspections are in no section.
-- Open legacy inspections (`pending`/`in_progress`) remain current workload, as the TASK_225 projection and the Operational Center define it: they must be drained through the canonical close-out. They are reported separately in `legacy_open_inspections`.
-- `test_legacy_task209_history_never_becomes_current_truth` seeds legacy inspections, a legacy result, open, closed and reopened corrective actions, and two resolved `improved` `action_verification_requests`. Every windowed and outcome number stays 0, and every completion denominator is 0.
+- The statement never references `corrective_actions`, `action_verification_requests` or `operational_audit_events`. A contract test pins this, and the PostgreSQL suite asserts it on the executed SQL. `provenance.excluded_legacy_sources` names both TASK_209 tables.
+- `period_activity` and the cycle times exclude `field_inspections` rows with `source_kind='legacy'`.
+- Open legacy inspections (`pending`/`in_progress`) remain current workload, as the TASK_225 projection and the command center define it. They are reported separately in `legacy_open_inspections`. Their date-only deadlines follow the command center's `is_overdue`.
+- `test_legacy_task209_history_never_becomes_current_truth` seeds legacy inspections, a result, open, closed and reopened corrective actions, and two resolved `improved` `action_verification_requests`. Every windowed and outcome number stays 0, every completion denominator is 0, and `overdue_cases` equals the command center's `overdue_work`.
 
 ## Authorization
 
 - Authentication comes from `get_current_active_user`; without it the endpoint answers 401.
-- Roles are `admin` and `manager`, the precedent set by `/api/executive`. `agronomist` and `viewer` get 403 before any SQL: an agronomist's Operational Center scope is limited to assigned work, and enterprise-wide aggregates would widen it. A manager without an enterprise gets 403.
+- Roles are `admin` and `manager`, the `/api/executive` precedent. `agronomist` and `viewer` get 403 before any SQL. A manager without an enterprise gets 403.
 - Effective scope = server authority ∩ request filters:
   - A manager is bound to `users.enterprise_id` (`scope.authorization = "tenant"`).
   - An admin is global (`"global"`).
-  - `enterprise_id`, `field_id` and `crop_type_id` only add conditions. They are never used to widen scope.
+  - `enterprise_id`, `field_id` and `current_crop_type_id` only narrow.
 - Non-enumerating responses:
-  - A manager naming another enterprise, or anyone naming a non-existent one, gets the identical `404 {"detail":"Enterprise not found"}`.
-  - A field outside the effective scope and a non-existent field both get `404 {"detail":"Field not found"}`. An admin combining enterprise A with a field of B gets the same.
-  - An unknown crop type gets `404 {"detail":"Crop type not found"}`. `crop_types` is a global reference table, so this reveals no tenant data.
+  - A foreign enterprise and a non-existent one both get `404 {"detail":"Enterprise not found"}`.
+  - A field outside the effective scope and a non-existent field both get `404 {"detail":"Field not found"}`.
+  - An unknown crop type gets `404 {"detail":"Crop type not found"}`. `crop_types` is a global reference table.
   - Tests compare status and body byte for byte.
-- `scope` in the response echoes only the caller's own role, the effective enterprise and the validated filters.
 
 ## Query design
 
 - **Statements.** A request runs exactly 1 SQL statement, or 2 when a filter is given: a single existence check for the filter targets, then the snapshot statement.
   - The snapshot statement is `CASES_CTE` followed by the H1 CTEs, returning one row of JSON aggregates.
-  - Because the whole snapshot is one statement, it reads one consistent snapshot of the data (READ COMMITTED gives each statement its own snapshot), and its sections reconcile with each other even under concurrent writes.
-  - `test_statement_count_does_not_grow_with_the_data` pins `(1, 2)` on an empty scope and again on the full panorama with crop seasons.
-- **No N+1.** Only `text()` SQL is used. No ORM entity is loaded, no relationship is traversed, and nothing is issued per row, per enterprise, per field or per plan (contract test). One-to-many joins are avoided:
-  - Cases join their inspection and plan 1:1 by primary key.
-  - Work items and verification rows are aggregated separately per plan cycle, or tested with `EXISTS`.
-  - Tests prove that 3 work items, 12 photos and 2 verification rows per cycle count one case, one completed cycle and one verified cycle.
-- **Tenant pushdown.** The tenant and field conditions are applied both to `scope_fields` and inside the case model (`c.enterprise_id`, `c.field_id`), so PostgreSQL pushes them into each branch.
-- **Bounded output.** The period is at most 366 days (≤ 366 day buckets), the field page is ≤ 200 rows, and enterprise and crop rows are capped.
-- **Measured performance.** Service call timings, isolated databases, PostgreSQL 16.14 on the production host, 7 runs, median:
+  - Because it is one statement, all sections read one consistent snapshot and reconcile even under concurrent writes.
+  - `test_statement_count_does_not_grow_with_the_data` pins `(1, 2)` on an empty scope and again on the full panorama.
+- **No N+1.** Only `text()` SQL is used. No ORM entity is loaded, no relationship is traversed, and nothing is issued per row, enterprise, field or plan. One-to-many joins are avoided: cases join their inspection and plan 1:1, and work items and verification rows are aggregated separately. The correction removed H1's own per-case overdue `EXISTS`; the flag now comes from the case model.
+- **Tenant pushdown.** The tenant and field conditions are applied to `scope_fields` and inside the case model (`c.enterprise_id`, `c.field_id`).
+- **Bounded output.** The period is at most 366 days, the field page is ≤ 200 rows, and enterprise and current-crop rows are capped.
+- **Measured performance.** Service call timings on the final code, isolated databases, PostgreSQL 16.14 on the production host, 7 runs, median:
 
 | volume | scope | median |
 |---|---|---|
-| 300 fields, 1,200 inspections, 600 plans, 3,840 events, 900 open problems | admin, 30 days | 191 ms |
-| same | admin, 366 days, day buckets | 253 ms |
-| same | manager (60 fields) | 64–71 ms |
-| same | one field | 30 ms |
-| 3,000 fields, 12,000 inspections, 6,000 plans, 38,400 events, 9,000 open problems | admin, 30 / 366 days | 2.9–3.1 s |
-| same | manager (600 fields) | 631–671 ms |
-| same | one field | 41 ms |
+| 300 fields, 1,200 inspections, 600 plans, 3,840 events, 900 open problems | admin, 30 days | 184 ms |
+| same | admin, 366 days, day buckets | 250 ms |
+| same | manager (60 fields) | 62–69 ms |
+| same | one field | 29 ms |
+| 3,000 fields, 12,000 inspections, 6,000 plans, 38,400 events, 9,000 open problems | admin, 30 / 366 days | 2.89–3.05 s |
+| same | manager (600 fields) | 618–664 ms |
+| same | one field | 38 ms |
 
-  - For reference, production on 2026-09-24 had 275 active fields, 1 inspection and 0 plans.
-  - At the 3,000-field volume, the accepted `operational_center.summary` alone takes 2.6 s on the same data.
-  - `EXPLAIN (ANALYZE, BUFFERS)` puts almost all of the time inside the TASK_221 case model:
-    - The current-plan `LATERAL` scans `uq_agronomy_plan_binding`, because no index leads with `agronomy_plans.inspection_id` for closed plans: about 1.0 s.
-    - The freshness-case `NOT EXISTS` uses a `BitmapAnd`: about 1.2 s.
-  - The H1 CTEs add about 0.3–0.4 s.
-  - A probe index `agronomy_plans(inspection_id)`, created and dropped in the isolated perf database only, gave:
-    - admin 2.9 → 1.9 s
-    - manager 630 → 163 ms
-    - `/api/operational-center/summary` 2.64 → 1.59 s
-  - No index is required for acceptable performance at realistic volume, so none was added (see residual gaps).
+- For reference, production on 2026-09-24 had 275 active fields, 1 inspection and 0 plans.
+- At the 3,000-field volume, the accepted `operational_center.summary` alone takes 2.60 s on the same data. Almost all of the time is inside the TASK_221 case model:
+  - The current-plan `LATERAL` has no index leading with `agronomy_plans.inspection_id`.
+  - The freshness-case `NOT EXISTS` uses a `BitmapAnd`.
+- A probe index `agronomy_plans(inspection_id)`, created and dropped in the isolated perf database only, gave:
+  - admin 2.89 → 1.82 s
+  - manager 618 → 166 ms
+  - `/api/operational-center/summary` 2.61 → 1.58 s
+- No index is required at realistic volume, so none was added.
+- Raw numbers: `evidence\perf_300_fields_c9be969.txt`, `perf_3000_fields_c9be969.txt`, `perf_index_probe_c9be969.txt`.
 
 ## API contract
 
-`GET /api/management-analytics`. Read-only; the router registers no other method or path. Query parameters:
+`GET /api/management-analytics`. Read-only; the router registers no other method or path.
 
 | parameter | type | rule |
 |---|---|---|
 | `date_from`, `date_to` | date | inclusive, Asia/Tashkent; default the last 30 days ending today; `date_from > date_to` → 422; more than 366 days → 422 |
 | `enterprise_id` | int > 0 | narrows; foreign or missing → 404 |
 | `field_id` | int > 0 | narrows; outside scope or missing → 404 |
-| `crop_type_id` | int > 0 | narrows to fields whose current crop season has this crop; missing → 404 |
+| `current_crop_type_id` | int > 0 | narrows to fields whose **current** crop season has this crop; missing → 404 |
+| `crop_type_id` | — | refused with 422 (see Crop classification); not in OpenAPI |
 | `granularity` | `day` \| `week` \| `month` | default `week` |
 | `field_limit`, `field_offset` | int | 1..200 (default 50), 0..10000 (default 0) |
 
 Top-level response keys:
-- metadata: `definitions_version` (`management_analytics_v1`), `generated_at`, `timezone`, `scope`, `period` (`requested`, `effective` with `starts_at` and `ends_before`), `provenance`
+- metadata: `definitions_version` (`management_analytics_v1`), `generated_at`, `timezone`, `scope`, `crop_classification`, `period`, `provenance`
 - current state: `coverage`, `current`
 - windowed: `period_activity`, `outcomes`, `cycle_times`, `completion`
-- `breakdowns`, `limitations`
+- `breakdowns` (`enterprises`, `current_crops`, `periods`, `fields`), `limitations`
 
-`provenance.definitions_fingerprint` is the SHA-256 of every definition the response depends on: the case model SQL, the projection, this statement, the duration catalogue, the policy version and the p90 threshold. The contract test pins it next to `definitions_version`, so any change to a definition fails a test until the version has been reviewed. The fingerprint is identical for LF and CRLF checkouts (verified).
+`provenance.definitions_fingerprint` is the SHA-256 of every definition the response depends on: the case model SQL (so it also changes if `CASES_CTE` changes), the projection, this statement, the duration catalogue, the policy version and the p90 threshold. The contract test pins it next to `definitions_version`. The version stays `management_analytics_v1`: it has never been released or consumed, and its definitions were finalized by this correction before acceptance. The fingerprint is identical for LF and CRLF checkouts.
 
-Example (sanitized). It is the manager response from the TASK_232 panorama test scenario, with synthetic names and ids. `breakdowns.fields.items` is shortened to 1 of 3 rows, and `limitations` to 1 of 7 entries:
+Example (sanitized). It is the manager response from the TASK_232 panorama test scenario, with synthetic names and ids. `breakdowns.fields.items` is shortened to 1 of 3 rows, and `limitations` to 1 of 8 entries:
 
 ```json
 {
   "definitions_version": "management_analytics_v1",
-  "generated_at": "2026-09-26T11:27:42.554503+05:00",
+  "generated_at": "2026-09-26T12:21:55.036036+05:00",
   "timezone": "Asia/Tashkent",
   "scope": {
     "role": "manager",
     "authorization": "tenant",
     "enterprise_id": 1,
     "field_id": null,
-    "crop_type_id": null
+    "current_crop_type_id": null
+  },
+  "crop_classification": {
+    "basis": "current_crop_season",
+    "reference_year": 2026,
+    "rule": "each field is classified once by its latest crop_seasons row with season_year <= reference_year (the Operational Center rule)",
+    "historical_crop_at_event": false
   },
   "period": {
     "requested": {
@@ -344,7 +436,7 @@ Example (sanitized). It is the manager response from the TASK_232 panorama test 
       "corrective_actions",
       "action_verification_requests"
     ],
-    "definitions_fingerprint": "691a9ccb2fa939de87a5b910a8ff24a3054560201af3b6995fb3c508062a9776"
+    "definitions_fingerprint": "91bca1b614782a938742b28a71db41d21a9a0fc916a942479f4964540211ea05"
   },
   "coverage": {
     "fields_in_scope": 14,
@@ -363,7 +455,7 @@ Example (sanitized). It is the manager response from the TASK_232 panorama test 
     }
   },
   "current": {
-    "as_of": "2026-09-26T11:27:42.554503+05:00",
+    "as_of": "2026-09-26T12:21:55.036036+05:00",
     "active_problems": {
       "total": 15,
       "fields_affected": 13,
@@ -380,19 +472,17 @@ Example (sanitized). It is the manager response from the TASK_232 panorama test 
       },
       "legacy_open_inspections": 0
     },
-    "inspection_funnel": {
+    "by_remediation_status": {
       "needs_inspection": {
         "total": 3,
         "inspections": 2,
         "candidates": 0,
         "alerts": 1,
-        "unassigned_inspections": 1
+        "unassigned": 1
       },
       "inspection_active": 1,
       "awaiting_review": 1,
-      "awaiting_decision": 1
-    },
-    "remediation_funnel": {
+      "awaiting_decision": 1,
       "plan_active": {
         "total": 2,
         "draft": 1,
@@ -419,18 +509,18 @@ Example (sanitized). It is the manager response from the TASK_232 panorama test 
       },
       "reopened": 1
     },
+    "plans_pending_verification": 5,
     "work_items": {
       "active": 3,
       "planned": 1,
       "in_progress": 2,
       "unassigned": 0,
-      "overdue": 0
+      "overdue_work_items": 0
     },
-    "overdue": {
-      "cases": 0,
-      "inspections": 0,
-      "plans_with_overdue_work": 0,
-      "work_items": 0
+    "overdue_cases": {
+      "total": 0,
+      "inspection_stage": 0,
+      "work_stage": 0
     },
     "data_unavailable": {
       "freshness_cases": 0,
@@ -477,7 +567,7 @@ Example (sanitized). It is the manager response from the TASK_232 panorama test 
       "without_improvement": 0
     },
     "returned_for_rework": 1,
-    "reopened": {
+    "reopen_events": {
       "total": 1,
       "after_closure": 0,
       "after_verification": 1
@@ -593,17 +683,19 @@ Example (sanitized). It is the manager response from the TASK_232 panorama test 
         "monitored_fields": 14,
         "current": {
           "active_problems": 15,
-          "needs_inspection": 3,
-          "inspection_active": 1,
-          "awaiting_review": 1,
-          "awaiting_decision": 1,
-          "plan_active": 2,
-          "work_active": 1,
-          "awaiting_satellite_verification": 1,
-          "verification_blocked": 1,
-          "improved_awaiting_closure": 1,
-          "not_improved": 2,
-          "reopened": 1,
+          "by_remediation_status": {
+            "needs_inspection": 3,
+            "inspection_active": 1,
+            "awaiting_review": 1,
+            "awaiting_decision": 1,
+            "plan_active": 2,
+            "work_active": 1,
+            "awaiting_satellite_verification": 1,
+            "verification_blocked": 1,
+            "improved_awaiting_closure": 1,
+            "not_improved": 2,
+            "reopened": 1
+          },
           "overdue_cases": 0,
           "overdue_work_items": 0
         },
@@ -614,28 +706,30 @@ Example (sanitized). It is the manager response from the TASK_232 panorama test 
           "unchanged": 0,
           "worsened": 1,
           "unverified": 0,
-          "reopened": 1
+          "reopen_events": 1
         },
         "enterprise_id": 1,
         "enterprise_name": "T225 Alpha"
       }
     ],
-    "crops": [
+    "current_crops": [
       {
         "monitored_fields": 1,
         "current": {
           "active_problems": 1,
-          "needs_inspection": 0,
-          "inspection_active": 0,
-          "awaiting_review": 0,
-          "awaiting_decision": 0,
-          "plan_active": 0,
-          "work_active": 0,
-          "awaiting_satellite_verification": 0,
-          "verification_blocked": 0,
-          "improved_awaiting_closure": 0,
-          "not_improved": 1,
-          "reopened": 0,
+          "by_remediation_status": {
+            "needs_inspection": 0,
+            "inspection_active": 0,
+            "awaiting_review": 0,
+            "awaiting_decision": 0,
+            "plan_active": 0,
+            "work_active": 0,
+            "awaiting_satellite_verification": 0,
+            "verification_blocked": 0,
+            "improved_awaiting_closure": 0,
+            "not_improved": 1,
+            "reopened": 0
+          },
           "overdue_cases": 0,
           "overdue_work_items": 0
         },
@@ -646,26 +740,28 @@ Example (sanitized). It is the manager response from the TASK_232 panorama test 
           "unchanged": 0,
           "worsened": 0,
           "unverified": 0,
-          "reopened": 0
+          "reopen_events": 0
         },
-        "crop_type_id": 176,
-        "crop_name": "T232 Пшеница"
+        "current_crop_type_id": 302,
+        "current_crop_name": "T232 Пшеница"
       },
       {
         "monitored_fields": 1,
         "current": {
           "active_problems": 2,
-          "needs_inspection": 2,
-          "inspection_active": 0,
-          "awaiting_review": 0,
-          "awaiting_decision": 0,
-          "plan_active": 0,
-          "work_active": 0,
-          "awaiting_satellite_verification": 0,
-          "verification_blocked": 0,
-          "improved_awaiting_closure": 0,
-          "not_improved": 0,
-          "reopened": 0,
+          "by_remediation_status": {
+            "needs_inspection": 2,
+            "inspection_active": 0,
+            "awaiting_review": 0,
+            "awaiting_decision": 0,
+            "plan_active": 0,
+            "work_active": 0,
+            "awaiting_satellite_verification": 0,
+            "verification_blocked": 0,
+            "improved_awaiting_closure": 0,
+            "not_improved": 0,
+            "reopened": 0
+          },
           "overdue_cases": 0,
           "overdue_work_items": 0
         },
@@ -676,26 +772,28 @@ Example (sanitized). It is the manager response from the TASK_232 panorama test 
           "unchanged": 0,
           "worsened": 0,
           "unverified": 0,
-          "reopened": 0
+          "reopen_events": 0
         },
-        "crop_type_id": 175,
-        "crop_name": "T232 Хлопок"
+        "current_crop_type_id": 301,
+        "current_crop_name": "T232 Хлопок"
       },
       {
         "monitored_fields": 12,
         "current": {
           "active_problems": 12,
-          "needs_inspection": 1,
-          "inspection_active": 1,
-          "awaiting_review": 1,
-          "awaiting_decision": 1,
-          "plan_active": 2,
-          "work_active": 1,
-          "awaiting_satellite_verification": 1,
-          "verification_blocked": 1,
-          "improved_awaiting_closure": 1,
-          "not_improved": 1,
-          "reopened": 1,
+          "by_remediation_status": {
+            "needs_inspection": 1,
+            "inspection_active": 1,
+            "awaiting_review": 1,
+            "awaiting_decision": 1,
+            "plan_active": 2,
+            "work_active": 1,
+            "awaiting_satellite_verification": 1,
+            "verification_blocked": 1,
+            "improved_awaiting_closure": 1,
+            "not_improved": 1,
+            "reopened": 1
+          },
           "overdue_cases": 0,
           "overdue_work_items": 0
         },
@@ -706,10 +804,10 @@ Example (sanitized). It is the manager response from the TASK_232 panorama test 
           "unchanged": 0,
           "worsened": 1,
           "unverified": 0,
-          "reopened": 1
+          "reopen_events": 1
         },
-        "crop_type_id": null,
-        "crop_name": null
+        "current_crop_type_id": null,
+        "current_crop_name": null
       }
     ],
     "periods": [
@@ -729,7 +827,7 @@ Example (sanitized). It is the manager response from the TASK_232 panorama test 
         "unverified": 0,
         "closed": 0,
         "returned_for_rework": 0,
-        "reopened": 0
+        "reopen_events": 0
       },
       {
         "bucket_start": "2026-08-31",
@@ -747,7 +845,7 @@ Example (sanitized). It is the manager response from the TASK_232 panorama test 
         "unverified": 0,
         "closed": 0,
         "returned_for_rework": 0,
-        "reopened": 0
+        "reopen_events": 0
       },
       {
         "bucket_start": "2026-09-07",
@@ -765,7 +863,7 @@ Example (sanitized). It is the manager response from the TASK_232 panorama test 
         "unverified": 0,
         "closed": 0,
         "returned_for_rework": 0,
-        "reopened": 0
+        "reopen_events": 0
       },
       {
         "bucket_start": "2026-09-14",
@@ -783,7 +881,7 @@ Example (sanitized). It is the manager response from the TASK_232 panorama test 
         "unverified": 0,
         "closed": 0,
         "returned_for_rework": 0,
-        "reopened": 0
+        "reopen_events": 0
       },
       {
         "bucket_start": "2026-09-21",
@@ -801,7 +899,7 @@ Example (sanitized). It is the manager response from the TASK_232 panorama test 
         "unverified": 0,
         "closed": 1,
         "returned_for_rework": 1,
-        "reopened": 1
+        "reopen_events": 1
       }
     ],
     "fields": {
@@ -810,17 +908,19 @@ Example (sanitized). It is the manager response from the TASK_232 panorama test 
           "monitored_fields": 1,
           "current": {
             "active_problems": 2,
-            "needs_inspection": 2,
-            "inspection_active": 0,
-            "awaiting_review": 0,
-            "awaiting_decision": 0,
-            "plan_active": 0,
-            "work_active": 0,
-            "awaiting_satellite_verification": 0,
-            "verification_blocked": 0,
-            "improved_awaiting_closure": 0,
-            "not_improved": 0,
-            "reopened": 0,
+            "by_remediation_status": {
+              "needs_inspection": 2,
+              "inspection_active": 0,
+              "awaiting_review": 0,
+              "awaiting_decision": 0,
+              "plan_active": 0,
+              "work_active": 0,
+              "awaiting_satellite_verification": 0,
+              "verification_blocked": 0,
+              "improved_awaiting_closure": 0,
+              "not_improved": 0,
+              "reopened": 0
+            },
             "overdue_cases": 0,
             "overdue_work_items": 0
           },
@@ -831,14 +931,14 @@ Example (sanitized). It is the manager response from the TASK_232 panorama test 
             "unchanged": 0,
             "worsened": 0,
             "unverified": 0,
-            "reopened": 0
+            "reopen_events": 0
           },
           "field_id": 3,
           "field_name": "T225 Quiet 0",
           "enterprise_id": 1,
           "enterprise_name": "T225 Alpha",
-          "crop_type_id": 175,
-          "crop_name": "T232 Хлопок"
+          "current_crop_type_id": 301,
+          "current_crop_name": "T232 Хлопок"
         }
       ],
       "total": 14,
@@ -859,9 +959,16 @@ Environment:
 - Isolated database `agrosat_h0a_task232`, created empty and upgraded to `0016_operational_command_center` with this branch's Alembic scripts.
 - `AGROSAT_TEST_DATABASE_URL` and `DATABASE_URL` both point at it for the PostgreSQL lane only; the harness refuses any name not starting with `agrosat_h0a`.
 
-The script `C:\AgroSat_backups\TASK_232_H1_MANAGEMENT_ANALYTICS_EVIDENCE_20260926\scripts\final_regression.sh` mirrors `.github/workflows/ci.yml` and `postgres.yml`. It ran first on `82fdf5a` and again, finally, on `9a920a3`. Logs and JUnit XML are under `evidence\code_82fdf5a` and `evidence\code_9a920a3`.
+Focused corrected cases first: `python -m pytest tests/test_task232_management_analytics_postgres.py -k "OverdueTests or CropSemanticsTests"` gave **4 passed**. Then the whole TASK_232 PostgreSQL suite: **29 passed**. Contract and authorization-matrix suites: **40 passed**.
 
-Final run on code commit `9a920a3` (the docs-only commit that follows changes no code):
+The script `C:\AgroSat_backups\TASK_232_H1_MANAGEMENT_ANALYTICS_EVIDENCE_20260926\scripts\final_regression.sh` mirrors `.github/workflows/ci.yml` and `postgres.yml`. Its runs:
+- `82fdf5a`: one matrix failure, fixed in `9a920a3`
+- `9a920a3`: green
+- `c9be969`: final
+
+Logs are under `evidence\code_<sha>`.
+
+Final run on code commit `c9be969` (`c9be9696b9990b4dba943dd1d1f0c930bb46bce1`); the docs-only commit that follows changes no code:
 
 | lane | command (from `C:\AgroSat_worktrees\task_232`) | result |
 |---|---|---|
@@ -869,11 +976,11 @@ Final run on code commit `9a920a3` (the docs-only commit that follows changes no
 | guard: Alembic heads | `cd backend && python -m alembic heads` | `0016_operational_command_center (head)`, single head |
 | guard: startup safety | `python -m pytest tests/test_web_startup_safety.py -q -p no:cacheprovider` | 6 passed |
 | guard: retired endpoints | `python -m pytest -q -p no:cacheprovider tests/test_field_inspections.py tests/test_satellite_write_safety.py tests/test_task209_operational_closure_backend.py tests/test_task225_contracts.py` | 137 passed |
-| backend (no database URL) | `cd backend && python -m pytest tests -q -p no:cacheprovider` | **1444 passed, 0 failed, 144 skipped** |
+| backend (no database URL) | `cd backend && python -m pytest tests -q -p no:cacheprovider` | **1448 passed, 0 failed, 146 skipped** (1594 total) |
 | ops: PowerShell parse | parser over `ops/**/*.ps1` (as in `ci.yml`) | 24 parsed, 0 failed |
 | ops tests | `python -m pytest ops/tests -q -p no:cacheprovider` | 117 passed |
 | PostgreSQL: current revision | `python -m alembic current` on `agrosat_h0a_task232` | `0016_operational_command_center (head)` |
-| PostgreSQL, one process per file | `python -m pytest <file> -q -p no:cacheprovider` for every `tests/*postgres*.py` | 143 passed, 0 failed (table below) |
+| PostgreSQL, one process per file | `python -m pytest <file> -q -p no:cacheprovider` for every `tests/*postgres*.py` | **145 passed, 0 failed** (table below) |
 
 | PostgreSQL suite | result |
 |---|---|
@@ -885,20 +992,19 @@ Final run on code commit `9a920a3` (the docs-only commit that follows changes no
 | `test_task225_signal_to_inspection_postgres` | 14 passed |
 | `test_task228_schema_readiness_postgres` | 14 passed |
 | `test_task229_collector_finalization_postgres` | 4 passed |
-| **`test_task232_management_analytics_postgres` (new)** | **27 passed** |
+| **`test_task232_management_analytics_postgres` (new)** | **29 passed** |
 
 Comparison with the same code before this task: TASK_230's recorded run on `126b62e` had 1418 passed, 0 failed and 117 skipped in the backend lane, 117 passed in the ops lane, and 116 passed in the PostgreSQL lane.
-- The backend lane grew by exactly 53 tests: the 26 new contract tests pass, and the 27 new PostgreSQL tests skip without `AGROSAT_TEST_DATABASE_URL`.
-- The skip lists differ by exactly those 27 tests (`evidence\base_126b62e_skips.txt` vs `evidence\code_9a920a3_skips.txt`).
+- The backend lane grew by exactly 59 tests: the 30 new contract tests pass, and the 29 new PostgreSQL tests skip without `AGROSAT_TEST_DATABASE_URL`.
+- The skip lists differ by exactly those 29 tests (`evidence\base_126b62e_skips.txt` vs `evidence\code_c9be969_skips.txt`).
 - No baseline test changed outcome.
-- The first full run, on `82fdf5a`, found one failure: `test_task209_authorization_matrix::test_matrix_covers_every_openapi_operation_exactly`. The repository requires every OpenAPI operation to be classified. `9a920a3` adds the endpoint to the matrix (admin and manager, enterprise filter, cross-tenant 404; 146 operations).
 
 New suites:
 
 | suite | tests | covers |
 |---|---|---|
-| `test_task232_management_analytics_postgres.py` | 27 | Contract: deterministic zero snapshot, read-only (table snapshots), invalid period and paging, empty past period. Lifecycle: every current canonical state once (11 states, funnel = total), windowed activity, outcomes, completion, sample counts, closed/rejected/cancelled not current, satellite signal → inspection, candidates and alerts counted once. Exclusions: TASK_209 legacy rows, missing / quality-blocked / inconclusive never outcomes, pending verification not terminal. Tenancy: server scope wins, filters only narrow, foreign = missing (404 bodies), roles, current crop season. Aggregation: enterprise, crop, field (paged) and period rows reconcile with totals; parity with `/api/operational-center/summary`; work/evidence/verification rows do not multiply; reopened cycles per cycle. Time: half-open local boundaries and the UTC trap, local week and month buckets, event anchors, open cycles, median/p90/sample count, overdue per stage. Query budget: statement count `(1, 2)` constant with growing data; executed SQL never names the TASK_209 tables |
-| `test_task232_management_analytics_contract.py` | 26 | GET-only secured route in OpenAPI, scope and 404/403 rules, SQL scope fragments, no retired tables, no ORM loading, outcome vocabulary equals policy r3-f-v1, pinned definitions fingerprint, p50/p90 rules, rates, local calendar buckets, strict versioned schema, 422/403/404 answered before any SQL, 401 |
+| `test_task232_management_analytics_postgres.py` | 29 | Contract: zero snapshot, read-only (table snapshots), invalid parameters including a refused `crop_type_id`, empty past period. Lifecycle: every current TASK_225 state once (sum = total), windowed activity, outcomes, completion, sample counts, closed/rejected/cancelled not current, satellite signal → inspection, candidates and alerts counted once. Exclusions: TASK_209 legacy rows, missing / quality-blocked / inconclusive never outcomes, pending verification not terminal. Tenancy: server scope wins, filters only narrow, foreign = missing (404 bodies), roles. Crop semantics: current classification rule; a crop change between seasons is reported by current crop and never claimed as crop at event time. Aggregation: enterprise, current-crop, field (paged) and period rows reconcile; same-named figures equal the command center (`overdue_work`, `awaiting_satellite_verification` via `plans_pending_verification`, `reopened`, `not_improved`, `verification_blocked`, `awaiting_evidence`, `awaiting_work`, `awaiting_field_inspection`, `active_situations`); work/evidence/verification rows do not multiply; reopened cycles per cycle. Overdue: one plan with the main item on time and a secondary item late matches the command center (0 overdue cases, 1 overdue work item = the one per-item notification), and every stage follows `is_overdue`. Time: half-open local boundaries and the UTC trap, local week and month buckets, event anchors, open cycles, median/p90/sample count. Query budget: `(1, 2)` statements constant with growing data |
+| `test_task232_management_analytics_contract.py` | 30 | GET-only secured route in OpenAPI, scope and 404/403 rules, SQL scope fragments, no retired tables, no ORM loading. `overdue_cases` is the case model's `is_overdue` and H1 carries no rule of its own. No current figure reuses a command-center summary name. The crop dimension is declared current-only. Also: outcome vocabulary equals policy r3-f-v1, pinned definitions fingerprint, p50/p90 rules, rates, local calendar buckets, strict versioned schema, 422/403/404 before any SQL (including the `crop_type_id` refusal), 401 |
 
 Evidence (logs, JUnit XML, scripts, performance probes, example response): `C:\AgroSat_backups\TASK_232_H1_MANAGEMENT_ANALYTICS_EVIDENCE_20260926`.
 
@@ -906,31 +1012,31 @@ Evidence (logs, JUnit XML, scripts, performance probes, example response): `C:\A
 
 - Starting head: `0016_operational_command_center` (single head).
 - Ending head: `0016_operational_command_center` (single head). `rollback-contract` reports `PASS`, head `0016_operational_command_center`, every revision classified.
-- Migration added: no. `git diff 126b62e..HEAD -- backend/alembic backend/models` is empty.
+- Migration added: no. `git diff 126b62e..HEAD -- backend/alembic backend/models` is empty. The crop decision needed no schema change: it declares the limits of the existing data instead of inventing facts.
 
 ## Rollback, staging checks, side effects
 
 - **Rollback.** Nothing is deployed. If the branch is merged and released later, rolling back is a code rollback through the TASK_230 control plane.
   - There is no schema or data change to undo, and the endpoint writes nothing (tested: table snapshots before and after are identical).
   - Removing the two `main.py` lines disables the endpoint.
-- **What to check on staging.** Each of these calls should return 200 with `definitions_version = management_analytics_v1`:
-  - as a manager, `GET /api/management-analytics`
-  - as a manager, the same call with `enterprise_id=<another enterprise>` → 404
-  - as an admin, `?granularity=month&date_from=…&date_to=…`
+- **What to check on staging.** As a manager, call `GET /api/management-analytics` and `/api/operational-center/summary` and compare:
+  - `current.overdue_cases.total` = `overdue_work`
+  - `current.plans_pending_verification` = `awaiting_satellite_verification`
+  - `current.active_problems.total + data_unavailable.*` = `active_situations`
+  - `reopened`, `not_improved` and `verification_blocked` match
 
-  Then compare `current` with `/api/operational-center/summary` for the same user. `active_situations` should equal `active_problems.total + data_unavailable.*`, and `reopened`, `not_improved` and `verification_blocked` should match.
+  Then check the error paths: `crop_type_id=1` → 422, and `enterprise_id=<another enterprise>` → 404.
 - **Side effects.** The endpoint is read-only: it takes no row locks and writes nothing. The DB load of one call is about one Operational Center summary plus the H1 CTEs. The only shared code change is a router registration. `/api/executive`, the Operational Center and the TASK_217/220 workflows are unchanged.
 
-## Residual gaps
+## Residual gaps (non-blocking)
 
-1. **Cost of the shared case model at 10× volume.**
-   - At 3,000 fields and 9,000 open problems, the admin-global snapshot takes about 3 s. About 2.6 s of that is the TASK_221 case model, which already costs the same in the deployed `/api/operational-center/summary`.
-   - An index leading with `agronomy_plans.inspection_id` measurably helps both endpoints.
-   - If growth approaches that volume, it belongs in one isolated migration task. It is not needed at current or realistic volume (about 0.2 s admin, 0.07 s manager).
-2. **Pre-existing defect found (not fixed; outside scope).**
-   - `POST /api/anomaly-inspections/{id}/cancel` on an unassigned `new` canonical inspection violates `ck_field_inspections_assignment_state` (`source_kind='legacy' OR status='new' OR assigned_to_id IS NOT NULL`). The CheckViolation is unhandled, so the request would answer 500. It was observed while building this suite. The suite now documents the constraint and cancels an assigned inspection instead.
+1. **Optional index for 10× scale.**
+   - At the 3,000-field synthetic volume the admin-global snapshot is dominated by the TASK_221 case model, which already costs the same in the deployed `/api/operational-center/summary`.
+   - An index leading with `agronomy_plans.inspection_id` measurably helps both endpoints (probe in the isolated perf database only, see Query design).
+   - It belongs in one isolated migration task if growth approaches that volume; it is not needed at current or realistic volume.
+2. **Pre-existing defect outside TASK_232.**
+   - `POST /api/anomaly-inspections/{id}/cancel` on an unassigned `new` canonical inspection violates `ck_field_inspections_assignment_state` (`source_kind='legacy' OR status='new' OR assigned_to_id IS NOT NULL`). The CheckViolation is unhandled, so the request would answer 500. It was observed while building this suite, which now documents it and cancels an assigned inspection instead.
    - The consequence is that such inspections cannot be cancelled, so they stay in `needs_inspection`.
-3. **Crop attribution is current-season (type-1).** A period in an earlier season is attributed to each field's current crop. Historical rotation is not reconstructed; `crop_seasons.season_year` alone cannot place seasons that span a year boundary.
-4. **Alert-origin signal time is unsupported.** `alerts.triggered_at` has no time zone.
-5. **Overdue differs from the command center in one edge case.** The Operational Center's per-case `is_overdue` uses only the primary work item, while H1 uses the TASK_220 any-item rule (see Overdue).
-6. **The API is ready for a later frontend task.** No frontend consumes it yet.
+3. **Alert-origin signal time is unsupported.** `alerts.triggered_at` is `timestamp without time zone`, so the time from an alert to its inspection cannot be measured safely.
+
+The API is ready for a later frontend task.
