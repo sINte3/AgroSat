@@ -23,7 +23,7 @@ ENDPOINT = "/api/management-analytics"
 # Pinned together with DEFINITIONS_VERSION. If this fails, a metric definition,
 # the Operational Center case model or the remediation projection changed:
 # review the change, bump definitions_version when meaning changed, then re-pin.
-PINNED_DEFINITIONS = ("management_analytics_v1", "691a9ccb2fa939de87a5b910a8ff24a3054560201af3b6995fb3c508062a9776")
+PINNED_DEFINITIONS = ("management_analytics_v1", "91bca1b614782a938742b28a71db41d21a9a0fc916a942479f4964540211ea05")
 
 
 def user(role="manager", enterprise_id=5, user_id=7):
@@ -74,9 +74,9 @@ def test_router_is_registered_read_only_and_authenticated():
 def test_scope_is_server_side_and_filters_only_narrow():
     assert service.resolve_scope(user("admin", None)).authorization == "global"
     assert service.resolve_scope(user("admin", None), enterprise_id=9).enterprise_id == 9
-    manager = service.resolve_scope(user(), field_id=3, crop_type_id=4)
-    assert (manager.authorization, manager.enterprise_id, manager.field_id, manager.crop_type_id) == (
-        "tenant", 5, 3, 4)
+    manager = service.resolve_scope(user(), field_id=3, current_crop_type_id=4)
+    assert (manager.authorization, manager.enterprise_id, manager.field_id,
+            manager.current_crop_type_id) == ("tenant", 5, 3, 4)
     assert service.resolve_scope(user(), enterprise_id=5).enterprise_id == 5
     with pytest.raises(HTTPException) as caught:
         service.resolve_scope(user(), enterprise_id=6)
@@ -94,9 +94,10 @@ def test_statement_scope_fragments_come_from_the_server_scope():
     admin = service.statement_for(service.resolve_scope(user("admin", None)))
     assert ":scope_enterprise_id" not in admin
     assert "c.root_source='external' AND true" in admin
-    narrowed = service.statement_for(service.resolve_scope(user("admin", None), field_id=3, crop_type_id=4))
+    narrowed = service.statement_for(
+        service.resolve_scope(user("admin", None), field_id=3, current_crop_type_id=4))
     assert "f.id=:field_id" in narrowed and "c.field_id=:field_id" in narrowed
-    assert "crop.crop_type_id=:crop_type_id" in narrowed
+    assert "crop.crop_type_id=:current_crop_type_id" in narrowed
     assert "c.root_source='external' AND false" in narrowed
     for statement in (manager, admin, narrowed):
         assert "@" not in statement
@@ -111,6 +112,42 @@ def test_statement_reads_only_the_canonical_lifecycles():
         assert canonical in statement
     assert remediation_status.inspection_status_sql("i", "p") in statement
     assert service.EXCLUDED_LEGACY_SOURCES == ("corrective_actions", "action_verification_requests")
+
+
+def test_overdue_cases_are_the_operational_center_flag_not_a_second_rule():
+    from services.operational_center import CASES_CTE
+
+    # The case model defines is_overdue once; H1 only counts it.
+    assert CASES_CTE.count("AS is_overdue") == 1
+    assert service.CURRENT_COLUMNS["overdue_cases"] == "is_overdue"
+    assert service.BREAKDOWN_CURRENT_COLUMNS["overdue_cases"] == "is_overdue"
+    template = service.STATEMENT_TEMPLATE[len(CASES_CTE):]
+    assert "c.is_overdue" in template
+    for own_rule in ("due_date <", ":as_of_date", "inspection_overdue", "plan_overdue"):
+        assert own_rule not in template
+    # Late work items are a different unit with their own explicit name.
+    assert "AS overdue_work_items" in template
+
+
+def test_no_current_figure_reuses_an_operational_center_summary_name():
+    from schemas.management_analytics import CurrentState, RemediationStatusCounts
+    from schemas.operational_center import SummaryResponse
+
+    assert set(CurrentState.model_fields) & set(SummaryResponse.model_fields) == {"as_of"}
+    # State counts are keyed by the TASK_225 values themselves, inside by_remediation_status.
+    assert set(RemediationStatusCounts.model_fields) == set(service.ACTIVE_STATES)
+
+
+def test_crop_is_declared_a_current_classification():
+    from schemas.management_analytics import Breakdowns, CropClassification, FieldBreakdown
+
+    assert CropClassification.model_fields["historical_crop_at_event"].annotation.__args__ == (False,)
+    assert "current_crops" in Breakdowns.model_fields and "crops" not in Breakdowns.model_fields
+    assert {"current_crop_type_id", "current_crop_name"} <= set(FieldBreakdown.model_fields)
+    assert "crop_type_id" not in FieldBreakdown.model_fields
+    classification = service._crop_classification(service.datetime(2026, 9, 26, tzinfo=service.TASHKENT))
+    assert (classification["basis"], classification["reference_year"],
+            classification["historical_crop_at_event"]) == ("current_crop_season", 2026, False)
 
 
 def test_module_uses_explicit_sql_and_no_orm_loading():
@@ -181,11 +218,19 @@ def test_response_contract_is_strict_and_versioned():
     {"date_from": "2025-01-01", "date_to": "2026-01-02"},
     {"granularity": "quarter"},
     {"field_limit": 0}, {"field_limit": 201}, {"field_offset": -1}, {"field_offset": 10001},
-    {"enterprise_id": 0}, {"field_id": -1}, {"crop_type_id": 0}, {"date_to": "2026-02-30"},
+    {"enterprise_id": 0}, {"field_id": -1}, {"current_crop_type_id": 0}, {"date_to": "2026-02-30"},
 ])
 def test_invalid_requests_are_refused_before_any_sql(client_as, params):
     response = client_as(user()).get(ENDPOINT, params=params)
     assert response.status_code == 422, response.text
+
+
+def test_ambiguous_crop_type_id_is_refused_not_ignored(client_as):
+    response = client_as(user()).get(ENDPOINT, params={"crop_type_id": 4})
+    assert response.status_code == 422
+    assert "current_crop_type_id" in response.json()["detail"]
+    assert "crop_type_id" not in {parameter["name"] for parameter in
+                                  app.openapi()["paths"][ENDPOINT]["get"]["parameters"]}
 
 
 @pytest.mark.parametrize("role", ["agronomist", "viewer"])

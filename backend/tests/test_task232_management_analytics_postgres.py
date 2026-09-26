@@ -9,7 +9,7 @@ overridden. See tests/task232_support.py for the harness.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import event
 
@@ -21,9 +21,8 @@ ACTIVE_STATES = (
     "plan_active", "work_active", "awaiting_satellite_verification", "verification_blocked",
     "improved_awaiting_closure", "not_improved", "reopened",
 )
-PERIOD_KEYS = ("inspections_opened", "resolved_cycles", "improved", "unchanged", "worsened",
-               "unverified", "reopened")
 MARCH_FROM, MARCH_TO = "2026-03-01", "2026-03-31"
+NO_OVERDUE = {"total": 0, "inspection_stage": 0, "work_stage": 0}
 
 
 def leaves(value, path=""):
@@ -38,16 +37,13 @@ def leaves(value, path=""):
         yield path, value
 
 
-def funnel_total(current):
-    inspection, remediation = current["inspection_funnel"], current["remediation_funnel"]
-    return (
-        inspection["needs_inspection"]["total"] + inspection["inspection_active"]
-        + inspection["awaiting_review"] + inspection["awaiting_decision"]
-        + remediation["plan_active"]["total"] + remediation["work_active"]
-        + remediation["awaiting_satellite_verification"]["total"]
-        + remediation["verification_blocked"]["total"] + remediation["improved_awaiting_closure"]
-        + remediation["not_improved"]["total"] + remediation["reopened"]
-    )
+def state_total(value):
+    return value["total"] if isinstance(value, dict) else value
+
+
+def state_totals(current):
+    """Active cases per TASK_225 state, from current.by_remediation_status."""
+    return {state: state_total(current["by_remediation_status"][state]) for state in ACTIVE_STATES}
 
 
 class PanoramaMixin:
@@ -105,8 +101,10 @@ class ContractTests(AnalyticsFlow):
         self.assertEqual(body["timezone"], "Asia/Tashkent")
         self.assertEqual(body["scope"], {
             "role": "manager", "authorization": "tenant", "enterprise_id": self.enterprise_a,
-            "field_id": None, "crop_type_id": None,
+            "field_id": None, "current_crop_type_id": None,
         })
+        self.assertEqual(body["crop_classification"]["basis"], "current_crop_season")
+        self.assertIs(body["crop_classification"]["historical_crop_at_event"], False)
         provenance = body["provenance"]
         self.assertEqual(provenance["definitions_fingerprint"], service.DEFINITIONS_FINGERPRINT)
         self.assertEqual(provenance["lifecycle"], "task220_canonical_remediation")
@@ -146,7 +144,7 @@ class ContractTests(AnalyticsFlow):
                          (11, 50, 0, 11))
         self.assertEqual([row["enterprise_id"] for row in body["breakdowns"]["enterprises"]],
                          [self.enterprise_a])
-        self.assertEqual(body["breakdowns"]["crops"][0]["crop_type_id"], None)
+        self.assertEqual(body["breakdowns"]["current_crops"][0]["current_crop_type_id"], None)
         self.assertIn("unsupported", body["cycle_times"])
 
     def test_the_endpoint_changes_nothing(self):
@@ -167,6 +165,7 @@ class ContractTests(AnalyticsFlow):
             {"granularity": "year"},
             {"field_limit": 0}, {"field_limit": 201}, {"field_offset": -1},
             {"date_from": "not-a-date"}, {"enterprise_id": 0}, {"field_id": -3},
+            {"current_crop_type_id": 0}, {"crop_type_id": self.cotton},
         ):
             response = manager.get(ENDPOINT, params=params)
             self.assertEqual(response.status_code, 422, (params, response.text))
@@ -178,7 +177,7 @@ class ContractTests(AnalyticsFlow):
         body = self.analytics(self.manager_a, date_from="2025-01-01", date_to="2025-01-31",
                               granularity="month")
         self.assertEqual(body["current"]["active_problems"]["total"], 1)
-        self.assertEqual(body["current"]["overdue"]["inspections"], 1)
+        self.assertEqual(body["current"]["overdue_cases"], {"total": 1, "inspection_stage": 1, "work_stage": 0})
         self.assertEqual(body["period_activity"]["inspections_opened"]["total"], 0)
         self.assertEqual([row["bucket_start"] for row in body["breakdowns"]["periods"]], ["2025-01-01"])
 
@@ -194,12 +193,9 @@ class LifecycleTests(PanoramaMixin, AnalyticsFlow):
             "by_priority": {"critical": 1, "high": 0, "normal": 14, "low": 0},
             "legacy_open_inspections": 0,
         })
-        self.assertEqual(current["inspection_funnel"], {
-            "needs_inspection": {"total": 3, "inspections": 2, "candidates": 0, "alerts": 1,
-                                 "unassigned_inspections": 1},
+        self.assertEqual(current["by_remediation_status"], {
+            "needs_inspection": {"total": 3, "inspections": 2, "candidates": 0, "alerts": 1, "unassigned": 1},
             "inspection_active": 1, "awaiting_review": 1, "awaiting_decision": 1,
-        })
-        self.assertEqual(current["remediation_funnel"], {
             "plan_active": {"total": 2, "draft": 1, "approved": 1},
             "work_active": 1,
             "awaiting_satellite_verification": {"total": 1, "pending_data": 1, "too_early": 0},
@@ -209,11 +205,12 @@ class LifecycleTests(PanoramaMixin, AnalyticsFlow):
             "not_improved": {"total": 2, "unchanged": 1, "worsened": 1},
             "reopened": 1,
         })
-        self.assertEqual(funnel_total(current), current["active_problems"]["total"])
-        self.assertEqual(current["work_items"],
-                         {"active": 3, "planned": 1, "in_progress": 2, "unassigned": 0, "overdue": 0})
-        self.assertEqual(current["overdue"],
-                         {"cases": 0, "inspections": 0, "plans_with_overdue_work": 0, "work_items": 0})
+        self.assertEqual(sum(state_totals(current).values()), current["active_problems"]["total"])
+        # Every case whose plan is pending_verification, whatever its verification status.
+        self.assertEqual(current["plans_pending_verification"], 5)
+        self.assertEqual(current["work_items"], {"active": 3, "planned": 1, "in_progress": 2,
+                                                 "unassigned": 0, "overdue_work_items": 0})
+        self.assertEqual(current["overdue_cases"], NO_OVERDUE)
         self.assertEqual(current["data_unavailable"], {"freshness_cases": 0, "external_cases": 0})
 
     def test_windowed_facts_outcomes_completion_and_durations(self):
@@ -233,7 +230,7 @@ class LifecycleTests(PanoramaMixin, AnalyticsFlow):
                            "quality_blocked": 0, "provider_degraded": 0, "inconclusive": 0},
             "closed": {"total": 1, "improved": 1, "without_improvement": 0},
             "returned_for_rework": 1,
-            "reopened": {"total": 1, "after_closure": 0, "after_verification": 1},
+            "reopen_events": {"total": 1, "after_closure": 0, "after_verification": 1},
         })
         completion = body["completion"]
         self.assertEqual({k: completion["work_completion"][k] for k in
@@ -290,9 +287,8 @@ class LifecycleTests(PanoramaMixin, AnalyticsFlow):
         body = self.analytics(self.manager_a)
         self.assertEqual(body["period_activity"]["anomaly_candidates_detected"], 1)
         self.assertEqual(body["period_activity"]["inspections_opened"]["pixel_ndvi"], 1)
-        self.assertEqual(body["current"]["inspection_funnel"]["needs_inspection"],
-                         {"total": 1, "inspections": 1, "candidates": 0, "alerts": 0,
-                          "unassigned_inspections": 1})
+        self.assertEqual(body["current"]["by_remediation_status"]["needs_inspection"],
+                         {"total": 1, "inspections": 1, "candidates": 0, "alerts": 0, "unassigned": 1})
         signal = body["cycle_times"]["metrics"]["signal_to_inspection_opened"]
         self.assertEqual((signal["sample_count"], signal["status"]), (1, "measured"))
         self.assertIsNotNone(inspection_id)
@@ -305,9 +301,8 @@ class LifecycleTests(PanoramaMixin, AnalyticsFlow):
         self.seed_persistent_drop(second)
         self.run_monitoring_cycle()  # two signals trip the spike guard: both stay NEW candidates
         alert = self.alert(self.quiet[0])
-        needs = self.analytics(self.manager_a)["current"]["inspection_funnel"]["needs_inspection"]
-        self.assertEqual(needs, {"total": 3, "inspections": 0, "candidates": 2, "alerts": 1,
-                                 "unassigned_inspections": 0})
+        needs = self.analytics(self.manager_a)["current"]["by_remediation_status"]["needs_inspection"]
+        self.assertEqual(needs, {"total": 3, "inspections": 0, "candidates": 2, "alerts": 1, "unassigned": 0})
         # Opening the canonical inspection from the alert replaces the alert case.
         response = self.client(self.manager_a).post("/api/anomaly-inspections", json={
             "field_id": self.quiet[0], "source_kind": "alert", "source_alert_id": alert,
@@ -316,16 +311,15 @@ class LifecycleTests(PanoramaMixin, AnalyticsFlow):
         }, headers={"Idempotency-Key": self.key("alert-case")})
         self.ok(response, 201)
         body = self.analytics(self.manager_a)
-        self.assertEqual(body["current"]["inspection_funnel"]["needs_inspection"],
-                         {"total": 3, "inspections": 1, "candidates": 2, "alerts": 0,
-                          "unassigned_inspections": 1})
+        self.assertEqual(body["current"]["by_remediation_status"]["needs_inspection"],
+                         {"total": 3, "inspections": 1, "candidates": 2, "alerts": 0, "unassigned": 1})
         self.assertEqual(sum(body["current"]["active_problems"]["by_priority"].values()), 3)
         self.assertEqual(body["period_activity"]["inspections_opened"]["alert"], 1)
 
 
 class ExclusionTests(AnalyticsFlow):
 
-    def _legacy_inspection(self, field_id, status, *, due_date=None, timestamp=""):
+    def _legacy_inspection(self, field_id, status, *, due_date=None):
         columns = {"completed": ", completed_at", "in_progress": ", started_at"}.get(status, "")
         values = ", now()" if columns else ""
         return self.scalar(
@@ -381,13 +375,15 @@ class ExclusionTests(AnalyticsFlow):
         # (the TASK_225 projection): needs_inspection and inspection_active.
         self.assertEqual(current["active_problems"]["total"], 2)
         self.assertEqual(current["active_problems"]["legacy_open_inspections"], 2)
-        self.assertEqual((current["inspection_funnel"]["needs_inspection"]["total"],
-                          current["inspection_funnel"]["inspection_active"]), (1, 1))
-        # Legacy date-only deadline: overdue only after the local due day ended.
-        self.assertEqual(current["overdue"], {"cases": 1, "inspections": 1,
-                                              "plans_with_overdue_work": 0, "work_items": 0})
+        self.assertEqual((current["by_remediation_status"]["needs_inspection"]["total"],
+                          current["by_remediation_status"]["inspection_active"]), (1, 1))
+        # Overdue is the Operational Center flag, date-only legacy deadlines included:
+        # COALESCE(due_at, due_date) < as_of makes a due_date overdue from its first instant.
+        _, summary = self.command_center(self.manager_a)
+        self.assertEqual(current["overdue_cases"], {"total": 2, "inspection_stage": 2, "work_stage": 0})
+        self.assertEqual(current["overdue_cases"]["total"], summary["overdue_work"])
         self.assertEqual(current["work_items"]["active"], 0)
-        self.assertEqual(current["remediation_funnel"]["reopened"], 0)
+        self.assertEqual(current["by_remediation_status"]["reopened"], 0)
         # No legacy action, closure, reopen or "improved" verification reaches H1.
         for section in ("period_activity", "outcomes"):
             self.assertEqual([item for item in leaves(body[section])
@@ -414,11 +410,12 @@ class ExclusionTests(AnalyticsFlow):
         self.assertEqual([self.plan(plan_id)["verification_status"] for plan_id in (missing, blocked, zonal)],
                          ["PENDING_DATA", "QUALITY_BLOCKED", "INCONCLUSIVE"])
         before = self.analytics(self.manager_a)
-        remediation = before["current"]["remediation_funnel"]
-        self.assertEqual(remediation["awaiting_satellite_verification"]["pending_data"], 1)
-        self.assertEqual((remediation["verification_blocked"]["quality_blocked"],
-                          remediation["verification_blocked"]["inconclusive"]), (1, 1))
-        self.assertEqual(remediation["improved_awaiting_closure"], 0)
+        states = before["current"]["by_remediation_status"]
+        self.assertEqual(states["awaiting_satellite_verification"]["pending_data"], 1)
+        self.assertEqual((states["verification_blocked"]["quality_blocked"],
+                          states["verification_blocked"]["inconclusive"]), (1, 1))
+        self.assertEqual(states["improved_awaiting_closure"], 0)
+        self.assertEqual(before["current"]["plans_pending_verification"], 3)
         self.assertEqual(before["outcomes"]["resolved_cycles"], 0)
         self.assertEqual(before["completion"]["verification_completion"]["numerator"], 0)
         self.assertEqual(before["cycle_times"]["metrics"]["work_completed_to_verified"]["sample_count"], 0)
@@ -439,7 +436,7 @@ class ExclusionTests(AnalyticsFlow):
         self.post(self.field_a, 0.80)
         self.reconcile()
         body = self.analytics(self.manager_a)
-        self.assertEqual(body["current"]["remediation_funnel"]["improved_awaiting_closure"], 1)
+        self.assertEqual(body["current"]["by_remediation_status"]["improved_awaiting_closure"], 1)
         self.assertEqual(body["outcomes"]["resolved_cycles"], 0)
         self.assertEqual(body["outcomes"]["verified"]["total"], 0)
         # The provisional verification is visible in the completion cohort only.
@@ -462,6 +459,7 @@ class TenancyTests(AnalyticsFlow):
         self.assertEqual({row["enterprise_id"] for row in mine["breakdowns"]["enterprises"]},
                          {self.enterprise_a})
         self.assertNotIn(self.field_b, self.fields_by_id(mine))
+
         def untimed(body):
             body = {key: value for key, value in body.items() if key != "generated_at"}
             body["current"] = {key: value for key, value in body["current"].items() if key != "as_of"}
@@ -481,7 +479,7 @@ class TenancyTests(AnalyticsFlow):
                          (1, self.enterprise_b))
         one_field = self.analytics(self.manager_a, field_id=self.quiet[0])
         self.assertEqual((one_field["current"]["active_problems"]["total"],
-                          one_field["current"]["overdue"]["inspections"],
+                          one_field["current"]["overdue_cases"]["inspection_stage"],
                           one_field["coverage"]["fields_in_scope"]), (1, 1, 1))
 
     def test_cross_tenant_targets_are_indistinguishable_from_missing_ones(self):
@@ -499,7 +497,7 @@ class TenancyTests(AnalyticsFlow):
         self.assertEqual(admin.get(ENDPOINT, params={"enterprise_id": 987654}).status_code, 404)
         crossed = admin.get(ENDPOINT, params={"enterprise_id": self.enterprise_a, "field_id": self.field_b})
         self.assertEqual((crossed.status_code, crossed.json()), (404, {"detail": "Field not found"}))
-        crop = admin.get(ENDPOINT, params={"crop_type_id": 987654})
+        crop = admin.get(ENDPOINT, params={"current_crop_type_id": 987654})
         self.assertEqual((crop.status_code, crop.json()), (404, {"detail": "Crop type not found"}))
 
     def test_only_management_roles_are_authorized(self):
@@ -515,7 +513,10 @@ class TenancyTests(AnalyticsFlow):
         anonymous = TestClient(app).get(ENDPOINT)
         self.assertEqual(anonymous.status_code, 401, anonymous.text)
 
-    def test_crop_filter_uses_the_current_crop_season(self):
+
+class CropSemanticsTests(AnalyticsFlow):
+
+    def test_current_crop_filter_and_grouping_use_the_current_season(self):
         q = self.quiet
         self.season(self.field_a, self.cotton)
         self.season(q[0], self.wheat)
@@ -526,18 +527,62 @@ class TenancyTests(AnalyticsFlow):
         self.season(q[3], self.cotton, self.year + 1)                  # a future season is ignored
         for field_id in (self.field_a, q[0], q[1], q[2]):
             self.open_manual(field_id)
-        cotton = self.analytics(self.manager_a, crop_type_id=self.cotton)
-        self.assertEqual((cotton["current"]["active_problems"]["total"], cotton["coverage"]["fields_in_scope"]),
-                         (2, 2))
+        cotton = self.analytics(self.manager_a, current_crop_type_id=self.cotton)
+        self.assertEqual((cotton["current"]["active_problems"]["total"], cotton["coverage"]["fields_in_scope"],
+                          cotton["scope"]["current_crop_type_id"]), (2, 2, self.cotton))
         self.assertEqual(set(self.fields_by_id(cotton)), {self.field_a, q[1]})
-        wheat = self.analytics(self.manager_a, crop_type_id=self.wheat)
+        wheat = self.analytics(self.manager_a, current_crop_type_id=self.wheat)
         self.assertEqual((wheat["current"]["active_problems"]["total"], wheat["coverage"]["fields_in_scope"]),
                          (2, 3))
-        crops = {row["crop_type_id"]: row for row in self.analytics(self.manager_a)["breakdowns"]["crops"]}
+        crops = {row["current_crop_type_id"]: row
+                 for row in self.analytics(self.manager_a)["breakdowns"]["current_crops"]}
         self.assertEqual({key: (row["monitored_fields"], row["current"]["active_problems"])
                           for key, row in crops.items()},
                          {self.cotton: (2, 2), self.wheat: (3, 2), None: (6, 0)})
-        self.assertEqual(crops[None]["crop_name"], None)
+        self.assertEqual(crops[None]["current_crop_name"], None)
+
+    def test_crop_is_a_current_classification_never_crop_at_event_time(self):
+        """A field that grew cotton last season and wheat now: history is not attributed to cotton."""
+        last_year = self.year - 1
+        self.season(self.field_a, self.cotton, last_year)
+        self.season(self.field_a, self.wheat)
+        self.seed_quiet_history(self.field_a)
+        plan_id = self.run_plan(self.confirmed_case(self.field_a))
+        self.post(self.field_a, 0.80)
+        self.reconcile()
+        self.resolve(plan_id, "close")
+        during_cotton = datetime(last_year, 8, 15, 12, 0, tzinfo=TASHKENT)
+        self.sql("UPDATE agronomy_events SET occurred_at=:at WHERE plan_id=:id AND event_type='close'",
+                 {"at": during_cotton, "id": plan_id})
+        self.sql("UPDATE agronomy_plans SET closed_at=:at WHERE id=:id", {"at": during_cotton, "id": plan_id})
+        august = {"date_from": f"{last_year}-08-01", "date_to": f"{last_year}-08-31"}
+
+        body = self.analytics(self.manager_a, **august)
+        self.assertEqual(body["outcomes"]["verified"]["improved"], 1)
+        self.assertEqual(body["crop_classification"], {
+            "basis": "current_crop_season", "reference_year": self.year,
+            "rule": ("each field is classified once by its latest crop_seasons row with "
+                     "season_year <= reference_year (the Operational Center rule)"),
+            "historical_crop_at_event": False,
+        })
+        self.assertNotIn("crops", body["breakdowns"])
+        self.assertNotIn("crop_type_id", body["scope"])
+        rows = {row["current_crop_type_id"]: row for row in body["breakdowns"]["current_crops"]}
+        # Last August's closure is reported under the field's CURRENT crop, and never as cotton.
+        self.assertEqual((rows[self.wheat]["current_crop_name"], rows[self.wheat]["period"]["improved"]),
+                         ("T232 Пшеница", 1))
+        self.assertNotIn(self.cotton, rows)
+        field_row = self.fields_by_id(body)[self.field_a]
+        self.assertEqual((field_row["current_crop_type_id"], field_row["period"]["improved"]), (self.wheat, 1))
+        # Narrowing by last season's crop finds nothing: no historical attribution is claimed.
+        cotton = self.analytics(self.manager_a, current_crop_type_id=self.cotton, **august)
+        self.assertEqual((cotton["coverage"]["fields_in_scope"], cotton["outcomes"]["resolved_cycles"]), (0, 0))
+        self.assertEqual(self.analytics(self.manager_a, current_crop_type_id=self.wheat,
+                                        **august)["outcomes"]["resolved_cycles"], 1)
+        # The ambiguous historical-looking parameter is refused, never silently ignored.
+        refused = self.client(self.manager_a).get(ENDPOINT, params={"crop_type_id": self.cotton, **august})
+        self.assertEqual(refused.status_code, 422, refused.text)
+        self.assertIn("current_crop_type_id", refused.json()["detail"])
 
 
 class AggregationTests(PanoramaMixin, AnalyticsFlow):
@@ -545,25 +590,14 @@ class AggregationTests(PanoramaMixin, AnalyticsFlow):
     def assert_reconciles(self, body, rows, label):
         current, period = body["current"], body["period_activity"]
         outcomes = body["outcomes"]
-        totals = {
-            "active_problems": current["active_problems"]["total"],
-            "needs_inspection": current["inspection_funnel"]["needs_inspection"]["total"],
-            "inspection_active": current["inspection_funnel"]["inspection_active"],
-            "awaiting_review": current["inspection_funnel"]["awaiting_review"],
-            "awaiting_decision": current["inspection_funnel"]["awaiting_decision"],
-            "plan_active": current["remediation_funnel"]["plan_active"]["total"],
-            "work_active": current["remediation_funnel"]["work_active"],
-            "awaiting_satellite_verification":
-                current["remediation_funnel"]["awaiting_satellite_verification"]["total"],
-            "verification_blocked": current["remediation_funnel"]["verification_blocked"]["total"],
-            "improved_awaiting_closure": current["remediation_funnel"]["improved_awaiting_closure"],
-            "not_improved": current["remediation_funnel"]["not_improved"]["total"],
-            "reopened": current["remediation_funnel"]["reopened"],
-            "overdue_cases": current["overdue"]["cases"],
-            "overdue_work_items": current["overdue"]["work_items"],
-        }
+        totals = {"active_problems": current["active_problems"]["total"],
+                  "overdue_cases": current["overdue_cases"]["total"],
+                  "overdue_work_items": current["work_items"]["overdue_work_items"]}
         for key, expected in totals.items():
             self.assertEqual(sum(row["current"][key] for row in rows), expected, (label, key))
+        for state, expected in state_totals(current).items():
+            self.assertEqual(sum(row["current"]["by_remediation_status"][state] for row in rows),
+                             expected, (label, state))
         expected_period = {
             "inspections_opened": period["inspections_opened"]["total"],
             "resolved_cycles": outcomes["resolved_cycles"],
@@ -571,7 +605,7 @@ class AggregationTests(PanoramaMixin, AnalyticsFlow):
             "unchanged": outcomes["verified"]["unchanged"],
             "worsened": outcomes["verified"]["worsened"],
             "unverified": outcomes["unverified"]["total"],
-            "reopened": outcomes["reopened"]["total"],
+            "reopen_events": outcomes["reopen_events"]["total"],
         }
         for key, expected in expected_period.items():
             self.assertEqual(sum(row["period"][key] for row in rows), expected, (label, key))
@@ -579,14 +613,15 @@ class AggregationTests(PanoramaMixin, AnalyticsFlow):
 
     def test_totals_reconcile_with_every_breakdown(self):
         self.build_panorama()
-        self.open_manual(self.field_b, manager=self.manager_b)
+        self.open_manual(self.field_b, manager=self.manager_b, due_in=-timedelta(hours=1))
         self.season(self.quiet[0], self.cotton)
         self.season(self.quiet[8], self.wheat)
         body = self.analytics(self.admin, field_limit=200)
         breakdowns = body["breakdowns"]
         self.assertEqual(len(breakdowns["enterprises"]), 2)
+        self.assertEqual(body["current"]["overdue_cases"]["total"], 1)
         self.assert_reconciles(body, breakdowns["enterprises"], "enterprise")
-        self.assert_reconciles(body, breakdowns["crops"], "crop")
+        self.assert_reconciles(body, breakdowns["current_crops"], "current_crop")
         self.assertEqual(breakdowns["fields"]["total"], len(breakdowns["fields"]["items"]))
         self.assert_reconciles(body, breakdowns["fields"]["items"], "field")
         buckets = breakdowns["periods"]
@@ -601,7 +636,8 @@ class AggregationTests(PanoramaMixin, AnalyticsFlow):
             "resolved_cycles": outcomes["resolved_cycles"], "improved": outcomes["verified"]["improved"],
             "unchanged": outcomes["verified"]["unchanged"], "worsened": outcomes["verified"]["worsened"],
             "unverified": outcomes["unverified"]["total"], "closed": outcomes["closed"]["total"],
-            "returned_for_rework": outcomes["returned_for_rework"], "reopened": outcomes["reopened"]["total"],
+            "returned_for_rework": outcomes["returned_for_rework"],
+            "reopen_events": outcomes["reopen_events"]["total"],
         }.items():
             self.assertEqual(sum(row[key] for row in buckets), expected, key)
         # Paging the field breakdown covers every field exactly once.
@@ -614,33 +650,35 @@ class AggregationTests(PanoramaMixin, AnalyticsFlow):
         first = breakdowns["fields"]["items"][0]
         self.assertGreaterEqual(first["current"]["active_problems"], 1)
 
-    def test_current_state_matches_the_operational_center(self):
-        from services import operational_center
-
+    def test_same_named_figures_equal_the_operational_center(self):
         self.build_panorama()
-        body = self.analytics(self.manager_a)
-        current = body["current"]
-        summary = operational_center.summary(self.session(), self.manager_a, {})
+        self.open_manual(self.quiet[2], due_in=-timedelta(hours=1))
+        current = self.analytics(self.manager_a)["current"]
+        _, summary = self.command_center(self.manager_a)
+        states = current["by_remediation_status"]
         data = current["data_unavailable"]
         self.assertEqual(summary["active_situations"],
                          current["active_problems"]["total"] + data["freshness_cases"] + data["external_cases"])
-        remediation = current["remediation_funnel"]
-        self.assertEqual(summary["reopened"], remediation["reopened"])
-        self.assertEqual(summary["not_improved"], remediation["not_improved"]["total"])
-        self.assertEqual(summary["verification_blocked"], remediation["verification_blocked"]["total"])
-        self.assertEqual(summary["awaiting_evidence"], remediation["work_active"])
-        self.assertEqual(summary["awaiting_satellite_verification"],
-                         remediation["awaiting_satellite_verification"]["total"]
-                         + remediation["verification_blocked"]["total"]
-                         + remediation["improved_awaiting_closure"] + remediation["not_improved"]["total"])
-        funnel = current["inspection_funnel"]
+        self.assertEqual(summary["overdue_work"], current["overdue_cases"]["total"])
+        self.assertEqual(current["overdue_cases"]["total"], 1)
+        self.assertEqual(summary["reopened"], states["reopened"])
+        self.assertEqual(summary["not_improved"], states["not_improved"]["total"])
+        self.assertEqual(summary["verification_blocked"], states["verification_blocked"]["total"])
+        self.assertEqual(summary["awaiting_evidence"], states["work_active"])
+        # The command center's awaiting_satellite_verification tile is every pending_verification
+        # case; H1 names that figure plans_pending_verification. The TASK_225 state of the same
+        # name (PENDING_DATA or TOO_EARLY only) is reported inside by_remediation_status.
+        self.assertEqual(summary["awaiting_satellite_verification"], current["plans_pending_verification"])
+        self.assertEqual(current["plans_pending_verification"],
+                         states["awaiting_satellite_verification"]["total"]
+                         + states["verification_blocked"]["total"]
+                         + states["improved_awaiting_closure"] + states["not_improved"]["total"])
         # Alert and candidate cases are 'needs_review' there, not awaiting inspection.
         self.assertEqual(summary["awaiting_field_inspection"],
-                         funnel["needs_inspection"]["inspections"] + funnel["inspection_active"]
-                         + funnel["awaiting_review"])
-        self.assertEqual(summary["awaiting_work"], funnel["awaiting_decision"]
-                         + remediation["plan_active"]["total"] + remediation["reopened"])
-        self.assertEqual(summary["improved_or_closed_recent"], body["outcomes"]["closed"]["improved"])
+                         states["needs_inspection"]["inspections"] + states["inspection_active"]
+                         + states["awaiting_review"])
+        self.assertEqual(summary["awaiting_work"], states["awaiting_decision"]
+                         + states["plan_active"]["total"] + states["reopened"])
 
     def test_work_evidence_and_repeated_verification_do_not_multiply_cases(self):
         working_field = self.quiet[0]
@@ -657,10 +695,10 @@ class AggregationTests(PanoramaMixin, AnalyticsFlow):
         body = self.analytics(self.manager_a)
         current = body["current"]
         self.assertEqual(current["active_problems"]["total"], 2)
-        self.assertEqual((current["remediation_funnel"]["work_active"],
-                          current["remediation_funnel"]["improved_awaiting_closure"]), (1, 1))
+        self.assertEqual((current["by_remediation_status"]["work_active"],
+                          current["by_remediation_status"]["improved_awaiting_closure"]), (1, 1))
         self.assertEqual(current["work_items"], {"active": 3, "planned": 0, "in_progress": 3,
-                                                 "unassigned": 0, "overdue": 0})
+                                                 "unassigned": 0, "overdue_work_items": 0})
         activity = body["period_activity"]
         self.assertEqual((activity["plan_cycles_work_completed"], activity["plan_cycles_verified"]), (1, 1))
         self.resolve(plan_id, "close")
@@ -685,7 +723,7 @@ class AggregationTests(PanoramaMixin, AnalyticsFlow):
                                   "AND status IN ('IMPROVED','WORSENED') ORDER BY id", {"id": plan_id}),
                          [{"cycle": 1, "status": "WORSENED"}, {"cycle": 2, "status": "IMPROVED"}])
         body = self.analytics(self.manager_a)
-        self.assertEqual(body["current"]["remediation_funnel"]["reopened"], 1)
+        self.assertEqual(body["current"]["by_remediation_status"]["reopened"], 1)
         self.assertEqual(body["current"]["active_problems"]["total"], 1)
         self.assertEqual(body["outcomes"], {
             "resolved_cycles": 2,
@@ -694,7 +732,7 @@ class AggregationTests(PanoramaMixin, AnalyticsFlow):
                            "quality_blocked": 0, "provider_degraded": 0, "inconclusive": 0},
             "closed": {"total": 1, "improved": 1, "without_improvement": 0},
             "returned_for_rework": 1,
-            "reopened": {"total": 2, "after_closure": 1, "after_verification": 1},
+            "reopen_events": {"total": 2, "after_closure": 1, "after_verification": 1},
         })
         activity = body["period_activity"]
         self.assertEqual((activity["plans_drafted"], activity["plan_cycles_approved"],
@@ -709,6 +747,73 @@ class AggregationTests(PanoramaMixin, AnalyticsFlow):
         self.assertEqual((metrics["plan_approved_to_work_completed"]["sample_count"],
                           metrics["work_completed_to_verified"]["sample_count"],
                           metrics["case_opened_to_verified_closure"]["sample_count"]), (2, 2, 0))
+
+
+class OverdueTests(AnalyticsFlow):
+    """overdue_cases is the Operational Center flag; overdue_work_items is a different unit."""
+
+    def overdue_work_item_notifications(self):
+        """Work items the accepted TASK_221 reconciler flags 'overdue' (one per late item)."""
+        from services import operational_notifications
+
+        operational_notifications.reconcile_notifications(self.session(), apply=True)
+        return {row["source_id"] for row in self.sql(
+            "SELECT DISTINCT source_id FROM operational_notifications "
+            "WHERE notification_type='overdue' AND source_kind='agronomy_work_item'")}
+
+    def test_one_plan_main_work_item_on_time_secondary_late(self):
+        """The required case: primary item not overdue, secondary item overdue."""
+        inspection_id = self.confirmed_case(self.field_a)
+        plan_id, (main, secondary) = self.plan_with_items(
+            inspection_id, [timedelta(days=2), -timedelta(hours=1)], started=(0,))
+        self.assertEqual(self.plan(plan_id)["status"], "in_progress")
+        self.assertEqual(self.sql("SELECT id, status FROM agronomy_work_items ORDER BY id"),
+                         [{"id": main, "status": "in_progress"}, {"id": secondary, "status": "planned"}])
+
+        queue, summary = self.command_center(self.manager_a)
+        case = queue[f"inspection:{inspection_id}"]
+        # The accepted canonical rule: the case's primary work item (in progress first) decides.
+        self.assertEqual((case["is_overdue"], summary["overdue_work"]), (False, 0))
+
+        body = self.analytics(self.manager_a)
+        current = body["current"]
+        self.assertEqual(current["overdue_cases"], NO_OVERDUE)
+        self.assertEqual(current["overdue_cases"]["total"], summary["overdue_work"])
+        # The late secondary item is visible, under its own unit and name.
+        self.assertEqual(current["work_items"]["overdue_work_items"], 1)
+        self.assertEqual(self.overdue_work_item_notifications(), {str(secondary)})
+        field_row = self.fields_by_id(body)[self.field_a]
+        self.assertEqual((field_row["current"]["overdue_cases"], field_row["current"]["overdue_work_items"]),
+                         (0, 1))
+        self.assertNotIn("overdue", current)
+
+    def test_every_stage_follows_the_operational_center_flag(self):
+        q = self.quiet
+        main_late = self.confirmed_case(q[0])
+        self.plan_with_items(main_late, [-timedelta(hours=1), timedelta(days=2)], started=(0,))
+        earliest_late = self.confirmed_case(q[1])
+        self.plan_with_items(earliest_late, [timedelta(days=2), -timedelta(hours=2)])  # none started
+        on_time = self.confirmed_case(q[2])
+        self.plan_with_items(on_time, [timedelta(days=1)], started=(0,))
+        late_inspection = self.open_manual(q[3], due_in=-timedelta(hours=1))
+        late_submitted = self.open_manual(q[4], due_in=-timedelta(hours=1))
+        self.drive(late_submitted, "submitted")                  # still the inspection stage
+        planned_after_deadline = self.open_manual(q[5], due_in=-timedelta(hours=1))
+        self.drive(planned_after_deadline, "confirmed")
+        self.run_plan(planned_after_deadline, stop="draft")       # plan stage, no work: no deadline
+        self.open_manual(q[6], due_in=timedelta(hours=6))         # not yet due
+        completed = self.confirmed_case(q[7])
+        self.run_plan(completed, due_in=-timedelta(hours=1))      # all work done: awaiting verification
+
+        queue, summary = self.command_center(self.manager_a)
+        flagged = {key for key, item in queue.items() if item["is_overdue"]}
+        self.assertEqual(flagged, {f"inspection:{main_late}", f"inspection:{earliest_late}",
+                                   f"inspection:{late_inspection}", f"inspection:{late_submitted}"})
+        current = self.analytics(self.manager_a)["current"]
+        self.assertEqual(current["overdue_cases"], {"total": 4, "inspection_stage": 2, "work_stage": 2})
+        self.assertEqual(current["overdue_cases"]["total"], summary["overdue_work"])
+        # Late items: main_late's first item and earliest_late's second item.
+        self.assertEqual(current["work_items"]["overdue_work_items"], 2)
 
 
 class TimeTests(AnalyticsFlow):
@@ -799,25 +904,6 @@ class TimeTests(AnalyticsFlow):
         metric = self.analytics(self.manager_a)["cycle_times"]["metrics"]["inspection_opened_to_reviewed"]
         self.assertEqual((metric["sample_count"], metric["median_hours"], metric["p90_hours"]), (9, 5.0, None))
 
-    def test_overdue_follows_each_stage_deadline(self):
-        q = self.quiet
-        for field_id in q[:3]:
-            self.seed_quiet_history(field_id)
-        self.open_manual(q[3], due_in=-timedelta(hours=1))                     # overdue inspection
-        self.open_manual(q[4], due_in=timedelta(hours=6))                      # not yet due
-        late_submitted = self.open_manual(q[5], due_in=-timedelta(hours=1))
-        self.drive(late_submitted, "submitted")                                # still inspection stage
-        late_planned = self.open_manual(q[6], due_in=-timedelta(hours=1))
-        self.drive(late_planned, "confirmed")
-        self.run_plan(late_planned, stop="draft")                              # plan stage: no deadline yet
-        self.run_plan(self.confirmed_case(q[0]), stop="in_progress", items=2, due_in=-timedelta(hours=1))
-        self.run_plan(self.confirmed_case(q[1]), stop="approved", due_in=timedelta(days=2))
-        pending = self.run_plan(self.confirmed_case(q[2]), due_in=-timedelta(hours=1))
-        self.assertEqual(self.plan(pending)["status"], "pending_verification")  # completed: no work due
-        overdue = self.analytics(self.manager_a)["current"]["overdue"]
-        self.assertEqual(overdue, {"cases": 3, "inspections": 2, "plans_with_overdue_work": 1,
-                                   "work_items": 2})
-
 
 class QueryBudgetTests(PanoramaMixin, AnalyticsFlow):
 
@@ -836,12 +922,12 @@ class QueryBudgetTests(PanoramaMixin, AnalyticsFlow):
 
     def test_statement_count_does_not_grow_with_the_data(self):
         small = (len(self.statements(self.manager_a)),
-                 len(self.statements(self.admin, field_id=self.field_a, crop_type_id=self.cotton)))
+                 len(self.statements(self.admin, field_id=self.field_a, current_crop_type_id=self.cotton)))
         self.build_panorama()
         for field_id in self.quiet:
             self.season(field_id, self.cotton)
         large = (len(self.statements(self.manager_a)),
-                 len(self.statements(self.admin, field_id=self.field_a, crop_type_id=self.cotton)))
+                 len(self.statements(self.admin, field_id=self.field_a, current_crop_type_id=self.cotton)))
         self.assertEqual(small, large)
         self.assertEqual(large, (1, 2))
         statement = self.statements(self.manager_a, granularity="day")[0]

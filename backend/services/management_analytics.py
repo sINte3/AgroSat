@@ -12,9 +12,16 @@ caller is authorized to see:
 Current state is the TASK_221 Operational Center case model
 (``services.operational_center.CASES_CTE``) classified by the TASK_225
 projection (``services/remediation_status.py``), so the command center and this
-snapshot cannot disagree on what is open or where it stands. Windowed facts
-come from the append-only TASK_220 history (``agronomy_events``,
-``agronomy_verifications``) and the canonical inspection timestamps.
+snapshot cannot disagree on what is open or where it stands. That includes
+"overdue": an overdue case is the case model's own ``is_overdue`` flag, never a
+second rule. Windowed facts come from the append-only TASK_220 history
+(``agronomy_events``, ``agronomy_verifications``) and the canonical inspection
+timestamps.
+
+Crop is a CURRENT classification of the field (the Operational Center rule),
+never the crop at event time: crop_seasons keeps one replaceable row per field
+and season_year with no season end, so the crop grown when a past event happened
+cannot be established without guessing.
 
 The retired TASK_209 ``corrective_actions`` and ``action_verification_requests``
 are never read here; ``/api/executive`` keeps that history readable.
@@ -86,9 +93,18 @@ LIMITATIONS = [
         "documented anchor timestamp falls inside the period."
     ),
     (
-        "Crop attribution uses the field's current crop season (latest "
-        "crop_seasons.season_year not after the generation year, Asia/Tashkent), "
-        "the Operational Center rule; historical crop rotation is not reconstructed."
+        "Crop is the field's CURRENT crop classification (latest crop_seasons row "
+        "with season_year not after the generation year, Asia/Tashkent; the "
+        "Operational Center rule). Windowed metrics filtered or grouped by crop "
+        "are grouped by each field's current crop, not by the crop grown when the "
+        "event happened: crop_seasons has no season end and one replaceable row "
+        "per field and season_year, so historical crop cannot be established."
+    ),
+    (
+        "overdue_cases is the Operational Center case flag (is_overdue): the "
+        "inspection deadline while no plan exists, otherwise the case's primary "
+        "active work item (in progress first, then earliest due). "
+        "overdue_work_items counts late work items and is a different unit."
     ),
     (
         "IMPROVED, UNCHANGED and WORSENED are the persisted r3-f-v1 satellite "
@@ -150,6 +166,11 @@ CURRENT_COLUMNS = {
         f"remediation_status='{rs.NEEDS_INSPECTION}' AND root_source='inspection' "
         "AND inspection_assignee_id IS NULL"
     ),
+    # Every case whose current plan is pending_verification, whatever its
+    # verification status: the Operational Center summary figure it calls
+    # awaiting_satellite_verification, and the TASK_220 plan summary figure
+    # pending_verification. Distinct from the narrower TASK_225 state below.
+    "plans_pending_verification": "plan_status='pending_verification'",
     "inspection_active": f"remediation_status='{rs.INSPECTION_ACTIVE}'",
     "awaiting_review": f"remediation_status='{rs.AWAITING_REVIEW}'",
     "awaiting_decision": f"remediation_status='{rs.AWAITING_DECISION}'",
@@ -178,16 +199,18 @@ CURRENT_COLUMNS = {
     "not_improved_unchanged": f"remediation_status='{rs.NOT_IMPROVED}' AND verification_status='NO_MATERIAL_CHANGE'",
     "not_improved_worsened": f"remediation_status='{rs.NOT_IMPROVED}' AND verification_status='WORSENED'",
     "reopened": f"remediation_status='{rs.REOPENED}'",
-    "overdue_inspections": "inspection_overdue",
-    "overdue_plans": "plan_overdue",
-    "overdue_cases": "inspection_overdue OR plan_overdue",
+    # The Operational Center's per-case is_overdue flag, verbatim: the same
+    # case counts here as in /api/operational-center/summary overdue_work.
+    "overdue_cases": "is_overdue",
+    "overdue_inspection_stage": "is_overdue AND plan_id IS NULL",
+    "overdue_work_stage": "is_overdue AND plan_id IS NOT NULL",
 }
 
 # The per-row breakdown keeps the canonical state names as columns.
 BREAKDOWN_CURRENT_COLUMNS = {
     "active_problems": "true",
     **{state: f"remediation_status='{state}'" for state in ACTIVE_STATES},
-    "overdue_cases": "inspection_overdue OR plan_overdue",
+    "overdue_cases": "is_overdue",
 }
 
 FLOW_COLUMNS = {
@@ -233,9 +256,11 @@ BUCKET_COLUMNS = {
     "unverified": f"{_RESOLVED} AND detail NOT IN ({_quoted(CONCLUSIVE)})",
     "closed": "fact='cycle_closed'",
     "returned_for_rework": "fact='cycle_returned_for_rework'",
-    "reopened": "fact IN ('reopened_after_closure','reopened_after_verification')",
+    "reopen_events": "fact IN ('reopened_after_closure','reopened_after_verification')",
 }
 
+# "reopen_events" counts reopen EVENTS in the period; "reopened" is reserved for
+# the current TASK_225 state (the Operational Center summary figure reopened).
 BREAKDOWN_PERIOD_COLUMNS = {
     "inspections_opened": "fact='inspection_opened'",
     "resolved_cycles": _RESOLVED,
@@ -243,7 +268,7 @@ BREAKDOWN_PERIOD_COLUMNS = {
     "unchanged": f"{_RESOLVED} AND detail='NO_MATERIAL_CHANGE'",
     "worsened": f"{_RESOLVED} AND detail='WORSENED'",
     "unverified": f"{_RESOLVED} AND detail NOT IN ({_quoted(CONCLUSIVE)})",
-    "reopened": "fact IN ('reopened_after_closure','reopened_after_verification')",
+    "reopen_events": "fact IN ('reopened_after_closure','reopened_after_verification')",
 }
 
 BREAKDOWN_NUMBERS = (
@@ -313,9 +338,9 @@ UNSUPPORTED_DURATIONS = [
 #   @external_allowed@ enterprise-level external cases only without a field or
 #                      crop filter (the Operational Center behaviour)
 #
-# Parameters: as_of, as_of_date, actor_user_id (CASES_CTE), period_start,
-# period_end, granularity, field_limit, field_offset, enterprise_fetch,
-# crop_fetch, and the optional scope_enterprise_id, field_id, crop_type_id.
+# Parameters: as_of, actor_user_id (CASES_CTE), period_start, period_end,
+# granularity, field_limit, field_offset, enterprise_fetch, crop_fetch, and the
+# optional scope_enterprise_id, field_id, current_crop_type_id.
 
 _PERIOD = "{column} >= :period_start AND {column} < :period_end"
 
@@ -326,8 +351,11 @@ def _in_period(column: str) -> str:
 
 _TEMPLATE = """,
 scope_fields AS (
+  -- The field's CURRENT crop classification: the Operational Center rule,
+  -- evaluated once at as_of and used by every section.
   SELECT f.id AS field_id, f.enterprise_id, e.name AS enterprise_name, f.name AS field_name,
-    COALESCE(f.is_active, false) AS monitored, crop.crop_type_id, crop.crop_name
+    COALESCE(f.is_active, false) AS monitored,
+    crop.crop_type_id AS current_crop_type_id, crop.crop_name AS current_crop_name
   FROM fields f
   JOIN enterprises e ON e.id=f.enterprise_id
   LEFT JOIN LATERAL (
@@ -341,7 +369,7 @@ scope_fields AS (
 ),
 scoped_cases AS (
   SELECT c.root_source, c.field_id, c.enterprise_id, c.priority_rank,
-    c.remediation_status, c.inspection_id, c.plan_id
+    c.remediation_status, c.inspection_id, c.plan_id, c.is_overdue
   FROM cases c
   WHERE @case_scope@
     AND (
@@ -352,17 +380,13 @@ scoped_cases AS (
     )
 ),
 problem_cases AS (
+  -- One row per active canonical case. is_overdue is the Operational Center
+  -- flag itself (inspection deadline without a plan, else the primary active
+  -- work item), so no second overdue rule exists here.
   SELECT sc.root_source, sc.field_id, sc.priority_rank, sc.remediation_status,
+    sc.plan_id, sc.is_overdue,
     i.source_kind, i.assigned_to_id AS inspection_assignee_id,
-    p.status AS plan_status, p.verification_status,
-    COALESCE(sc.plan_id IS NULL
-      AND i.status IN ('pending','new','assigned','in_progress','submitted')
-      AND ((i.due_at IS NOT NULL AND i.due_at < :as_of)
-           OR (i.due_at IS NULL AND i.due_date < :as_of_date)), false) AS inspection_overdue,
-    (p.id IS NOT NULL AND EXISTS (
-      SELECT 1 FROM agronomy_work_items w
-      WHERE w.plan_id=p.id AND w.enterprise_id=p.enterprise_id AND w.cycle=p.cycle
-        AND w.status IN ('planned','in_progress') AND w.due_at < :as_of)) AS plan_overdue
+    p.status AS plan_status, p.verification_status
   FROM scoped_cases sc
   LEFT JOIN field_inspections i ON i.id=sc.inspection_id AND i.enterprise_id=sc.enterprise_id
   LEFT JOIN agronomy_plans p ON p.id=sc.plan_id AND p.enterprise_id=sc.enterprise_id
@@ -567,7 +591,7 @@ work_totals AS (
     count(*) FILTER (WHERE status='planned')::integer AS planned,
     count(*) FILTER (WHERE status='in_progress')::integer AS in_progress,
     count(*) FILTER (WHERE assigned_to_id IS NULL)::integer AS unassigned,
-    count(*) FILTER (WHERE due_at < :as_of)::integer AS overdue
+    count(*) FILTER (WHERE due_at < :as_of)::integer AS overdue_work_items
   FROM live_work
 ),
 coverage_totals AS (
@@ -649,7 +673,7 @@ field_flow AS (
 ),
 field_rows AS (
   SELECT sf.field_id, sf.field_name, sf.enterprise_id, sf.enterprise_name,
-    sf.crop_type_id, sf.crop_name,
+    sf.current_crop_type_id, sf.current_crop_name,
     CASE WHEN sf.monitored THEN 1 ELSE 0 END AS monitored_fields,
     @field_row_columns@
   FROM scope_fields sf
@@ -680,12 +704,14 @@ SELECT
       ORDER BY min(enterprise_name), enterprise_id LIMIT :enterprise_fetch) t),
     '[]'::json) AS enterprises,
   COALESCE((SELECT json_agg(row_to_json(t) ORDER BY t.position) FROM (
-      SELECT row_number() OVER (ORDER BY min(crop_name) NULLS LAST, crop_type_id NULLS LAST) AS position,
-        crop_type_id, min(crop_name) AS crop_name,
+      SELECT row_number() OVER (
+          ORDER BY min(current_crop_name) NULLS LAST, current_crop_type_id NULLS LAST) AS position,
+        current_crop_type_id, min(current_crop_name) AS current_crop_name,
         @breakdown_sums@
-      FROM field_rows GROUP BY crop_type_id
-      ORDER BY min(crop_name) NULLS LAST, crop_type_id NULLS LAST LIMIT :crop_fetch) t),
-    '[]'::json) AS crops,
+      FROM field_rows GROUP BY current_crop_type_id
+      ORDER BY min(current_crop_name) NULLS LAST, current_crop_type_id NULLS LAST
+      LIMIT :crop_fetch) t),
+    '[]'::json) AS current_crops,
   COALESCE((SELECT json_agg(row_to_json(t) ORDER BY t.bucket_start) FROM bucket_rows t),
     '[]'::json) AS buckets,
   COALESCE((SELECT json_agg(row_to_json(t) ORDER BY t.position) FROM (
@@ -788,10 +814,10 @@ class AnalyticsScope:
     authorization: str
     enterprise_id: int | None
     field_id: int | None
-    crop_type_id: int | None
+    current_crop_type_id: int | None
 
 
-def resolve_scope(user, *, enterprise_id=None, field_id=None, crop_type_id=None) -> AnalyticsScope:
+def resolve_scope(user, *, enterprise_id=None, field_id=None, current_crop_type_id=None) -> AnalyticsScope:
     """Server-side authority first; request filters can only narrow it.
 
     A manager is bound to the user's own enterprise. Asking for any other
@@ -808,8 +834,9 @@ def resolve_scope(user, *, enterprise_id=None, field_id=None, crop_type_id=None)
             raise HTTPException(403, "Manager has no enterprise_id")
         if enterprise_id is not None and enterprise_id != user.enterprise_id:
             raise HTTPException(404, "Enterprise not found")
-        return AnalyticsScope(role, int(user.id), "tenant", int(user.enterprise_id), field_id, crop_type_id)
-    return AnalyticsScope(role, int(user.id), "global", enterprise_id, field_id, crop_type_id)
+        return AnalyticsScope(role, int(user.id), "tenant", int(user.enterprise_id), field_id,
+                              current_crop_type_id)
+    return AnalyticsScope(role, int(user.id), "global", enterprise_id, field_id, current_crop_type_id)
 
 
 def _validate_targets(db, scope: AnalyticsScope, requested_enterprise_id) -> None:
@@ -824,9 +851,9 @@ def _validate_targets(db, scope: AnalyticsScope, requested_enterprise_id) -> Non
         params["field_id"] = scope.field_id
         if scope.enterprise_id is not None:
             params["scope_enterprise_id"] = scope.enterprise_id
-    if scope.crop_type_id is not None:
-        checks.append("EXISTS (SELECT 1 FROM crop_types WHERE id=:crop_type_id) AS crop_found")
-        params["crop_type_id"] = scope.crop_type_id
+    if scope.current_crop_type_id is not None:
+        checks.append("EXISTS (SELECT 1 FROM crop_types WHERE id=:current_crop_type_id) AS crop_found")
+        params["current_crop_type_id"] = scope.current_crop_type_id
     if not checks:
         return
     found = db.execute(text("SELECT " + ", ".join(checks)), params).mappings().one()
@@ -834,7 +861,7 @@ def _validate_targets(db, scope: AnalyticsScope, requested_enterprise_id) -> Non
         raise HTTPException(404, "Enterprise not found")
     if scope.field_id is not None and not found["field_found"]:
         raise HTTPException(404, "Field not found")
-    if scope.crop_type_id is not None and not found["crop_found"]:
+    if scope.current_crop_type_id is not None and not found["crop_found"]:
         raise HTTPException(404, "Crop type not found")
 
 
@@ -846,9 +873,9 @@ def statement_for(scope: AnalyticsScope) -> str:
     if scope.field_id is not None:
         field_scope.append("f.id=:field_id")
         case_scope.append("c.field_id=:field_id")
-    if scope.crop_type_id is not None:
-        field_scope.append("crop.crop_type_id=:crop_type_id")
-    external = "true" if scope.field_id is None and scope.crop_type_id is None else "false"
+    if scope.current_crop_type_id is not None:
+        field_scope.append("crop.crop_type_id=:current_crop_type_id")
+    external = "true" if scope.field_id is None and scope.current_crop_type_id is None else "false"
     return (
         STATEMENT_TEMPLATE
         .replace("@field_scope@", " AND ".join(field_scope))
@@ -929,10 +956,25 @@ def _breakdown_row(row: dict) -> dict:
     return {
         "monitored_fields": int(row["monitored_fields"]),
         "current": {
-            **{name: int(row[name]) for name in BREAKDOWN_CURRENT_COLUMNS},
+            "active_problems": int(row["active_problems"]),
+            "by_remediation_status": {state: int(row[state]) for state in ACTIVE_STATES},
+            "overdue_cases": int(row["overdue_cases"]),
             "overdue_work_items": int(row["overdue_work_items"]),
         },
         "period": {name: int(row[f"period_{name}"]) for name in BREAKDOWN_PERIOD_COLUMNS},
+    }
+
+
+def _crop_classification(generated_at: datetime) -> dict:
+    """How the crop dimension is defined; it is never the crop at event time."""
+    return {
+        "basis": "current_crop_season",
+        "reference_year": generated_at.year,
+        "rule": (
+            "each field is classified once by its latest crop_seasons row with "
+            "season_year <= reference_year (the Operational Center rule)"
+        ),
+        "historical_crop_at_event": False,
     }
 
 
@@ -956,19 +998,19 @@ def _current(as_of: datetime, totals: dict, work: dict, data: dict) -> dict:
             },
             "legacy_open_inspections": n["legacy_open_inspections"],
         },
-        "inspection_funnel": {
+        # Keys are the TASK_225 remediation_status values, exactly the value the
+        # Operational Center returns per queue item; every case is in one.
+        "by_remediation_status": {
             "needs_inspection": {
                 "total": n["needs_inspection"],
                 "inspections": n["needs_inspection_inspections"],
                 "candidates": n["needs_inspection_candidates"],
                 "alerts": n["needs_inspection_alerts"],
-                "unassigned_inspections": n["needs_inspection_unassigned"],
+                "unassigned": n["needs_inspection_unassigned"],
             },
             "inspection_active": n["inspection_active"],
             "awaiting_review": n["awaiting_review"],
             "awaiting_decision": n["awaiting_decision"],
-        },
-        "remediation_funnel": {
             "plan_active": {
                 "total": n["plan_active"],
                 "draft": n["plan_active_draft"],
@@ -995,13 +1037,13 @@ def _current(as_of: datetime, totals: dict, work: dict, data: dict) -> dict:
             },
             "reopened": n["reopened"],
         },
+        "plans_pending_verification": n["plans_pending_verification"],
         "work_items": {key: int(work[key] or 0) for key in
-                       ("active", "planned", "in_progress", "unassigned", "overdue")},
-        "overdue": {
-            "cases": n["overdue_cases"],
-            "inspections": n["overdue_inspections"],
-            "plans_with_overdue_work": n["overdue_plans"],
-            "work_items": int(work["overdue"] or 0),
+                       ("active", "planned", "in_progress", "unassigned", "overdue_work_items")},
+        "overdue_cases": {
+            "total": n["overdue_cases"],
+            "inspection_stage": n["overdue_inspection_stage"],
+            "work_stage": n["overdue_work_stage"],
         },
         "data_unavailable": {
             "freshness_cases": int(data["freshness_cases"] or 0),
@@ -1027,7 +1069,7 @@ def _outcomes(flow: dict) -> dict:
             "without_improvement": flow["closed"] - flow["closed_improved"],
         },
         "returned_for_rework": flow["returned_for_rework"],
-        "reopened": {
+        "reopen_events": {
             "total": flow["reopened_after_closure"] + flow["reopened_after_verification"],
             "after_closure": flow["reopened_after_closure"],
             "after_verification": flow["reopened_after_verification"],
@@ -1126,7 +1168,7 @@ def snapshot(
     date_to=None,
     enterprise_id=None,
     field_id=None,
-    crop_type_id=None,
+    current_crop_type_id=None,
     granularity="week",
     field_limit=50,
     field_offset=0,
@@ -1136,13 +1178,12 @@ def snapshot(
     as_of = now or datetime.now(timezone.utc)
     generated_at = as_of.astimezone(TASHKENT)
     scope = resolve_scope(user, enterprise_id=enterprise_id, field_id=field_id,
-                          crop_type_id=crop_type_id)
+                          current_crop_type_id=current_crop_type_id)
     window = resolve_window(date_from, date_to, today=generated_at.date())
     if granularity not in GRANULARITIES:
         raise HTTPException(422, "granularity must be day, week or month")
     params = {
         "as_of": as_of,
-        "as_of_date": generated_at.date(),
         "actor_user_id": scope.user_id,
         "period_start": window.from_timestamp,
         "period_end": window.to_exclusive,
@@ -1156,15 +1197,15 @@ def snapshot(
         params["scope_enterprise_id"] = scope.enterprise_id
     if scope.field_id is not None:
         params["field_id"] = scope.field_id
-    if scope.crop_type_id is not None:
-        params["crop_type_id"] = scope.crop_type_id
+    if scope.current_crop_type_id is not None:
+        params["current_crop_type_id"] = scope.current_crop_type_id
     try:
         _validate_targets(db, scope, enterprise_id)
         row = db.execute(text(statement_for(scope)), params).mappings().one()
         enterprises = list(row["enterprises"] or [])
-        crops = list(row["crops"] or [])
+        crops = list(row["current_crops"] or [])
         ensure_within_row_cap(enterprises, row_cap=ENTERPRISE_ROW_CAP, resource="management_analytics.enterprises")
-        ensure_within_row_cap(crops, row_cap=CROP_ROW_CAP, resource="management_analytics.crops")
+        ensure_within_row_cap(crops, row_cap=CROP_ROW_CAP, resource="management_analytics.current_crops")
         flow = {key: int(value or 0) for key, value in row["flow_totals"].items()}
         durations = {item["metric"]: item for item in (row["durations"] or [])}
         return {
@@ -1176,8 +1217,9 @@ def snapshot(
                 "authorization": scope.authorization,
                 "enterprise_id": scope.enterprise_id,
                 "field_id": scope.field_id,
-                "crop_type_id": scope.crop_type_id,
+                "current_crop_type_id": scope.current_crop_type_id,
             },
+            "crop_classification": _crop_classification(generated_at),
             "period": {
                 "requested": {"date_from": date_from, "date_to": date_to},
                 "effective": {
@@ -1208,8 +1250,9 @@ def snapshot(
                      **_breakdown_row(item)}
                     for item in enterprises
                 ],
-                "crops": [
-                    {"crop_type_id": item["crop_type_id"], "crop_name": item["crop_name"],
+                "current_crops": [
+                    {"current_crop_type_id": item["current_crop_type_id"],
+                     "current_crop_name": item["current_crop_name"],
                      **_breakdown_row(item)}
                     for item in crops
                 ],
@@ -1220,7 +1263,8 @@ def snapshot(
                             "field_id": item["field_id"], "field_name": item["field_name"],
                             "enterprise_id": item["enterprise_id"],
                             "enterprise_name": item["enterprise_name"],
-                            "crop_type_id": item["crop_type_id"], "crop_name": item["crop_name"],
+                            "current_crop_type_id": item["current_crop_type_id"],
+                            "current_crop_name": item["current_crop_name"],
                             **_breakdown_row(item),
                         }
                         for item in (row["fields"] or [])

@@ -26,7 +26,19 @@ class AnalyticsScope(StrictModel):
     enterprise_id: int | None = Field(
         description="Effective enterprise narrowing (the manager's own enterprise or an admin filter).")
     field_id: int | None
-    crop_type_id: int | None
+    current_crop_type_id: int | None = Field(
+        description="Narrowing by the field's CURRENT crop classification, never crop at event time.")
+
+
+class CropClassification(StrictModel):
+    """The crop dimension of this response: a current classification of each field."""
+
+    basis: Literal["current_crop_season"]
+    reference_year: int = Field(description="Asia/Tashkent year of generated_at.")
+    rule: str
+    historical_crop_at_event: Literal[False] = Field(
+        description="Always false: crop_seasons cannot establish the crop grown when a past event "
+                    "happened, so no metric is attributed to a historical crop.")
 
 
 class RequestedPeriod(StrictModel):
@@ -107,14 +119,7 @@ class NeedsInspection(StrictModel):
     inspections: int
     candidates: int
     alerts: int
-    unassigned_inspections: int
-
-
-class InspectionFunnel(StrictModel):
-    needs_inspection: NeedsInspection
-    inspection_active: int
-    awaiting_review: int
-    awaiting_decision: int
+    unassigned: int = Field(description="needs_inspection inspection cases without an assignee.")
 
 
 class PlanActive(StrictModel):
@@ -143,10 +148,18 @@ class NotImproved(StrictModel):
     worsened: int
 
 
-class RemediationFunnel(StrictModel):
+class RemediationStatusCounts(StrictModel):
+    """Active cases per TASK_225 remediation_status value (the value the command center returns per case)."""
+
+    needs_inspection: NeedsInspection
+    inspection_active: int
+    awaiting_review: int
+    awaiting_decision: int
     plan_active: PlanActive
     work_active: int
-    awaiting_satellite_verification: AwaitingVerification
+    awaiting_satellite_verification: AwaitingVerification = Field(
+        description="The TASK_225 state (PENDING_DATA or TOO_EARLY) only; the command center's summary "
+                    "figure of the same name is plans_pending_verification.")
     verification_blocked: VerificationBlocked
     improved_awaiting_closure: int
     not_improved: NotImproved
@@ -158,14 +171,19 @@ class WorkItems(StrictModel):
     planned: int
     in_progress: int
     unassigned: int
-    overdue: int
+    overdue_work_items: int = Field(
+        description="Active current-cycle work items of live plans whose due_at has passed (TASK_220 "
+                    "item rule; the TASK_221 per-item overdue notification rule). A unit of work "
+                    "items, not cases.")
 
 
-class Overdue(StrictModel):
-    cases: int
-    inspections: int
-    plans_with_overdue_work: int
-    work_items: int
+class OverdueCases(StrictModel):
+    """The Operational Center per-case is_overdue flag; equals its summary overdue_work."""
+
+    total: int
+    inspection_stage: int = Field(description="No current plan: the inspection deadline has passed.")
+    work_stage: int = Field(description="The case's primary active work item (in progress first, then "
+                                        "earliest due) is past due.")
 
 
 class DataUnavailable(StrictModel):
@@ -180,10 +198,13 @@ class CurrentState(StrictModel):
         description="Current-state anchor: every count is the lifecycle state at this instant; "
                     "the period does not narrow it.")
     active_problems: ActiveProblems
-    inspection_funnel: InspectionFunnel
-    remediation_funnel: RemediationFunnel
+    by_remediation_status: RemediationStatusCounts
+    plans_pending_verification: int = Field(
+        description="Cases whose current plan is pending_verification in any verification status: the "
+                    "command center summary awaiting_satellite_verification and the TASK_220 plan "
+                    "summary pending_verification.")
     work_items: WorkItems
-    overdue: Overdue
+    overdue_cases: OverdueCases
     data_unavailable: DataUnavailable
 
 
@@ -230,7 +251,9 @@ class ClosedCycles(StrictModel):
     without_improvement: int
 
 
-class Reopened(StrictModel):
+class ReopenEvents(StrictModel):
+    """Reopen EVENTS in the period; current.by_remediation_status.reopened is the current state."""
+
     total: int
     after_closure: int
     after_verification: int
@@ -244,7 +267,7 @@ class Outcomes(StrictModel):
     unverified: UnverifiedResolutions
     closed: ClosedCycles
     returned_for_rework: int
-    reopened: Reopened
+    reopen_events: ReopenEvents
 
 
 class DurationMetric(StrictModel):
@@ -318,8 +341,9 @@ class Completion(StrictModel):
     plan_closure: PlanClosure
 
 
-class BreakdownCurrent(StrictModel):
-    active_problems: int
+class RemediationStatusTotals(StrictModel):
+    """Active cases per TASK_225 remediation_status value."""
+
     needs_inspection: int
     inspection_active: int
     awaiting_review: int
@@ -331,8 +355,13 @@ class BreakdownCurrent(StrictModel):
     improved_awaiting_closure: int
     not_improved: int
     reopened: int
-    overdue_cases: int
-    overdue_work_items: int
+
+
+class BreakdownCurrent(StrictModel):
+    active_problems: int
+    by_remediation_status: RemediationStatusTotals
+    overdue_cases: int = Field(description="Operational Center is_overdue flag.")
+    overdue_work_items: int = Field(description="Late active work items (a unit of work items).")
 
 
 class BreakdownPeriod(StrictModel):
@@ -342,7 +371,7 @@ class BreakdownPeriod(StrictModel):
     unchanged: int
     worsened: int
     unverified: int
-    reopened: int
+    reopen_events: int
 
 
 class BreakdownMetrics(StrictModel):
@@ -356,9 +385,11 @@ class EnterpriseBreakdown(BreakdownMetrics):
     enterprise_name: str
 
 
-class CropBreakdown(BreakdownMetrics):
-    crop_type_id: int | None = Field(description="Null groups fields without a crop season.")
-    crop_name: str | None
+class CurrentCropBreakdown(BreakdownMetrics):
+    """Fields grouped by their CURRENT crop classification; period numbers are NOT crop-at-event."""
+
+    current_crop_type_id: int | None = Field(description="Null groups fields without a crop season.")
+    current_crop_name: str | None
 
 
 class FieldBreakdown(BreakdownMetrics):
@@ -366,8 +397,8 @@ class FieldBreakdown(BreakdownMetrics):
     field_name: str
     enterprise_id: int
     enterprise_name: str
-    crop_type_id: int | None
-    crop_name: str | None
+    current_crop_type_id: int | None
+    current_crop_name: str | None
 
 
 class FieldPage(StrictModel):
@@ -393,12 +424,12 @@ class PeriodBreakdown(StrictModel):
     unverified: int
     closed: int
     returned_for_rework: int
-    reopened: int
+    reopen_events: int
 
 
 class Breakdowns(StrictModel):
     enterprises: list[EnterpriseBreakdown]
-    crops: list[CropBreakdown]
+    current_crops: list[CurrentCropBreakdown]
     periods: list[PeriodBreakdown]
     fields: FieldPage
 
@@ -408,6 +439,7 @@ class ManagementAnalyticsResponse(StrictModel):
     generated_at: datetime
     timezone: Literal["Asia/Tashkent"]
     scope: AnalyticsScope
+    crop_classification: CropClassification
     period: AnalyticsPeriod
     provenance: Provenance
     coverage: Coverage

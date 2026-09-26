@@ -202,6 +202,47 @@ class AnalyticsFlow(ClosedLoopFlow):
             version, item[1] = body["version"], body["item_version"]
         self.assertEqual(self.plan(plan_id)["status"], "pending_verification")
 
+    def plan_with_items(self, inspection_id, dues, *, started=()):
+        """One approved plan with a work item per due offset; start only ``started`` items.
+
+        Lets a test choose which item the Operational Center treats as the
+        case's primary work item (in progress first, then earliest due).
+        """
+        manager, agronomist = self.people(self.inspection(inspection_id)["enterprise_id"])
+        boss, worker = self.client(manager), self.client(agronomist)
+        plan_id = self.ok(boss.post("/api/agronomy-plans", json={
+            "inspection_id": inspection_id, "reason": "Plan for the confirmed finding",
+        }, headers={"Idempotency-Key": self.key("draft")}), 201)["plan_id"]
+        version, items = self.plan(plan_id)["version"], []
+        now = datetime.now(timezone.utc)
+        for number, due in enumerate(dues):
+            body = self.ok(boss.post(f"/api/agronomy-plans/{plan_id}/work", json={
+                "expected_version": version, "reason": "Work assigned to the crew",
+                "category": "irrigation", "instruction": f"Repair irrigation line {number + 1}",
+                "assigned_to_id": agronomist.id, "due_at": (now + due).isoformat(),
+            }, headers={"Idempotency-Key": self.key("work")}), 201)
+            version = body["version"]
+            items.append([body["item_id"], body["item_version"]])
+        version = self.ok(boss.post(f"/api/agronomy-plans/{plan_id}/transition", json={
+            "expected_version": version, "reason": "Approved by the farm manager", "operation": "approve",
+        }, headers={"Idempotency-Key": self.key("approve")}))["version"]
+        for index in started:
+            item = items[index]
+            body = self.ok(worker.post(f"/api/agronomy-plans/{plan_id}/work/{item[0]}/transition", json={
+                "expected_version": item[1], "expected_plan_version": version,
+                "reason": "Crew on site", "operation": "start",
+            }, headers={"Idempotency-Key": self.key("start")}))
+            version, item[1] = body["version"], body["item_version"]
+        return plan_id, [item[0] for item in items]
+
+    def command_center(self, user):
+        """The accepted Operational Center queue (by case key) and summary for ``user``."""
+        from services import operational_center
+
+        queue = operational_center.list_queue(self.session(), user, {"limit": 100, "offset": 0})
+        summary = operational_center.summary(self.session(), user, {})
+        return {item["case_key"]: item for item in queue["items"]}, summary
+
     def resolve(self, plan_id, operation, reason="Resolution recorded by the manager"):
         manager, _ = self.people(self.plan(plan_id)["enterprise_id"])
         return self.ok(self.transition(plan_id, operation, user=manager, key=self.key(operation),
