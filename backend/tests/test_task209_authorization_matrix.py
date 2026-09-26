@@ -203,6 +203,7 @@ MATRIX = (
     contract("GET", "/api/operational-center/fields/{field_id}/timeline", tenant_scope="field_object", cross_tenant=404, unknown_object=404),
     contract("GET", "/api/operational-center/notifications", tenant_scope="recipient_scope"),
     contract("POST", "/api/operational-center/notifications/{notification_id}/transition", MUTATING_ROLES, "operational_notification_object", write=True, cross_tenant=404, unknown_object=404),
+    contract("GET", "/api/management-analytics", MANAGEMENT_ROLES, tenant_scope="enterprise_filter", cross_tenant=404),
 )
 
 
@@ -217,7 +218,7 @@ def openapi_operations():
 
 def test_matrix_covers_every_openapi_operation_exactly():
     expected = {(item.method, item.path) for item in MATRIX}
-    assert len(expected) == len(MATRIX) == 145
+    assert len(expected) == len(MATRIX) == 146
     assert expected == set(openapi_operations())
 
 
