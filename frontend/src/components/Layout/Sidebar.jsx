@@ -9,6 +9,7 @@ import { listOfflineDrafts, offlineScope } from '../../offline/offlineScoutingSt
 const NAV_ITEMS = [
   { key: 'dashboard', icon: DashboardIcon },
   { key: 'operational-center', icon: CommandCenterIcon },
+  { key: 'management-analytics', icon: AnalyticsIcon },
   { key: 'fields', icon: MapIcon },
   { key: 'monitoring', icon: MonitoringIcon },
   { key: 'field-attention', icon: AttentionIcon },
@@ -159,8 +160,8 @@ export default function Sidebar({ activeView, onNavigate, mobileOpen, onMobileCl
                 className={`flex min-h-11 w-full items-center justify-start gap-3 rounded-xl px-3 text-sm font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-agro-accent
                   ${active ? 'bg-emerald-50 text-agro-accent' : 'text-slate-600 hover:text-agro-text hover:bg-agro-hover'}`}
               >
-                <item.icon className="w-5 h-5" />
-                <span className="truncate">{getNavigationLabelForRole(user?.role, item.key)}</span>
+                <item.icon className="w-5 h-5 flex-none" />
+                <span className="min-w-0 text-left leading-5">{getNavigationLabelForRole(user?.role, item.key)}</span>
               </button>
             </div>
           );
@@ -217,6 +218,10 @@ function CommandCenterIcon({ className }) {
       <path d="M12 7v5l3 2M4 12h2m12 0h2M12 4v2m0 12v2" />
     </svg>
   );
+}
+
+function AnalyticsIcon({ className }) {
+  return <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className={className}><path d="M4 20h16M6 16v-3m4 3V9m4 7v-5m4 5V6M5 9l4-3 4 3 6-5" /></svg>;
 }
 
 function BellIcon({ className }) {

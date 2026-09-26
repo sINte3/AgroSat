@@ -20,6 +20,7 @@ import UnauthorizedPage from './pages/UnauthorizedPage';
 import MonitoringPage from './pages/MonitoringPage';
 import AgronomyPlansPage from './pages/AgronomyPlansPage';
 import OperationalCenterPage from './pages/OperationalCenterPage';
+import ManagementAnalyticsPage from './pages/ManagementAnalyticsPage';
 import { getCachedEnterprises } from './api/client';
 import { getRoleDefaultPath, isViewAllowedForRole } from './config/roleAccess';
 
@@ -32,6 +33,7 @@ const PATH_VIEW_MAP = {
   '/monitoring': 'monitoring',
   '/agronomy-plans': 'agronomy-plans',
   '/operational-center': 'operational-center',
+  '/management-analytics': 'management-analytics',
   '/enterprises': 'enterprises',
   '/reports': 'reports',
   '/login': 'login',
@@ -211,6 +213,8 @@ function AppLayout() {
         setView('agronomy-plans'); setSelectedPlanId(parsePositiveId(id)); navigate(id ? `/agronomy-plans/${id}` : '/agronomy-plans'); break;
       case 'operational-center':
         setView('operational-center'); setSelectedOperationalCaseKey(null); navigate('/operational-center'); break;
+      case 'management-analytics':
+        setView('management-analytics'); setSelectedFieldId(null); setSelectedEnterpriseId(null); navigate('/management-analytics'); break;
       case 'operational-case': {
         const caseKey = String(id || '');
         if (!/^(inspection|candidate|alert|freshness|external):[A-Za-z0-9:_-]{1,160}$/.test(caseKey)) break;
@@ -263,6 +267,7 @@ function AppLayout() {
       case 'monitoring': return { title: 'Автономный мониторинг', subtitle: 'Свежесть, аномалии и решения оператора' };
       case 'agronomy-plans': return { title: 'Меры и контроль', subtitle: selectedPlanId ? `План #${selectedPlanId}` : 'Решения, работы и проверка результата' };
       case 'operational-center': return { title: 'Операционный центр', subtitle: selectedOperationalCaseKey || 'Приоритет, ответственность, сроки и проверка результата' };
+      case 'management-analytics': return { title: 'Управленческая аналитика', subtitle: 'Нагрузка, этапы работы и проверенные результаты' };
       case 'field-inspection-detail': return { title: 'Осмотры полей', subtitle: selectedInspectionId ? `Осмотр #${selectedInspectionId}` : null };
       case 'reports':     return { title: 'Отчёты' };
       case 'enterprise-detail': return { title: 'Предприятие', subtitle: selectedEnterpriseId ? `#${selectedEnterpriseId}` : null };
@@ -277,6 +282,10 @@ function AppLayout() {
     : view;
 
   const renderContent = () => {
+    // The view state follows the URL one render late; a view the role may not
+    // open (for example right after a redirect) is never mounted, so it cannot
+    // issue requests.
+    if (!isViewAllowedForRole(role, view)) return null;
     switch (view) {
       case 'fields':
         return <FieldsPage onFieldClick={handleFieldClick} onNavigate={handleNavigate} enterpriseId={selectedEnterpriseId} />;
@@ -307,6 +316,8 @@ function AppLayout() {
         return <AgronomyPlansPage onNavigate={handleNavigate} enterprises={enterprises} selectedPlanId={selectedPlanId} />;
       case 'operational-center':
         return <OperationalCenterPage onNavigate={handleNavigate} selectedCaseKey={selectedOperationalCaseKey} />;
+      case 'management-analytics':
+        return <ManagementAnalyticsPage enterprises={enterprises} />;
       case 'enterprises':
         return <EnterprisesPage onNavigate={handleNavigate} />;
       case 'enterprise-detail':

@@ -11,6 +11,7 @@ const SUITES = [
   'test-anomaly-inspection-workflow.mjs',
   'test-offline-scouting-infrastructure.mjs',
   'test-operational-center.mjs',
+  'test-management-analytics.mjs',
   'test-closed-loop-agronomy.mjs',
   'test-executive-accountability.mjs',
   'test-weather-irrigation-workflow.mjs',

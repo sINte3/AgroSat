@@ -39,7 +39,9 @@
     "test:autonomous-monitoring": "node scripts/test-autonomous-monitoring.mjs",
     "test:closed-loop-agronomy": "node scripts/test-closed-loop-agronomy.mjs",
     "test:operational-center": "node scripts/test-operational-center.mjs",
-    "test:operational-center-browser": "node scripts/qualify-operational-center-browser.mjs"
+    "test:operational-center-browser": "node scripts/qualify-operational-center-browser.mjs",
+    "test:management-analytics": "node scripts/test-management-analytics.mjs",
+    "test:management-analytics-browser": "node scripts/test-management-analytics-browser.mjs"
   },
   "dependencies": {
     "@mapbox/mapbox-gl-draw": "1.5.0",

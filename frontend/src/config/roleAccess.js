@@ -11,10 +11,17 @@ const FULL_NAVIGATION_KEYS = Object.freeze([
 ]);
 
 const ADMIN_NAVIGATION_KEYS = Object.freeze([
-  'dashboard', 'operational-center', 'fields', 'monitoring', 'field-attention',
+  'dashboard', 'operational-center', 'management-analytics', 'fields', 'monitoring', 'field-attention',
   'field-inspections', 'alerts', 'enterprises', 'reports',
   'agronomy-plans',
 ]);
+
+// GET /api/management-analytics answers admin and manager only (TASK_232):
+// the viewer keeps FULL_NAVIGATION_KEYS without it. Hiding is navigation only;
+// the server remains the authority.
+const MANAGER_NAVIGATION_KEYS = Object.freeze(FULL_NAVIGATION_KEYS.flatMap(
+  (key) => (key === 'operational-center' ? [key, 'management-analytics'] : [key]),
+));
 
 const AGRONOMIST_NAVIGATION_KEYS = Object.freeze([
   'operational-center',
@@ -32,7 +39,9 @@ const FULL_VIEW_KEYS = new Set([
   'enterprise-detail',
 ]);
 
-const ADMIN_VIEW_KEYS = new Set([...FULL_VIEW_KEYS, 'monitoring']);
+const ADMIN_VIEW_KEYS = new Set([...FULL_VIEW_KEYS, 'monitoring', 'management-analytics']);
+
+const MANAGER_VIEW_KEYS = new Set([...FULL_VIEW_KEYS, 'management-analytics']);
 
 const AGRONOMIST_VIEW_KEYS = new Set([
   'operational-center',
@@ -47,6 +56,7 @@ const AGRONOMIST_VIEW_KEYS = new Set([
 
 const NAVIGATION_LABELS = Object.freeze({
   'operational-center': 'Операционный центр',
+  'management-analytics': 'Управленческая аналитика',
   'agronomy-plans': 'Меры и контроль',
   monitoring: 'Мониторинг',
   dashboard: 'Сегодня',
@@ -67,14 +77,16 @@ export function getRoleDefaultPath(role) {
 export function isViewAllowedForRole(role, view) {
   if (role === 'admin') return ADMIN_VIEW_KEYS.has(view);
   if (role === 'agronomist') return AGRONOMIST_VIEW_KEYS.has(view);
-  if (role === 'manager' || role === 'viewer') return FULL_VIEW_KEYS.has(view);
+  if (role === 'manager') return MANAGER_VIEW_KEYS.has(view);
+  if (role === 'viewer') return FULL_VIEW_KEYS.has(view);
   return false;
 }
 
 export function getNavigationKeysForRole(role) {
   if (role === 'admin') return [...ADMIN_NAVIGATION_KEYS];
   if (role === 'agronomist') return [...AGRONOMIST_NAVIGATION_KEYS];
-  if (role === 'manager' || role === 'viewer') return [...FULL_NAVIGATION_KEYS];
+  if (role === 'manager') return [...MANAGER_NAVIGATION_KEYS];
+  if (role === 'viewer') return [...FULL_NAVIGATION_KEYS];
   return [];
 }
 
