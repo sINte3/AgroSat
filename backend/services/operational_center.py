@@ -751,7 +751,7 @@ def _agronomist_field_condition(alias: str) -> str:
         "WHERE current_plan.inspection_id=scope_inspection.id "
         "AND current_plan.enterprise_id=scope_inspection.enterprise_id "
         "AND (current_plan.status NOT IN ('closed','cancelled','superseded') "
-        "OR (current_plan.status='closed' AND current_plan.closed_at>=now()-interval '30 days')))))) "
+        "OR (current_plan.status='closed' AND current_plan.closed_at>=now()-interval '30 days'))))))) "
         "OR EXISTS (SELECT 1 FROM agronomy_work_items scope_work "
         f"WHERE scope_work.enterprise_id={alias}.enterprise_id "
         f"AND scope_work.field_id={alias}.id "
