@@ -287,8 +287,9 @@ def test_frontend_health_requires_the_release_bundle_and_candidate_backend():
     assert not stale["checks"]["index_is_release_bundle"]
 
 
-def test_health_probes_refuse_non_loopback_targets():
-    assert health.http_get("http://10.0.0.5:8000/health/live").error == "target_not_loopback"
+def test_health_probes_refuse_targets_off_this_host():
+    # TASK_243: a probe may target loopback or an address of this host (a LAN frontend), nothing else.
+    assert health.http_get("http://10.0.0.5:8000/health/live").error == "target_not_local"
 
 
 # ---------------------------------------------------------------- state, profiles, runtime

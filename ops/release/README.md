@@ -117,6 +117,44 @@ The explicit `rollback` operation follows the same rules and returns every
 task to the actions recorded when the release being undone replaced its
 predecessor.
 
+## Frontend bind address (TASK_243)
+
+The frontend listens on `127.0.0.1` unless the operator sets one line in the
+runtime environment file (`AGROSAT_RUNTIME_ENV_FILE`, in production
+`C:\AgroSat\backend\.env`):
+
+```
+AGROSAT_FRONTEND_BIND_ADDRESS=10.103.25.14
+```
+
+* The value must be one canonical IPv4 literal: loopback (`127.0.0.0/8`) or, in
+  production only, a private RFC 1918 address. A rehearsal stays on loopback.
+  `0.0.0.0`, host names, IPv6, ports, whitespace and anything else are refused
+  (`FRONTEND_BIND_ADDRESS_REJECTED`) at PRECHECK, before anything changes.
+  `preflight` shows what a release would use.
+* PRECHECK reads the setting once. MATERIALIZE writes it into the release's
+  `application-release.json` as `frontend_bind_address`. The setting takes
+  effect only through a release, never by editing the file and restarting.
+* The supervisor proves the address belongs to this host (`--validate-only`
+  at VALIDATE, and again before the start). It passes the address to node only
+  through the child environment, never on a command line. The scheduled task
+  action is unchanged.
+* VERIFY_FRONTEND and FINAL_HEALTH probe the frontend on that address. They
+  also prove every listener on 5173 is on exactly that address (no wildcard, no
+  extra socket) and every listener on 8000 is on `127.0.0.1`. COMMIT records
+  the address in `current-release.json`.
+* A rollback, automatic or explicit, restores the address of the release it
+  returns to, read from that release's own configuration. The setting in the
+  environment file is not consulted. A release made before TASK_243 has no key,
+  so it listens on `127.0.0.1`.
+* The backend never follows the setting: uvicorn stays on `127.0.0.1:8000` and
+  the frontend proxies relative `/api/` and `/health` to it. The proxy drops
+  client-supplied `Forwarded`, `X-Forwarded-*`, `X-Real-IP` and similar
+  headers, because uvicorn trusts `X-Forwarded-For`/`-Proto` from `127.0.0.1`.
+* With the setting active, `http://127.0.0.1:5173` stops answering. Use
+  `http://<address>:5173`, which also works on the server itself. The setting
+  opens no firewall rule; the network boundary is a separate decision.
+
 ## Process ownership
 
 `Run-AgroSatApplication.py` places itself in a kill-on-close Windows Job

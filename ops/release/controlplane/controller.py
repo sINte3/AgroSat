@@ -21,6 +21,12 @@ The explicit rollback operation follows the same identity rules with its own
 gates (PRECHECK, ROLLBACK_PLAN, BACKUP, DATABASE, then the switch, verify and
 commit gates) and binds tasks back to the actions recorded when the release
 being undone replaced its predecessor.
+
+The frontend bind address (TASK_243, ``network``) is materialized into the
+candidate's application configuration. Every probe of a frontend uses the
+address of the release being probed, read from that release's configuration,
+and VERIFY_FRONTEND and FINAL_HEALTH prove each application port listens on
+exactly its expected address: the frontend's, and 127.0.0.1 for the backend.
 """
 
 from __future__ import annotations
@@ -34,7 +40,7 @@ import shutil
 from typing import Any, Callable
 
 from . import backup as backup_module
-from . import health, manifest as manifest_module, migration
+from . import health, manifest as manifest_module, migration, network
 from .authorization import identity_of, validate_authorization
 from .common import (
     MAX_PATH, ControlPlaneError, assert_no_reparse_points, copy_tree, is_reparse_point, iso, longest_path,
@@ -267,6 +273,26 @@ class Controller:
             raise ControlPlaneError("TASK_BINDING_INCONSISTENT", kind)
         return sha
 
+    def frontend_address(self, action: TaskAction) -> str:
+        """The frontend bind address of the application configuration a frontend action names."""
+        config = read_json(configuration_path(action), "TASK_CONFIGURATION_UNREADABLE")
+        return network.bind_address_of(config, production=self.profile.production)
+
+    def _expected_address(self, state: ReleaseState) -> str:
+        """The frontend bind address the switched release must listen on."""
+        facts = state.data["facts"]["candidate" if self.request.operation == "release" else "target"]
+        return facts.get(network.CONFIG_KEY, network.LOOPBACK)
+
+    def _bound_addresses(self, kind: str, expected: str) -> dict[str, Any]:
+        """Every listener on an application port is on exactly the expected address: no wildcard, no extra."""
+        port = self._port(kind)
+        endpoints = self.platform.listener_endpoints([port]).get(port) or []
+        observed = sorted({address for address, _ in endpoints})
+        if observed != [expected]:
+            raise ControlPlaneError("LISTENER_ADDRESS_MISMATCH", kind, expected=expected, observed=observed)
+        return {"port": port, "expected": expected, "observed": observed,
+                "owners": sorted({pid for _, pid in endpoints})}
+
     # ================================================================ PRECHECK
     def gate_precheck(self, state: ReleaseState) -> dict[str, Any]:
         profile, current = self.profile, state.data["previous_sha"]
@@ -301,7 +327,8 @@ class Controller:
         previous_head = migration.single_head(previous_graph)
         state.data["facts"]["previous"] = {"sha": current, "alembic_head": previous_head,
                                            "manifest_sha256": previous["manifest_sha256"],
-                                           "dist_index_sha256": sha256_file(self._release_dir(current) / "frontend" / "dist" / "index.html")}
+                                           "dist_index_sha256": sha256_file(self._release_dir(current) / "frontend" / "dist" / "index.html"),
+                                           network.CONFIG_KEY: self.frontend_address(definitions["frontend"].actions[0])}
         if self.platform.task_state(self._task("sentinel")) == "Running":
             raise ControlPlaneError("SENTINEL_CYCLE_RUNNING", "never release during a collection cycle")
         idle, waited = self._wait(lambda: self.platform.task_state(self._task("notifications")) != "Running",
@@ -318,7 +345,8 @@ class Controller:
             "backend": health.probe_backend(profile.backend_port, current, previous_head, get=self.platform.http_get,
                                             pre_task228_compatible=True),
             "frontend": health.probe_frontend(profile.frontend_port, state.data["facts"]["previous"]["dist_index_sha256"],
-                                              current, get=self.platform.http_get),
+                                              current, get=self.platform.http_get,
+                                              address=state.data["facts"]["previous"][network.CONFIG_KEY]),
         }
         evidence: dict[str, Any] = {
             "profile": profile.evidence(), "authorization_sha256": self.authorization["sha256"],
@@ -333,6 +361,9 @@ class Controller:
                                                        expected_current_sha=current, fetch=self.request.fetch)
             state.data["facts"]["source"] = identity
             evidence["source_identity"] = identity
+            # Read and validated once, before anything changes; MATERIALIZE writes exactly this.
+            state.data["facts"]["frontend_bind"] = network.configured_bind_address(profile)
+            evidence["frontend_bind"] = state.data["facts"]["frontend_bind"]
         else:
             evidence["rollback_target"] = self._precheck_rollback_target(state)
         state.save()
@@ -364,7 +395,8 @@ class Controller:
         graph = self.platform.alembic_graph(self._python(target), self._release_dir(target) / "backend")
         state.data["facts"]["target"] = {"sha": target, "alembic_head": migration.single_head(graph),
                                          "manifest_sha256": identity["manifest_sha256"], "recorded_by": source.name,
-                                         "dist_index_sha256": sha256_file(self._release_dir(target) / "frontend" / "dist" / "index.html")}
+                                         "dist_index_sha256": sha256_file(self._release_dir(target) / "frontend" / "dist" / "index.html"),
+                                         network.CONFIG_KEY: self.frontend_address(TaskAction(**bindings["frontend"]))}
         return state.data["facts"]["target"]
 
     # ================================================================ BACKUP
@@ -421,8 +453,12 @@ class Controller:
             evidence["runtime"] = {"directory": str(runtime), "reused_existing": True}
         else:
             evidence["runtime"] = self._materialize_runtime(state, release, runtime, manifest_sha256, current)
+        # What the runtime actually holds decides, so a resumed release keeps its materialized address.
+        address = self.frontend_address(self.application_action(candidate, "frontend"))
+        state.data["facts"]["candidate"][network.CONFIG_KEY] = address
         state.save()
-        evidence["summary"] = {"release": str(release), "runtime": str(runtime), "manifest_sha256": manifest_sha256}
+        evidence["summary"] = {"release": str(release), "runtime": str(runtime), "manifest_sha256": manifest_sha256,
+                               "frontend_bind_address": address}
         return evidence
 
     def _clean_own_staging(self, staging: Path) -> None:
@@ -512,12 +548,14 @@ class Controller:
                 raise ControlPlaneError("REHEARSAL_FAULT_INJECTION_UNAPPLIED")
             fault_env.write_text(text, encoding="utf-8")
             env_file, fault = runtime / "fault" / "backend-unready.env", "backend_unready_after_switch"
+        frontend_bind = state.data["facts"]["frontend_bind"]
         config: dict[str, Any] = {
             "schema_version": 2, "release_commit": candidate, "manifest_sha256": manifest_sha256,
             "wrapper_sha256": sha256_file(application / "Run-AgroSatApplication.py"),
             "ownership_sha256": sha256_file(application / "agrosat_process_ownership.py"),
             "runtime_directory": str(runtime / "application"),
             "profile": "production" if self.profile.production else "rehearsal",
+            network.CONFIG_KEY: frontend_bind["address"],
         }
         if not self.profile.production:
             config["rehearsal"] = {"release_root": str(self.profile.release_root),
@@ -564,7 +602,8 @@ class Controller:
         state.data["facts"]["runtime_inventory"] = self._inventory(staging)
         state.save()
         os.replace(staging, runtime)
-        return {"directory": str(runtime), "application_config": config, "collector_state_copied": copied_state,
+        return {"directory": str(runtime), "application_config": config, "frontend_bind": frontend_bind,
+                "collector_state_copied": copied_state,
                 "signed_runners": [str(path.relative_to(staging)) for path in signed], "fault_injection": fault}
 
     # ================================================================ VALIDATE
@@ -797,12 +836,15 @@ class Controller:
 
     def gate_verify_frontend(self, state: ReleaseState) -> dict[str, Any]:
         sha, _, index = self._expected(state)
-        result = health.wait_for(lambda: health.probe_frontend(self.profile.frontend_port, index, sha, get=self.platform.http_get),
+        address = self._expected_address(state)
+        result = health.wait_for(lambda: health.probe_frontend(self.profile.frontend_port, index, sha, get=self.platform.http_get,
+                                                               address=address),
                                  deadline_seconds=self.deadlines.health_seconds, interval_seconds=1.0,
                                  clock=self.platform.monotonic, sleep=self.platform.sleep)
         if not result["pass"]:
             raise ControlPlaneError("FRONTEND_HEALTH_FAILED", facts=result)
-        return {"health": result, "summary": {"index_sha256": index}}
+        return {"health": result, "listener": self._bound_addresses("frontend", address),
+                "summary": {"index_sha256": index, "frontend_bind_address": address}}
 
     # ================================================================ WORKERS
     def gate_rebind_workers(self, state: ReleaseState) -> dict[str, Any]:
@@ -863,12 +905,14 @@ class Controller:
     # ================================================================ FINAL / COMMIT
     def gate_final_health(self, state: ReleaseState) -> dict[str, Any]:
         sha, head, index = self._expected(state)
+        address = self._expected_address(state)
         backend = health.probe_backend(self.profile.backend_port, sha, head, get=self.platform.http_get,
                                        pre_task228_compatible=self.request.operation == "rollback")
-        frontend = health.probe_frontend(self.profile.frontend_port, index, sha, get=self.platform.http_get)
+        frontend = health.probe_frontend(self.profile.frontend_port, index, sha, get=self.platform.http_get,
+                                         address=address)
         if not backend["pass"] or not frontend["pass"]:
             raise ControlPlaneError("FINAL_HEALTH_FAILED", facts={"backend": backend["checks"], "frontend": frontend["checks"]})
-        ownership = {}
+        ownership, addresses = {}, {}
         for kind in APPLICATION_KINDS:
             owner = self.platform.listeners([self._port(kind)]).get(self._port(kind))
             lineage = {identity.pid for engine in self.platform.task_engine_pids(self._task(kind))
@@ -876,13 +920,18 @@ class Controller:
             if owner not in lineage:
                 raise ControlPlaneError("LISTENER_NOT_OWNED_BY_TASK", kind, owner=owner)
             ownership[kind] = owner
+            # The backend never follows the frontend setting.
+            addresses[kind] = self._bound_addresses(kind, address if kind == "frontend" else network.LOOPBACK)
+            if not set(addresses[kind]["owners"]) <= lineage:
+                raise ControlPlaneError("LISTENER_NOT_OWNED_BY_TASK", kind, owners=addresses[kind]["owners"])
         stopped = state.data["facts"].get("stopped", {})
         survivors = {kind: [item.evidence() for item in self.platform.alive([ProcessIdentity(**row) for row in rows])]
                      for kind, rows in stopped.items()}
         if any(survivors.values()):
             raise ControlPlaneError("PREVIOUS_PROCESSES_SURVIVED", facts=survivors)
         return {"backend": backend, "frontend": frontend, "listener_owners": ownership,
-                "previous_processes_alive": survivors, "summary": {"release": sha, "healthy": True}}
+                "listener_addresses": addresses, "previous_processes_alive": survivors,
+                "summary": {"release": sha, "healthy": True, "frontend_bind_address": address}}
 
     def gate_commit(self, state: ReleaseState) -> dict[str, Any]:
         sha, head, _ = self._expected(state)
@@ -893,6 +942,7 @@ class Controller:
             "bindings": state.data["facts"]["tasks_before"]}
         pointer = {"sha": sha, "release_id": state.data["release_id"], "operation": state.data["operation"],
                    "alembic_head": head, "committed_at": iso(self.platform.now()),
+                   network.CONFIG_KEY: self._expected_address(state),
                    "bindings": {kind: self._definition(kind).actions[0].evidence()
                                 for kind in APPLICATION_KINDS + self._workers(state)}}
         write_json_atomic(previous_path, previous_pointer)
@@ -1049,12 +1099,20 @@ class Controller:
                                       deadline_seconds=self.deadlines.health_seconds, interval_seconds=1.0,
                                       clock=self.platform.monotonic, sleep=self.platform.sleep)
             frontend = health.wait_for(lambda: health.probe_frontend(self.profile.frontend_port, previous["dist_index_sha256"],
-                                                                     previous["sha"], get=self.platform.http_get),
+                                                                     previous["sha"], get=self.platform.http_get,
+                                                                     address=previous.get(network.CONFIG_KEY, network.LOOPBACK)),
                                        deadline_seconds=self.deadlines.health_seconds, interval_seconds=1.0,
                                        clock=self.platform.monotonic, sleep=self.platform.sleep)
             result["previous_health"] = {"backend": backend, "frontend": frontend}
             if not backend["pass"] or not frontend["pass"]:
                 raise ControlPlaneError("MANUAL_RECOVERY_REQUIRED", "the previous release is not healthy after rollback")
+            try:
+                result["previous_listeners"] = {
+                    "backend": self._bound_addresses("backend", network.LOOPBACK),
+                    "frontend": self._bound_addresses("frontend", previous.get(network.CONFIG_KEY, network.LOOPBACK))}
+            except ControlPlaneError as mismatch:
+                raise ControlPlaneError("MANUAL_RECOVERY_REQUIRED", "the previous release is not on its recorded addresses",
+                                        cause=mismatch.evidence()) from None
             candidate_alive = [item.evidence() for item in self.platform.alive(candidate_trees)]
             result["candidate_processes_captured"] = len(candidate_trees)
             result["candidate_processes_alive"] = candidate_alive

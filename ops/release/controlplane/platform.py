@@ -60,6 +60,9 @@ class WindowsPlatform:
     def listeners(self, ports: list[int]) -> dict[int, int | None]:
         return winproc.listeners(ports)
 
+    def listener_endpoints(self, ports: list[int]) -> dict[int, list[tuple[str, int]]]:
+        return winproc.listener_endpoints(ports)
+
     def lineage(self, anchor: int) -> list[winproc.ProcessIdentity]:
         return winproc.lineage(anchor)
 

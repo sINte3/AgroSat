@@ -14,14 +14,20 @@ contract itself marks them ``required_for_api_readiness: false``.
 
 A frontend passes when ``GET /`` serves the release's exact ``index.html`` and
 ``GET /health/live`` through its proxy reaches a backend reporting the
-candidate SHA.
+candidate SHA. It is probed on the release's configured frontend bind address
+(TASK_243), which is loopback unless the operator set another.
+
+Probes never leave this host: a target must be loopback or an IPv4 literal
+assigned to one of this host's interfaces.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import ipaddress
 import json
+import socket
 import time
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
@@ -45,10 +51,28 @@ class HttpResult:
             return None
 
 
+def is_this_host(hostname: str | None) -> bool:
+    """Loopback, or an IPv4 literal this host can bind (proven with port 0, never listening)."""
+    if hostname in LOOPBACK_HOSTS:
+        return True
+    try:
+        address = ipaddress.IPv4Address(hostname or "")
+    except ValueError:
+        return False
+    if address.is_unspecified or address.is_multicast:
+        return False
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        try:
+            probe.bind((str(address), 0))
+        except OSError:
+            return False
+    return True
+
+
 def http_get(url: str, timeout: float = 10.0) -> HttpResult:
     parts = urlsplit(url)
-    if parts.scheme != "http" or parts.hostname not in LOOPBACK_HOSTS:
-        return HttpResult(None, b"", "target_not_loopback")
+    if parts.scheme != "http" or not is_this_host(parts.hostname):
+        return HttpResult(None, b"", "target_not_local")
     request = Request(url, headers={"Accept": "application/json, text/html", "User-Agent": "agrosat-controlplane"})
     try:
         with urlopen(request, timeout=timeout) as response:
@@ -136,8 +160,8 @@ def probe_backend(port: int, candidate_sha: str, expected_migration_revision: st
 
 
 def probe_frontend(port: int, dist_index_sha256: str, candidate_sha: str,
-                   get: Callable[[str], HttpResult] = http_get) -> dict[str, Any]:
-    base = f"http://127.0.0.1:{port}"
+                   get: Callable[[str], HttpResult] = http_get, *, address: str = "127.0.0.1") -> dict[str, Any]:
+    base = f"http://{address}:{port}"
     return evaluate_frontend(get(f"{base}/"), get(f"{base}/health/live"), dist_index_sha256, candidate_sha)
 
 

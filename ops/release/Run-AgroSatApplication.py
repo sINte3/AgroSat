@@ -16,15 +16,25 @@ release manifest, this file and the ownership helper next to it. The
 ``production`` profile uses fixed production roots and ports; the
 ``rehearsal`` profile names its own roots and spare ports and is refused if
 any of them is a production value.
+
+Frontend bind address (TASK_243): the optional ``frontend_bind_address`` key,
+written by the control plane from the operator's runtime setting, is the one
+address the frontend listens on; absent, it is 127.0.0.1 as before. It must be
+an IPv4 literal on loopback or, in production only, in a private (RFC 1918)
+range, and it must belong to this host (``--validate-only`` checks at once; a
+real start waits a bounded time for it, since at boot a LAN address can come up
+after the task starts). It reaches node only through the child environment,
+never a command line. The backend always listens on 127.0.0.1.
 """
 from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import ntpath
 import os
@@ -45,13 +55,20 @@ REHEARSAL_KEYS = frozenset({
     "release_root", "runtime_root", "runtime_env_file", "backend_port",
     "frontend_port", "node_executable",
 })
+OPTIONAL_KEYS = frozenset({"frontend_bind_address"})
 SAFE_ENV_KEYS = {"COMSPEC", "PATH", "PATHEXT", "SYSTEMDRIVE", "SYSTEMROOT", "TEMP", "TMP", "WINDIR"}
 RELEASE_ASSETS = (
     "backend/venv/Scripts/python.exe", "backend/main.py", "frontend/dist/index.html",
     "ops/qualification/Serve-ProgramR1QualificationFrontend.mjs",
 )
 LISTENER_WAIT_SECONDS = 180
+ADDRESS_WAIT_SECONDS = 180
 ERROR_CODE = re.compile(r"[A-Za-z0-9_:=-]{3,120}")
+LOOPBACK = "127.0.0.1"
+OCTET = r"(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])"
+IPV4_LITERAL = re.compile(rf"{OCTET}(?:\.{OCTET}){{3}}")
+LOOPBACK_NETWORK = ipaddress.IPv4Network("127.0.0.0/8")
+PRIVATE_NETWORKS = tuple(ipaddress.IPv4Network(item) for item in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
 
 
 @dataclass(frozen=True)
@@ -65,9 +82,13 @@ class Settings:
     backend_port: int
     frontend_port: int
     node_executable: Path
+    frontend_address: str = LOOPBACK
 
     def port(self, component: str) -> int:
         return self.backend_port if component == "backend" else self.frontend_port
+
+    def address(self, component: str) -> str:
+        return LOOPBACK if component == "backend" else self.frontend_address
 
 
 PRODUCTION = Settings(
@@ -115,13 +136,26 @@ def _rehearsal_port(value: object) -> int:
     return value
 
 
+def frontend_bind_address(config: dict, profile: str) -> str:
+    """The configured frontend address; loopback when the configuration names none."""
+    value = config.get("frontend_bind_address", LOOPBACK)
+    if not isinstance(value, str) or not IPV4_LITERAL.fullmatch(value):
+        raise ValueError("APPLICATION_FRONTEND_BIND_ADDRESS_REJECTED")
+    address = ipaddress.IPv4Address(value)
+    networks = (LOOPBACK_NETWORK,) + (PRIVATE_NETWORKS if profile == "production" else ())
+    if not any(address in network for network in networks):
+        raise ValueError("APPLICATION_FRONTEND_BIND_ADDRESS_REJECTED")
+    return value
+
+
 def resolve_settings(config: dict, production: Settings = PRODUCTION) -> Settings:
     profile = config.get("profile")
+    keys = set(config) - OPTIONAL_KEYS
     if profile == "production":
-        if set(config) != BASE_KEYS:
+        if keys != BASE_KEYS:
             raise ValueError("APPLICATION_CONFIGURATION_KEYSET_REJECTED")
-        return production
-    if profile != "rehearsal" or set(config) != BASE_KEYS | {"rehearsal"}:
+        return replace(production, frontend_address=frontend_bind_address(config, profile))
+    if profile != "rehearsal" or keys != BASE_KEYS | {"rehearsal"}:
         raise ValueError("APPLICATION_CONFIGURATION_KEYSET_REJECTED")
     block = config["rehearsal"]
     if not isinstance(block, dict) or set(block) != REHEARSAL_KEYS:
@@ -141,7 +175,7 @@ def resolve_settings(config: dict, production: Settings = PRODUCTION) -> Setting
         raise ValueError("APPLICATION_REHEARSAL_PORT_REJECTED")
     return Settings("rehearsal", Path(paths["release_root"]), Path(paths["runtime_root"]),
                     Path(paths["runtime_env_file"]), backend, frontend,
-                    Path(paths["node_executable"]))
+                    Path(paths["node_executable"]), frontend_bind_address(config, profile))
 
 
 def validate(config: dict, *, production: Settings = PRODUCTION, wrapper: Path | None = None,
@@ -195,6 +229,7 @@ def child_environment(component: str, release: Path, runtime: Path,
         })
     elif component == "frontend":
         environment.update({"QUALIFICATION_FRONTEND_PORT": str(settings.frontend_port),
+                            "QUALIFICATION_FRONTEND_BIND_ADDRESS": settings.frontend_address,
                             "QUALIFICATION_BACKEND_PORT": str(settings.backend_port),
                             "QUALIFICATION_DIST_ROOT": str(release / "frontend/dist")})
     else:
@@ -232,15 +267,39 @@ def ownership_lock(path: Path):
             msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
 
 
-def listening(port: int) -> bool:
+def listening(port: int, address: str = LOOPBACK) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         probe.settimeout(2)
-        return probe.connect_ex(("127.0.0.1", port)) == 0
+        return probe.connect_ex((address, port)) == 0
 
 
-def assert_port_free(port: int) -> None:
-    if listening(port):
+def assert_port_free(port: int, address: str = LOOPBACK) -> None:
+    """Never claim a live listener, on loopback or on the bind address."""
+    if any(listening(port, item) for item in dict.fromkeys((LOOPBACK, address))):
         raise RuntimeError("APPLICATION_LISTENER_ALREADY_OWNED")
+
+
+def assert_address_local(address: str) -> None:
+    """Binding port 0 proves the address belongs to this host, without listening."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        try:
+            probe.bind((address, 0))
+        except OSError:
+            raise RuntimeError("APPLICATION_FRONTEND_BIND_ADDRESS_NOT_LOCAL") from None
+
+
+def wait_for_local_address(address: str, seconds: float = ADDRESS_WAIT_SECONDS) -> float:
+    """At boot a LAN address can appear after the task starts, and Task Scheduler does not
+    restart a task that exited non-zero: wait for the address, bounded, then fail closed."""
+    started = time.monotonic()
+    while True:
+        try:
+            assert_address_local(address)
+            return round(time.monotonic() - started, 3)
+        except RuntimeError:
+            if time.monotonic() - started >= seconds:
+                raise
+            time.sleep(1)
 
 
 def event(runtime: Path, component: str, **fields) -> None:
@@ -272,14 +331,16 @@ def main() -> int:
     component = args.component
     if component == "frontend" and not settings.node_executable.is_file():
         raise RuntimeError("APPLICATION_NODE_RUNTIME_MISSING")
-    port = settings.port(component)
+    port, address = settings.port(component), settings.address(component)
     if args.validate_only:
+        assert_address_local(address)
         print(json.dumps({"status": "PASS", "release": release.name, "component": component,
-                          "profile": settings.profile, "port": port}))
+                          "profile": settings.profile, "port": port, "address": address}))
         return 0
+    address_wait_seconds = wait_for_local_address(address)
     ownership_module = load_ownership_module(helper)
     with ownership_lock(runtime / f"{component}.lock"):
-        assert_port_free(port)
+        assert_port_free(port, address)
         # Ownership before any child: from here on every descendant is a member.
         ownership = ownership_module.ProcessTreeOwnership.adopt_current_process()
         environment = child_environment(component, release, runtime, settings)
@@ -289,12 +350,13 @@ def main() -> int:
                                  stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         environment.clear()
         event(runtime, component, status="started", child_pid=child.pid, release=release.name,
-              profile=settings.profile, port=port, ownership=ownership.evidence())
+              profile=settings.profile, address=address, address_wait_seconds=address_wait_seconds, port=port,
+              ownership=ownership.evidence())
         deadline = time.monotonic() + LISTENER_WAIT_SECONDS
         while child.poll() is None and time.monotonic() < deadline:
-            if listening(port):
+            if listening(port, address):
                 event(runtime, component, status="listening", child_pid=child.pid,
-                      release=release.name, port=port, ownership=ownership.evidence())
+                      release=release.name, address=address, port=port, ownership=ownership.evidence())
                 break
             time.sleep(0.5)
         code = child.wait()

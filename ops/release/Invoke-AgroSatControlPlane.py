@@ -37,6 +37,7 @@ from controlplane.common import (  # noqa: E402
 from controlplane.controller import Controller, Deadlines, Request  # noqa: E402
 from controlplane.gitmaterial import Git  # noqa: E402
 from controlplane.manifest import load_runtime_contract, source_identity  # noqa: E402
+from controlplane.network import configured_bind_address  # noqa: E402
 from controlplane.profiles import PRODUCTION, load_rehearsal_profile  # noqa: E402
 from controlplane.state import used_release_ids  # noqa: E402
 from controlplane.tasks import contract_violations  # noqa: E402
@@ -103,10 +104,17 @@ def command_preflight(args) -> int:
         tasks[kind] = None if definition is None else {
             "violations": contract_violations(definition, kind, production=profile.production),
             "action": definition.actions[0].evidence() if definition.actions else None}
-    emit({"status": "PASS" if all(item and not item["violations"] for item in tasks.values()) else "BLOCKED",
+    frontend_bind = None
+    if args.operation == "release":  # what MATERIALIZE would write; a rollback keeps the target's own address
+        try:
+            frontend_bind = configured_bind_address(profile)
+        except ControlPlaneError as error:
+            frontend_bind = {"error": error.evidence()}
+    ready = all(item and not item["violations"] for item in tasks.values()) and "error" not in (frontend_bind or {})
+    emit({"status": "PASS" if ready else "BLOCKED",
           "mode": args.mode, "authorization": {key: authorization[key] for key in (
               "release_id", "operation", "candidate_sha", "expected_current_sha", "database_name", "expires_at",
-              "sha256")}, "tasks": tasks, "mutation_performed": False})
+              "sha256")}, "tasks": tasks, "frontend_bind": frontend_bind, "mutation_performed": False})
     return 0
 
 

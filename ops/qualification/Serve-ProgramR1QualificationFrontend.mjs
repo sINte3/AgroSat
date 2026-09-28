@@ -5,10 +5,26 @@ import http from 'node:http';
 import path from 'node:path';
 
 
-const host = '127.0.0.1';
+// The API upstream is always the loopback backend. The listen address is
+// loopback unless the supervisor passes the release's configured bind address
+// (TASK_243): one IPv4 literal, loopback or private, never a wildcard.
+const loopback = '127.0.0.1';
+const backendHost = loopback;
+const ipv4 = /^(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(?:\.(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}$/;
 const port = Number(process.env.QUALIFICATION_FRONTEND_PORT || 54181);
 const backendPort = Number(process.env.QUALIFICATION_BACKEND_PORT || 58081);
+const host = listenAddress(process.env.QUALIFICATION_FRONTEND_BIND_ADDRESS);
 const configuredRoot = process.env.QUALIFICATION_DIST_ROOT;
+
+function listenAddress(value) {
+  if (value === undefined) return loopback;
+  if (!ipv4.test(value)) throw new Error('Invalid frontend bind address');
+  const [first, second] = value.split('.').map(Number);
+  const isLoopback = first === 127;
+  const isPrivate = first === 10 || (first === 172 && second >= 16 && second <= 31) || (first === 192 && second === 168);
+  if (!isLoopback && !isPrivate) throw new Error('Invalid frontend bind address');
+  return value;
+}
 
 if (!Number.isSafeInteger(port) || port < 1024 || port > 65535) {
   throw new Error('Invalid qualification frontend port');
@@ -53,6 +69,25 @@ const hopByHop = new Set([
   'upgrade',
 ]);
 
+// Client-supplied forwarding metadata never reaches the backend: uvicorn
+// trusts X-Forwarded-For and X-Forwarded-Proto from 127.0.0.1, which is this
+// proxy's own address, so a LAN client could otherwise set them.
+const clientAddressHeaders = new Set([
+  'cf-connecting-ip',
+  'fastly-client-ip',
+  'forwarded',
+  'true-client-ip',
+  'x-client-ip',
+  'x-cluster-client-ip',
+  'x-real-ip',
+]);
+
+function forwardable(name) {
+  const lower = name.toLowerCase();
+  return !hopByHop.has(lower) && lower !== 'host' && !clientAddressHeaders.has(lower)
+    && !lower.startsWith('x-forwarded-');
+}
+
 function sanitizedLog(event) {
   process.stdout.write(`${JSON.stringify(event)}\n`);
 }
@@ -61,14 +96,12 @@ function proxyApi(request, response, requestUrl) {
   const started = Date.now();
   const headers = {};
   for (const [name, value] of Object.entries(request.headers)) {
-    if (!hopByHop.has(name.toLowerCase()) && name.toLowerCase() !== 'host') {
-      headers[name] = value;
-    }
+    if (forwardable(name)) headers[name] = value;
   }
-  headers.host = `${host}:${backendPort}`;
+  headers.host = `${backendHost}:${backendPort}`;
 
   const upstream = http.request({
-    host,
+    host: backendHost,
     port: backendPort,
     method: request.method,
     path: `${requestUrl.pathname}${requestUrl.search}`,
@@ -167,7 +200,7 @@ server.listen(port, host, () => sanitizedLog({
   kind: 'qualification_frontend_ready',
   address: host,
   port,
-  backendAddress: host,
+  backendAddress: backendHost,
   backendPort,
   distRootClass: 'exact_worktree_production_bundle',
   credentialValuesLogged: false,

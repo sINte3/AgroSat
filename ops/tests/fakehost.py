@@ -73,6 +73,8 @@ class FakeHost:
         self.tasks: dict[str, FakeTask] = {}
         self.processes: dict[int, ProcessIdentity] = {}
         self.ports: dict[int, int] = {}
+        self.addresses: dict[int, str] = {}  # the one local address each listener is bound to
+        self.frontend_bind_override: dict[str, str] = {}  # release sha -> address its frontend binds instead
         self.serving: dict[int, Serving] = {}
         self.revisions: list[str] = []
         self.pids = itertools.count(4000, 4)
@@ -136,6 +138,9 @@ class FakeHost:
             return
         child = self._spawn(launcher.pid, "python.exe" if component == "backend" else "node.exe")
         self.ports[port] = child.pid
+        # uvicorn always binds loopback; node binds the configuration's frontend address (TASK_243).
+        self.addresses[port] = "127.0.0.1" if component == "backend" else self.frontend_bind_override.get(
+            sha, config.get("frontend_bind_address", "127.0.0.1"))
         env_file = (config.get("rehearsal") or {}).get("runtime_env_file", "")
         release = self.world.profile.release_root / sha
         self.serving[port] = Serving(sha=sha, head=self.world.heads[sha], fault="fault" in env_file,
@@ -159,6 +164,7 @@ class FakeHost:
             if owner == identity.pid:
                 del self.ports[port]
                 self.serving.pop(port, None)
+                self.addresses.pop(port, None)
 
     def stop_task(self, name):
         self.actions_log.append(("stop", name))
@@ -192,6 +198,10 @@ class FakeHost:
     def listeners(self, ports):
         return {port: self.ports.get(port) for port in ports}
 
+    def listener_endpoints(self, ports):
+        return {port: [(self.addresses.get(port, "127.0.0.1"), self.ports[port])] if port in self.ports else []
+                for port in ports}
+
     def lineage(self, anchor):
         return ([self.processes[anchor]] if anchor in self.processes else []) + self._descendants(anchor)
 
@@ -207,10 +217,11 @@ class FakeHost:
 
     # http
     def http_get(self, url):
-        match = re.match(r"http://127\.0\.0\.1:(\d+)(/.*)$", url)
-        port, path = int(match.group(1)), match.group(2)
+        match = re.match(r"http://([0-9.]+):(\d+)(/.*)$", url)
+        address, port, path = match.group(1), int(match.group(2)), match.group(3)
         serving = self.serving.get(port)
-        if serving is None:
+        # A socket answers on its own address; a wildcard socket would answer on every address.
+        if serving is None or self.addresses.get(port) not in (address, "0.0.0.0"):
             return HttpResult(None, b"", "URLError")
         if serving.dist_index is not None:  # frontend
             if path == "/":
@@ -363,7 +374,8 @@ def _commit_tree(repository: Path, head: str, marker: str, *, frontend: str = "v
 
 def build_world(tmp_path: Path, *, current_head: str = "0016_operational_command_center",
                 candidate_head: str = "0016_operational_command_center", frontend_changes: bool = False,
-                legacy_current: bool = True, fault: str | None = None, backup_task: bool = False) -> World:
+                legacy_current: bool = True, fault: str | None = None, backup_task: bool = False,
+                current_frontend_address: str | None = None) -> World:
     root = tmp_path / "rehearsal"
     root.mkdir()
     (root / ".agrosat-rehearsal-root.json").write_text(json.dumps({"profile_id": "TASK230"}), encoding="utf-8")
@@ -410,6 +422,8 @@ def build_world(tmp_path: Path, *, current_head: str = "0016_operational_command
                   "wrapper_sha256": "0" * 64, "runtime_directory": str(application)}
     if not legacy_current:
         app_config.update(schema_version=2, ownership_sha256="0" * 64, profile="rehearsal")
+    if current_frontend_address is not None:  # the running release was built with a frontend bind address
+        app_config["frontend_bind_address"] = current_frontend_address
     write_json_atomic(application / "application-release.json", app_config)
     (runtime / "collector" / "state").mkdir(parents=True)
     (runtime / "collector" / "state" / "collector_state.json").write_text("{}", encoding="utf-8")

@@ -121,10 +121,8 @@ def alive(identities: Iterable[ProcessIdentity]) -> list[ProcessIdentity]:
             if identity.pid in table and table[identity.pid].created == identity.created]
 
 
-def listeners(ports: Iterable[int]) -> dict[int, int | None]:
-    """The owning PID of each TCP listener on ``ports`` (IPv4 and IPv6), else None."""
-    wanted = set(ports)
-    found: dict[int, int | None] = {port: None for port in wanted}
+def _listener_rows() -> Iterable[tuple[str, int, int]]:
+    """(local address, port, owning PID) of every TCP listener, IPv4 rows first."""
     for family in (socket.AF_INET, socket.AF_INET6):
         size = wintypes.DWORD(0)
         _iphlpapi.GetExtendedTcpTable(None, ctypes.byref(size), False, family, _TCP_TABLE_OWNER_PID_LISTENER, 0)
@@ -135,13 +133,33 @@ def listeners(ports: Iterable[int]) -> dict[int, int | None]:
             raise OSError("TCP listener table unavailable")
         count = ctypes.cast(buffer, ctypes.POINTER(wintypes.DWORD))[0]
         # MIB_TCPROW_OWNER_PID is 6 DWORDs; MIB_TCP6ROW_OWNER_PID is 56 bytes.
-        row_size, port_offset, pid_offset = (24, 8, 20) if family == socket.AF_INET else (56, 20, 52)
+        row_size, address_slice, port_offset, pid_offset = (
+            (24, (4, 8), 8, 20) if family == socket.AF_INET else (56, (0, 16), 20, 52))
         for index in range(count):
             base = 4 + index * row_size
             raw_port = int.from_bytes(buffer.raw[base + port_offset:base + port_offset + 4], "little")
-            port = socket.ntohs(raw_port & 0xFFFF)
-            if port in wanted and found[port] is None:
-                found[port] = int.from_bytes(buffer.raw[base + pid_offset:base + pid_offset + 4], "little")
+            address = socket.inet_ntop(family, buffer.raw[base + address_slice[0]:base + address_slice[1]])
+            yield (address, socket.ntohs(raw_port & 0xFFFF),
+                   int.from_bytes(buffer.raw[base + pid_offset:base + pid_offset + 4], "little"))
+
+
+def listeners(ports: Iterable[int]) -> dict[int, int | None]:
+    """The owning PID of each TCP listener on ``ports`` (IPv4 and IPv6), else None."""
+    wanted = set(ports)
+    found: dict[int, int | None] = {port: None for port in wanted}
+    for _, port, pid in _listener_rows():
+        if port in wanted and found[port] is None:
+            found[port] = pid
+    return found
+
+
+def listener_endpoints(ports: Iterable[int]) -> dict[int, list[tuple[str, int]]]:
+    """Every (local address, owning PID) listening on each of ``ports``: an empty list when none."""
+    wanted = set(ports)
+    found: dict[int, list[tuple[str, int]]] = {port: [] for port in wanted}
+    for address, port, pid in _listener_rows():
+        if port in wanted:
+            found[port].append((address, pid))
     return found
 
 
