@@ -13,10 +13,16 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from services import observation_quality
+from services.satellite import NDVI_INVALID_SCL_CLASSES, OBSERVED_FOOTPRINT_OUTPUT
 
 logger = logging.getLogger(__name__)
 
 EPSILON = 1e-10
+#: The supporting indices use the NDVI mask contract: input dataMask plus the
+#: same excluded SCL classes, including 0 (NO_DATA). Before TASK_246 class 0
+#: and the input dataMask were ignored, so a pixel without data counted as
+#: valid with zero reflectance and every index evaluated to exactly 0.0.
+INVALID_SCL_CLASSES = NDVI_INVALID_SCL_CLASSES
 
 # ─── Index Definitions ─────────────────────────────────────────────────────────
 
@@ -80,10 +86,9 @@ def get_index_definition(index_code: str) -> Optional[SatelliteIndexDefinition]:
 # ─── Sentinel Hub Evalscript Builder ───────────────────────────────────────────
 
 def _scl_reject_mask(sample_var: str = "sample") -> str:
-    """SCL mask expression: 1 = valid (no clouds/shadow/snow/defect), 0 = reject."""
-    return (
-        f"![1, 3, 8, 9, 10, 11].includes({sample_var}.SCL) ? 1 : 0"
-    )
+    """Validity expression: data present and SCL not excluded (no data/cloud/shadow/snow/defect)."""
+    excluded = json.dumps(list(INVALID_SCL_CLASSES), separators=(",", ":"))
+    return f"{sample_var}.dataMask === 1 && !{excluded}.includes({sample_var}.SCL)"
 
 
 def _epsilon_var_name() -> str:
@@ -115,14 +120,22 @@ def _build_evaluate_pixel_body(index_codes: list[str]) -> str:
 
 
 def _output_bands(index_codes: list[str]) -> str:
-    """Generate output band entries for the evalscript."""
+    """Generate output band entries for the evalscript.
+
+    Every index output and the observed footprint output get their own band in
+    the ``dataMask`` output (Statistical API per-output masks).
+    """
     entries = []
+    masked = []
     for code in index_codes:
         code_norm = normalize_index_code(code)
         entries.append(
             f'      {{ id: "{code_norm}", bands: 1, sampleType: "FLOAT32" }}',
         )
-    entries.append('      { id: "dataMask", bands: 1 }')
+        masked.append(code_norm)
+    entries.append(f'      {{ id: "{OBSERVED_FOOTPRINT_OUTPUT}", bands: 1, sampleType: "UINT8" }}')
+    masked.append(OBSERVED_FOOTPRINT_OUTPUT)
+    entries.append(f'      {{ id: "dataMask", bands: {json.dumps(masked)} }}')
     return ",\n".join(entries)
 
 
@@ -134,7 +147,7 @@ def _input_bands(index_codes: list[str]) -> list[str]:
         definition = get_index_definition(code_norm)
         if definition:
             bands.update(definition.required_bands)
-    bands.add("SCL")
+    bands.update(("SCL", "dataMask"))
     return sorted(bands)
 
 
@@ -155,7 +168,9 @@ def build_multi_index_evalscript(index_codes: list[str]) -> str:
     bands_json = json.dumps(_input_bands(codes))
 
     return_lines = "".join(f"    {c}: [{c}],\n" for c in codes)
-    return_lines += "    dataMask: [isValid ? 1 : 0]"
+    return_lines += f"    {OBSERVED_FOOTPRINT_OUTPUT}: [sample.dataMask],\n"
+    masks = ", ".join(["isValid ? 1 : 0"] * len(codes) + ["sample.dataMask"])
+    return_lines += f"    dataMask: [{masks}]"
 
     script = f"""//VERSION=3
 
@@ -214,23 +229,71 @@ def safe_int(v, default=0):
         return default
 
 
+def _output_stats(interval: dict, output_id: str) -> dict:
+    outputs = interval.get("outputs") if isinstance(interval, dict) else None
+    outputs = outputs if isinstance(outputs, dict) else {}
+    stats = outputs.get(output_id, {}).get("bands", {}).get("B0", {}).get("stats")
+    return stats if isinstance(stats, dict) else {}
+
+
+def _observed_pixels(interval: dict) -> Optional[int]:
+    """Pixels of the field polygon with data in this interval (provider counts)."""
+    stats = _output_stats(interval, OBSERVED_FOOTPRINT_OUTPUT)
+    return observation_quality.observed_pixel_count(stats.get("sampleCount"), stats.get("noDataCount"))
+
+
+def response_field_pixels(response_data: dict, expected_field_pixels: Optional[float] = None) -> Optional[int]:
+    """Field pixels of the one request grid shared by every interval of a response."""
+    try:
+        intervals = response_data.get("data", []) or []
+    except (TypeError, AttributeError):
+        intervals = []
+    return observation_quality.field_pixel_count(
+        [_observed_pixels(interval) for interval in intervals if isinstance(interval, dict)],
+        expected_field_pixels,
+    )
+
+
+def _field_sample_verdict(interval: dict, code: str, field_pixels: Optional[int]) -> observation_quality.FieldSampleVerdict:
+    """Provider pixel counts of one index output against the field pixels of the grid."""
+    index_stats = _output_stats(interval, code)
+    return observation_quality.evaluate_field_samples(
+        sample_count=index_stats.get("sampleCount"),
+        no_data_count=index_stats.get("noDataCount"),
+        # An interval without its own observed footprint is not evaluated.
+        field_pixel_count=field_pixels if _observed_pixels(interval) is not None else None,
+    )
+
+
+def _sample_fields(verdict: observation_quality.FieldSampleVerdict) -> dict:
+    """Record fields carried from the provider counts; never defaulted."""
+    return {
+        "valid_pixels_pct": verdict.valid_pixels_pct,
+        "sample_count": verdict.sample_count,
+        "no_data_count": verdict.no_data_count,
+        "valid_pixel_count": verdict.valid_sample_count,
+        "field_pixel_count": verdict.field_sample_count,
+        "field_samples_accepted": verdict.accepted,
+        "field_samples_reason": verdict.reason,
+    }
+
+
 def _interval_is_valid_for_index(interval: dict, code: str) -> tuple[bool, str]:
     """Check whether an interval has usable stats for the given index code.
 
-    Returns (True, "") if valid, (False, reason) if invalid.
+    Usable means at least one valid pixel by the provider's own counts and
+    finite mean/min/max/stDev. Whether the valid pixels make a trustworthy field
+    statistic is a separate verdict (``field_samples_accepted``) enforced on the
+    write path. Returns (True, "") if usable, (False, reason) otherwise.
     """
     try:
         stats = interval["outputs"][code]["bands"]["B0"]["stats"]
-    except KeyError:
+    except (KeyError, TypeError):
         return False, "missing output bands/stats"
 
-    sample_count = safe_int(stats.get("sampleCount", 0))
-    no_data_count = safe_int(stats.get("noDataCount", 0))
-
-    if sample_count <= 0:
-        return False, f"sampleCount={sample_count} <= 0"
-    if no_data_count >= sample_count:
-        return False, f"noDataCount={no_data_count} >= sampleCount={sample_count}"
+    valid = observation_quality.observed_pixel_count(stats.get("sampleCount"), stats.get("noDataCount"))
+    if not valid:
+        return False, "no valid samples (missing counts or every pixel masked)"
 
     # Check that all required numeric stats are present and finite
     for stat_key in ("mean", "min", "max", "stDev"):
@@ -251,6 +314,7 @@ def _interval_is_valid_for_index(interval: dict, code: str) -> tuple[bool, str]:
 def parse_multi_index_stats_response(
     response_data: dict,
     index_codes: list[str],
+    expected_field_pixels: Optional[float] = None,
 ) -> dict[str, dict]:
     """
     Parse a Sentinel Hub Statistical API response into per-index result dicts.
@@ -283,6 +347,7 @@ def parse_multi_index_stats_response(
     if not intervals:
         logger.warning("Sentinel Hub returned empty intervals")
         return results
+    field_pixels = response_field_pixels(response_data, expected_field_pixels)
 
     for code in codes:
         latest_entry: Optional[dict] = None
@@ -313,9 +378,7 @@ def parse_multi_index_stats_response(
 
             stats = interval["outputs"][code]["bands"]["B0"]["stats"]
             percentiles = stats.get("percentiles", {})
-            sample_count = safe_int(stats.get("sampleCount", 0))
-            no_data_count = safe_int(stats.get("noDataCount", 0))
-            valid_pct = ((sample_count - no_data_count) / sample_count) * 100
+            verdict = _field_sample_verdict(interval, code, field_pixels)
             p10_val = safe_float(percentiles.get("10.0") or percentiles.get("10"))
             p90_val = safe_float(percentiles.get("90.0") or percentiles.get("90"))
 
@@ -328,7 +391,7 @@ def parse_multi_index_stats_response(
                 "std_value": round(safe_float(stats.get("stDev")), 4),
                 "p10_value": round(p10_val, 4) if p10_val is not None else None,
                 "p90_value": round(p90_val, 4) if p90_val is not None else None,
-                "valid_pixels_pct": round(valid_pct, 1),
+                **_sample_fields(verdict),
                 "cloud_cover_pct": None,
                 "satellite": "Sentinel-2",
                 "interval_from": interval_from_str,
@@ -356,6 +419,7 @@ def parse_multi_index_stats_response(
 def parse_multi_index_stats_response_flat(
     response_data: dict,
     index_codes: list[str],
+    expected_field_pixels: Optional[float] = None,
 ) -> list[dict]:
     """
     Parse Sentinel Hub Statistical API response into flat per-interval records.
@@ -383,6 +447,7 @@ def parse_multi_index_stats_response_flat(
     if not intervals:
         logger.warning("Sentinel Hub returned empty intervals")
         return results
+    field_pixels = response_field_pixels(response_data, expected_field_pixels)
 
     for interval in intervals:
         interval_from_str = interval.get("interval", {}).get("from", "")
@@ -409,9 +474,7 @@ def parse_multi_index_stats_response_flat(
 
             stats = interval["outputs"][code]["bands"]["B0"]["stats"]
             percentiles = stats.get("percentiles", {})
-            sample_count = safe_int(stats.get("sampleCount", 0))
-            no_data_count = safe_int(stats.get("noDataCount", 0))
-            valid_pct = ((sample_count - no_data_count) / sample_count) * 100
+            verdict = _field_sample_verdict(interval, code, field_pixels)
             p10_val = safe_float(percentiles.get("10.0") or percentiles.get("10"))
             p90_val = safe_float(percentiles.get("90.0") or percentiles.get("90"))
 
@@ -424,7 +487,7 @@ def parse_multi_index_stats_response_flat(
                 "std_value": round(safe_float(stats.get("stDev")), 4),
                 "p10_value": round(p10_val, 4) if p10_val is not None else None,
                 "p90_value": round(p90_val, 4) if p90_val is not None else None,
-                "valid_pixels_pct": round(valid_pct, 1),
+                **_sample_fields(verdict),
                 "cloud_cover_pct": None,
                 "satellite": "Sentinel-2",
                 "interval_from": interval_from_str,
@@ -522,8 +585,8 @@ def extract_intervals_metadata(
                 "mean": safe_float(stats_raw.get("mean")),
                 "min": safe_float(stats_raw.get("min")),
                 "max": safe_float(stats_raw.get("max")),
-                "sample_count": safe_int(stats_raw.get("sampleCount")),
-                "no_data_count": safe_int(stats_raw.get("noDataCount")),
+                "sample_count": safe_int(stats_raw.get("sampleCount"), default=None),
+                "no_data_count": safe_int(stats_raw.get("noDataCount"), default=None),
             }
 
         if not indices_in_interval:

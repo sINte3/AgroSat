@@ -70,6 +70,166 @@ MIN_PERCENTAGE = 0.0
 MAX_PERCENTAGE = 100.0
 
 
+# ─── Field-level spatial sample contract (TASK_246) ─────────────────────────
+#
+# A Statistical API response reports, per output, ``sampleCount`` (every pixel
+# of the request grid's bounding box) and ``noDataCount`` (pixels excluded by
+# that output's dataMask). The input ``dataMask`` band is 0 outside the field
+# polygon and where the acquisition has no data, so the collectors request, on
+# one grid, the index (masked by input dataMask AND the SCL classes) and an
+# ``observed`` footprint (masked by input dataMask only). A constant mask is
+# NOT clipped to the polygon: the TASK_246 live probe returned the whole
+# bounding box for it, so it cannot measure the field.
+#
+#   valid pixels     = index sampleCount - index noDataCount
+#   observed pixels  = observed sampleCount - observed noDataCount   (per interval)
+#   field pixels     = largest observed footprint among the intervals of the
+#                      response (one grid), never less than the polygon area in
+#                      pixels: a partial-swath acquisition cannot shrink the field
+#   valid share      = valid pixels / field pixels   (stored as valid_pixels_pct)
+#
+# A statistic computed from one pixel is a point sample, not a field statistic
+# (TASK_245 blocker B7), and missing counts are never read as "100 % valid".
+
+#: A request grid with fewer pixels than this is a point sample.
+MIN_GRID_SAMPLES = 2
+#: Fewest valid pixels from which a field mean/percentiles are accepted. 10
+#: pixels is 0.1 ha at 10 m and 0.4 ha at 20 m; the smallest active field
+#: (0.52 ha) has about 52 and 13 pixels at those resolutions.
+MIN_FIELD_VALID_SAMPLES = 10
+#: Fewest valid share of the field pixels for a field-level statistic. It is
+#: the existing analysis tier, so a partial-swath or mostly cloudy acquisition
+#: (TASK_246 live probe: 38 of 527 field pixels) can never be taken as the
+#: field's latest observation.
+MIN_FIELD_VALID_SHARE_PCT = MIN_VALID_PIXELS_ANALYSIS_PCT
+
+#: Highest physically plausible NDVI *field mean*. A mean of 1.0 needs zero red
+#: reflectance in every valid pixel; closed crop canopies measured by
+#: Sentinel-2 L2A stay below about 0.92. Single pixels can approach 1.0 at
+#: edges or artefacts, so this bound applies to the mean only.
+MAX_NDVI_FIELD_MEAN = 0.95
+
+SAMPLES_ACCEPTED = "accepted"
+SAMPLES_MISSING = "missing_sample_counts"
+SAMPLES_INCONSISTENT = "inconsistent_sample_counts"
+SAMPLES_POINT = "single_pixel_grid"
+SAMPLES_FIELD_TOO_SMALL = "field_too_small_for_grid"
+SAMPLES_TOO_FEW_VALID = "too_few_valid_samples"
+SAMPLES_PARTIAL_COVERAGE = "partial_field_coverage"
+
+
+@dataclass(frozen=True, slots=True)
+class FieldSampleVerdict:
+    """Whether one statistic comes from a real field-level spatial sample."""
+
+    accepted: bool
+    reason: str
+    detail: str
+    sample_count: int | None
+    no_data_count: int | None
+    valid_sample_count: int | None
+    field_sample_count: int | None
+
+    @property
+    def valid_pixels_pct(self) -> float | None:
+        """Valid share of the field polygon's pixels, or ``None`` when unknown."""
+        if self.valid_sample_count is None or not self.field_sample_count:
+            return None
+        return round(self.valid_sample_count / self.field_sample_count * 100.0, 1)
+
+    def as_dict(self) -> dict:
+        return {
+            "field_samples_accepted": self.accepted,
+            "field_samples_reason": self.reason,
+            "sample_count": self.sample_count,
+            "no_data_count": self.no_data_count,
+            "valid_sample_count": self.valid_sample_count,
+            "field_sample_count": self.field_sample_count,
+        }
+
+
+def _count(value: object) -> int | None:
+    """A provider pixel count: a non-negative integer, else ``None``."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float) and math.isfinite(value) and value.is_integer() and value >= 0:
+        return int(value)
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def observed_pixel_count(sample_count: object, no_data_count: object) -> int | None:
+    """Pixels of one output that passed its mask, from provider counts only."""
+    sc, nd = _count(sample_count), _count(no_data_count)
+    if sc is None or nd is None or nd > sc:
+        return None
+    return sc - nd
+
+
+def field_pixel_count(observed_counts, expected_field_pixels: float | None = None) -> int | None:
+    """Field pixels on one request grid: the largest observed footprint, floored
+    by the polygon area in pixels (``MetricRequestGrid.expected_field_pixels``)."""
+    observed = [count for count in observed_counts if isinstance(count, int) and count >= 0]
+    floor = None
+    if expected_field_pixels is not None and math.isfinite(float(expected_field_pixels)):
+        floor = int(round(float(expected_field_pixels)))
+    candidates = [value for value in (max(observed) if observed else None, floor) if value is not None]
+    return max(candidates) if candidates else None
+
+
+def evaluate_field_samples(
+    *,
+    sample_count: object,
+    no_data_count: object,
+    field_pixel_count: object,
+) -> FieldSampleVerdict:
+    """Evaluate the provider pixel counts of one index output of one interval.
+
+    ``sample_count``/``no_data_count`` are the index output's provider counts;
+    ``field_pixel_count`` is :func:`field_pixel_count` for the same request grid.
+    """
+    sc, nd, field = _count(sample_count), _count(no_data_count), _count(field_pixel_count)
+
+    def verdict(accepted, reason, detail, valid=None):
+        return FieldSampleVerdict(accepted, reason, detail, sc, nd, valid, field)
+
+    if None in (sc, nd, field):
+        return verdict(False, SAMPLES_MISSING, "sampleCount/noDataCount or field footprint missing")
+    if nd > sc or field > sc:
+        return verdict(False, SAMPLES_INCONSISTENT, "pixel counts are inconsistent with one request grid")
+    valid = sc - nd
+    if sc < MIN_GRID_SAMPLES:
+        return verdict(False, SAMPLES_POINT,
+                       f"request grid has {sc} pixel(s): a point sample, not a field statistic", valid)
+    if valid > field:
+        return verdict(False, SAMPLES_INCONSISTENT, "more valid pixels than field pixels", valid)
+    if field < MIN_FIELD_VALID_SAMPLES:
+        return verdict(False, SAMPLES_FIELD_TOO_SMALL,
+                       f"field covers {field} pixel(s) of this grid; {MIN_FIELD_VALID_SAMPLES} required", valid)
+    if valid < MIN_FIELD_VALID_SAMPLES:
+        return verdict(False, SAMPLES_TOO_FEW_VALID,
+                       f"{valid} valid pixel(s); {MIN_FIELD_VALID_SAMPLES} required", valid)
+    if valid * 100.0 < MIN_FIELD_VALID_SHARE_PCT * field:
+        return verdict(False, SAMPLES_PARTIAL_COVERAGE,
+                       f"{valid} of {field} field pixels valid; {MIN_FIELD_VALID_SHARE_PCT:.0f} % required", valid)
+    return verdict(True, SAMPLES_ACCEPTED, f"{valid} of {field} field pixels valid", valid)
+
+
+def field_sample_gate(record: dict) -> tuple[bool, str]:
+    """Write-path gate: admit only observations whose parser accepted the field samples.
+
+    Fails closed: an observation without the parser's sample verdict (for
+    example a payload from an older code path) is never persisted.
+    """
+    if not isinstance(record, dict) or record.get("field_samples_accepted") is not True:
+        reason = record.get("field_samples_reason") if isinstance(record, dict) else None
+        return False, f"field-level sample contract not met ({reason or SAMPLES_MISSING})"
+    return True, SAMPLES_ACCEPTED
+
+
 # ─── Verdict vocabulary ──────────────────────────────────────────────────────
 
 ACCEPTED = "accepted"

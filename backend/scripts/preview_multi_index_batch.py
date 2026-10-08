@@ -77,47 +77,20 @@ def _build_statistical_payload(
     resolution: int = 20,
     max_cloud_coverage: int = 80,
 ) -> dict:
-    return {
-        "input": {
-            "bounds": {
-                "geometry": geometry_geojson,
-                "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"},
-            },
-            "data": [
-                {
-                    "type": "sentinel-2-l2a",
-                    "dataFilter": {
-                        "timeRange": {
-                            "from": f"{date_from.isoformat()}T00:00:00Z",
-                            "to": f"{date_to.isoformat()}T23:59:59Z",
-                        },
-                        "maxCloudCoverage": max_cloud_coverage,
-                    },
-                    "processing": {"harmonizeValues": True},
-                }
-            ],
-        },
-        "aggregation": {
-            "timeRange": {
-                "from": f"{date_from.isoformat()}T00:00:00Z",
-                "to": f"{date_to.isoformat()}T23:59:59Z",
-            },
-            "aggregationInterval": {"of": aggregation_interval},
-            "evalscript": evalscript,
-            "resx": resolution,
-            "resy": resolution,
-        },
-        "calculations": {
-            code: {
-                "statistics": {
-                    "default": {
-                        "percentiles": {"k": [10, 90]},
-                    }
-                }
-            }
-            for code in index_codes
-        },
-    }
+    # TASK_246: one canonical payload (metric UTM grid, resolution in metres,
+    # shared mask contract); this legacy tool never builds its own request.
+    from services.satellite_collection import build_statistical_payload as _canonical_payload
+
+    return _canonical_payload(
+        geometry_geojson=geometry_geojson,
+        evalscript=evalscript,
+        index_codes=index_codes,
+        date_from=date_from,
+        date_to=date_to,
+        aggregation_interval=aggregation_interval,
+        resolution=resolution,
+        max_cloud_coverage=max_cloud_coverage,
+    )
 
 
 # -- CLI --
@@ -532,14 +505,14 @@ def run_self_test() -> None:
     _st6_write_kws = ["commit(", "flush(", ".add(", ".merge(", ".delete(",
                       "INSERT ", "UPDATE ", "DELETE ", "TRUNCATE ", "CREATE ", "DROP ",
                       "create_all", "Alembic"]
-    # Lines 530-532 define _st6_write_kws; skip them in the scan below.
+    # Lines 505-507 define _st6_write_kws; skip them in the scan below.
     if _st6_source_lines:
         for _st6_lineno, _st6_line in enumerate(_st6_source_lines, 1):
             _st6_stripped = _st6_line.strip()
             # Skip comments, docstrings, and the 3 definition lines
             if _st6_stripped.startswith("#") or _st6_stripped.startswith('"""') or _st6_stripped.startswith("'''"):
                 continue
-            if 530 <= _st6_lineno <= 532:
+            if 505 <= _st6_lineno <= 507:
                 continue
             for _st6_kw in _st6_write_kws:
                 if _st6_kw in _st6_stripped:

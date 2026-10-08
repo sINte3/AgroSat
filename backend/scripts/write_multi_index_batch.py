@@ -79,47 +79,20 @@ def _build_statistical_payload(
     date_to: date,
     max_cloud_coverage: int = 80,
 ) -> dict:
-    return {
-        "input": {
-            "bounds": {
-                "geometry": geometry_geojson,
-                "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"},
-            },
-            "data": [
-                {
-                    "type": "sentinel-2-l2a",
-                    "dataFilter": {
-                        "timeRange": {
-                            "from": f"{date_from.isoformat()}T00:00:00Z",
-                            "to": f"{date_to.isoformat()}T23:59:59Z",
-                        },
-                        "maxCloudCoverage": max_cloud_coverage,
-                    },
-                    "processing": {"harmonizeValues": True},
-                }
-            ],
-        },
-        "aggregation": {
-            "timeRange": {
-                "from": f"{date_from.isoformat()}T00:00:00Z",
-                "to": f"{date_to.isoformat()}T23:59:59Z",
-            },
-            "aggregationInterval": {"of": "P5D"},
-            "evalscript": evalscript,
-            "resx": 20,
-            "resy": 20,
-        },
-        "calculations": {
-            code: {
-                "statistics": {
-                    "default": {
-                        "percentiles": {"k": [10, 90]},
-                    }
-                }
-            }
-            for code in index_codes
-        },
-    }
+    # TASK_246: one canonical payload (metric UTM grid, resolution in metres,
+    # shared mask contract); this legacy tool never builds its own request.
+    from services.satellite_collection import build_statistical_payload as _canonical_payload
+
+    return _canonical_payload(
+        geometry_geojson=geometry_geojson,
+        evalscript=evalscript,
+        index_codes=index_codes,
+        date_from=date_from,
+        date_to=date_to,
+        aggregation_interval="P1D",
+        resolution=20,
+        max_cloud_coverage=max_cloud_coverage,
+    )
 
 
 # -- Preflight helpers --
@@ -171,6 +144,12 @@ def _prepare_records(parsed: dict[str, dict]) -> list[dict]:
     """Convert parsed results into row dicts.  Rejects NaN/Inf."""
     records = []
     for code, d in parsed.items():
+        if d.get("field_samples_accepted") is not True:
+            # TASK_246: a point sample or a statistic without provider pixel
+            # counts is not a field statistic and is never written.
+            reason = d.get("field_samples_reason") or "missing_sample_counts"
+            print(f"SKIP: {code} is not a field-level statistic ({reason})", file=sys.stderr)
+            continue
         for key in ("mean_value", "min_value", "max_value", "std_value", "valid_pixels_pct"):
             val = d.get(key)
             if val is not None:
@@ -466,6 +445,8 @@ def _mock_multi_index_response() -> dict:
                     "ndre": {"bands": {"B0": {"stats": {"sampleCount": 1200, "noDataCount": 80,
                         "mean": "0.281", "min": "0.095", "max": "0.498", "stDev": "0.039",
                         "percentiles": {"10.0": "0.145", "90.0": "0.412"}}}}},
+                    "observed": {"bands": {"B0": {"stats": {"sampleCount": 1200, "noDataCount": 40,
+                        "mean": "1", "min": "1", "max": "1", "stDev": "0"}}}},
                 },
             }
         ]
@@ -517,6 +498,7 @@ def run_self_test() -> None:
             "mean_value": 0.0, "min_value": 0.0, "max_value": 0.0,
             "std_value": 0.0, "p10_value": 0.0, "p90_value": 0.0,
             "valid_pixels_pct": 100.0, "cloud_cover_pct": None, "satellite": "Sentinel-2",
+            "field_samples_accepted": True,
         }
     }
     recs = _prepare_records(parsed_with_zero)
@@ -535,6 +517,7 @@ def run_self_test() -> None:
                 "mean_value": val, "min_value": 0.1, "max_value": 0.8,
                 "std_value": 0.05, "p10_value": 0.2, "p90_value": 0.7,
                 "valid_pixels_pct": 100.0, "cloud_cover_pct": None, "satellite": "Sentinel-2",
+            "field_samples_accepted": True,
             }
         }
         try:
@@ -590,7 +573,7 @@ def run_self_test() -> None:
             _st12_stripped = _st12_line.strip()
             if _st12_stripped.startswith("#") or _st12_stripped.startswith('"""') or _st12_stripped.startswith("'''"):
                 continue
-            if _st12_lineno >= 575 and _st12_lineno <= 617:
+            if _st12_lineno >= 558 and _st12_lineno <= 600:
                 continue
             if "ndvi_records" in _st12_stripped:
                 errors.append(
@@ -613,7 +596,7 @@ def run_self_test() -> None:
             if _st13_stripped.startswith("#") or _st13_stripped.startswith('"""') or _st13_stripped.startswith("'''"):
                 continue
             # Skip the lines where _st13_forbidden is defined (this block)
-            if _st13_lineno >= 575 and _st13_lineno <= 617:
+            if _st13_lineno >= 558 and _st13_lineno <= 600:
                 continue
             for _st13_kw in _st13_forbidden:
                 if _st13_kw in _st13_stripped:

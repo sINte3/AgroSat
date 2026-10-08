@@ -34,10 +34,10 @@ class CollectNdviTests(unittest.TestCase):
   service=Mock(is_mock=False,source="Sentinel-2");service.get_ndvi_stats.return_value={"satellite":"Sentinel-2","mean_ndvi":2,"captured_date":date.today().isoformat()}
   with tempfile.TemporaryDirectory() as d:self.assertEqual(c.run(self.args("--apply","--field-id","1","--output-log",str(Path(d)/"x.json")),lookup=lambda _:{"geometry_wkt":"X"},service_factory=lambda:service),0)
  def test_13_writer_insert(self):
-  service=Mock(is_mock=False,source="Sentinel-2");service.get_ndvi_stats.return_value={"satellite":"Sentinel-2","mean_ndvi":.5,"captured_date":date.today().isoformat()};writer=Mock(return_value=True)
+  service=Mock(is_mock=False,source="Sentinel-2");service.get_ndvi_stats.return_value={"satellite":"Sentinel-2","mean_ndvi":.5,"captured_date":date.today().isoformat(),"field_samples_accepted":True};writer=Mock(return_value=True)
   with tempfile.TemporaryDirectory() as d:self.assertEqual(c.run(self.args("--write","--field-id","1","--output-log",str(Path(d)/"x.json")),lookup=lambda _:{"geometry_wkt":"X","enterprise_id":17},service_factory=lambda:service,writer=writer),0);writer.assert_called_once()
  def test_14_writer_skip_existing(self):
-  service=Mock(is_mock=False,source="Sentinel-2");service.get_ndvi_stats.return_value={"satellite":"Sentinel-2","mean_ndvi":.5,"captured_date":date.today().isoformat()};writer=Mock(return_value=False)
+  service=Mock(is_mock=False,source="Sentinel-2");service.get_ndvi_stats.return_value={"satellite":"Sentinel-2","mean_ndvi":.5,"captured_date":date.today().isoformat(),"field_samples_accepted":True};writer=Mock(return_value=False)
   with tempfile.TemporaryDirectory() as d:self.assertEqual(c.run(self.args("--write","--field-id","1","--output-log",str(Path(d)/"x.json")),lookup=lambda _:{"geometry_wkt":"X","enterprise_id":17},service_factory=lambda:service,writer=writer),0);self.assertEqual(json.loads((Path(d)/"x.json").read_text())["skipped_existing_count"],1)
  def test_15_lock_contention(self):
   with tempfile.TemporaryDirectory() as d,patch.object(c,"acquire_lock",side_effect=SystemExit(3)):self.assertEqual(c.run(self.args("--apply","--field-id","1","--output-log",str(Path(d)/"x.json"))),3)
@@ -57,7 +57,7 @@ class CollectNdviTests(unittest.TestCase):
   service=Mock(is_mock=False,source="Sentinel-2");service.get_ndvi_stats.return_value={"satellite":"Sentinel-2","mean_ndvi":.5}
   with tempfile.TemporaryDirectory() as d:self.assertEqual(c.run(self.args("--apply","--field-id","1","--output-log",str(Path(d)/"x")),lookup=lambda _:{"geometry_wkt":"X"},service_factory=lambda:service),2)
  def test_23_persistence_exception_is_contract_error(self):
-  service=Mock(is_mock=False,source="Sentinel-2");service.get_ndvi_stats.return_value={"satellite":"Sentinel-2","mean_ndvi":.5,"captured_date":date.today().isoformat()}
+  service=Mock(is_mock=False,source="Sentinel-2");service.get_ndvi_stats.return_value={"satellite":"Sentinel-2","mean_ndvi":.5,"captured_date":date.today().isoformat(),"field_samples_accepted":True}
   with tempfile.TemporaryDirectory() as d:self.assertEqual(c.run(self.args("--write","--field-id","1","--output-log",str(Path(d)/"x")),lookup=lambda _:{"geometry_wkt":"X","enterprise_id":17},service_factory=lambda:service,writer=Mock(side_effect=RuntimeError("db"))),2)
  def test_24_sanitizer_windows_user_path(self): self.assertNotIn("Example User",c.sanitize_text(r"\\?\C:\Users\Example User\file"))
  def test_25_sanitizer_device_user_path(self): self.assertNotIn("Example User",c.sanitize_text(r"\Device\HarddiskVolume3\Users\Example User\file"))

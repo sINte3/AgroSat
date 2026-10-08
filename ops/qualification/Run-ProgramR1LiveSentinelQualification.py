@@ -128,6 +128,10 @@ class GeometrySummary:
     fingerprint: str
     bbox: tuple[float, float, float, float]
     area_hectares: float
+    # TASK_246: the Statistical request carries this field polygon re-projected
+    # onto its metric UTM grid by services.sentinel_grid (10 m for NDVI).
+    statistical_grid_fingerprint: str = ""
+    statistical_grid_crs: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -139,6 +143,11 @@ class GeometrySummary:
                 "south": self.bbox[1],
                 "east": self.bbox[2],
                 "north": self.bbox[3],
+            },
+            "statisticalGrid": {
+                "crs": self.statistical_grid_crs,
+                "fingerprint": self.statistical_grid_fingerprint,
+                "resolutionMetres": 10,
             },
             "areaHectares": self.area_hectares,
             "sourceClass": "deterministic_isolated_task_211_geometry",
@@ -408,11 +417,16 @@ def validate_geometry(geometry: dict[str, Any]) -> GeometrySummary:
     area_hectares = abs(area_square_metres) / 10_000.0
     if not 0.1 <= area_hectares <= 500.0:
         raise RequestContractError("geometry is not field-sized")
+    from services.sentinel_grid import NDVI_RESOLUTION_M, metric_request_grid
+
+    grid = metric_request_grid(geometry, NDVI_RESOLUTION_M)
     return GeometrySummary(
         geometry_type=candidate.geom_type,
         fingerprint=geometry_fingerprint(geometry),
         bbox=(round(west, 6), round(south, 6), round(east, 6), round(north, 6)),
         area_hectares=round(area_hectares, 3),
+        statistical_grid_fingerprint=geometry_fingerprint(grid.geometry),
+        statistical_grid_crs=grid.crs,
     )
 
 
@@ -640,10 +654,10 @@ class BoundedHttpRecorder:
             NDVI_EVALSCRIPT,
             NDVI_INDEX_CODE,
             NDVI_MASK_CONTRACT_ID,
-            SENTINEL_CRS,
             SENTINEL_DATASET,
             SENTINEL_MAX_CLOUD_COVERAGE,
         )
+        from services.sentinel_grid import NDVI_RESOLUTION_M
 
         payload = kwargs.get("json")
         if not isinstance(payload, dict):
@@ -663,10 +677,14 @@ class BoundedHttpRecorder:
             raise RequestContractError("statistical application payload is invalid") from None
         if len(data_items) != 1 or data_item.get("type") != SENTINEL_DATASET:
             raise RequestContractError("statistical dataset is not Sentinel-2 L2A")
-        if geometry_fingerprint(geometry) != self.geometry_summary.fingerprint:
+        # TASK_246: the field polygon re-projected onto its metric UTM grid,
+        # never an EPSG:4326 request whose numeric resolution means degrees.
+        if geometry_fingerprint(geometry) != self.geometry_summary.statistical_grid_fingerprint:
             raise RequestContractError("statistical geometry changed")
-        if crs != SENTINEL_CRS:
+        if crs != self.geometry_summary.statistical_grid_crs:
             raise RequestContractError("statistical CRS changed")
+        if aggregation.get("resx") != NDVI_RESOLUTION_M or aggregation.get("resy") != NDVI_RESOLUTION_M:
+            raise RequestContractError("statistical grid resolution changed")
         input_from, input_to, window_days = _validate_time_range(
             input_time,
             maximum_days=MAX_DATE_WINDOW_DAYS,
@@ -693,11 +711,13 @@ class BoundedHttpRecorder:
             "operation": "sentinel_statistical_ndvi",
             "indices": [NDVI_INDEX_CODE],
             "dateWindowDays": window_days,
+            # Source field identity: the request geometry was verified above to
+            # be this polygon's exact metric re-projection.
             "geometryFingerprint": self.geometry_summary.fingerprint,
             "intervalFromUtc": input_from,
             "intervalToUtc": input_to,
             "dataset": SENTINEL_DATASET,
-            "crs": SENTINEL_CRS,
+            "crs": self.geometry_summary.statistical_grid_crs,
             "maskContractId": NDVI_MASK_CONTRACT_ID,
             "evalscriptSha256": hashlib.sha256(NDVI_EVALSCRIPT.encode("utf-8")).hexdigest(),
         }
@@ -1075,10 +1095,15 @@ def _reconciliation_facts(
         and statistical_entry.get("geometryFingerprint")
         == process_entry.get("geometryFingerprint")
     )
-    same_crs = bool(
+    # TASK_246: the two requests deliberately use different CRSs. Statistics
+    # run on the field's metric UTM grid (the recorder already pinned the exact
+    # CRS and re-projected geometry); the Process raster stays in EPSG:4326.
+    statistical_crs = str((statistical_entry or {}).get("crs") or "")
+    consistent_crs = bool(
         statistical_entry
         and process_entry
-        and statistical_entry.get("crs") == SENTINEL_CRS
+        and statistical_crs.startswith(("http://www.opengis.net/def/crs/EPSG/0/326",
+                                        "http://www.opengis.net/def/crs/EPSG/0/327"))
         and process_entry.get("crs") == SENTINEL_CRS
     )
     exact_interval = bool(
@@ -1102,7 +1127,7 @@ def _reconciliation_facts(
         "sameDataset": same_dataset,
         "sameIndex": same_index,
         "sameGeometryFingerprint": same_geometry,
-        "sameCrs": same_crs,
+        "consistentCrs": consistent_crs,
         "exactIntervalBounds": exact_interval,
         "compatibleMaskContract": same_mask,
         "sameHarmonization": bool(statistical_entry and process_entry),
@@ -1116,7 +1141,7 @@ def _reconciliation_facts(
             "sameDataset",
             "sameIndex",
             "sameGeometryFingerprint",
-            "sameCrs",
+            "consistentCrs",
             "exactIntervalBounds",
             "compatibleMaskContract",
             "sameHarmonization",
@@ -1436,7 +1461,8 @@ def run_live(
                 "provider": stats_result.get("provider") if stats_result else None,
                 "indexCode": stats_result.get("index_code") if stats_result else NDVI_INDEX_CODE,
                 "dataset": stats_result.get("dataset") if stats_result else SENTINEL_DATASET,
-                "crs": SENTINEL_CRS,
+                "crs": geometry_summary.statistical_grid_crs,
+                "gridResolutionMetres": 10,
                 "geometryFingerprint": geometry_summary.fingerprint if stats_entry else None,
                 "requestSucceeded": bool(stats_entry and stats_entry.get("httpStatus") == 200),
                 "applicationResultParseable": stats_parseable and stats_result is not None,
@@ -1463,6 +1489,8 @@ def run_live(
                 "noDataCount": stats_result.get("no_data_count") if stats_result else None,
                 "validPixelCount": stats_result.get("valid_pixel_count") if stats_result else None,
                 "validPixelsPct": stats_result.get("valid_pixels_pct") if stats_result else None,
+                "fieldPixelCount": stats_result.get("field_pixel_count") if stats_result else None,
+                "fieldSamplesAccepted": stats_result.get("field_samples_accepted") if stats_result else None,
                 "qualityValidationPassed": quality_passed,
                 "qualityOutcomeClass": quality_reason_class,
                 "thresholdsChanged": False,

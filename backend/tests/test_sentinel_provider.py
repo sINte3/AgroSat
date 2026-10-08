@@ -68,8 +68,9 @@ def _stats_body() -> dict:
                     "bands": {
                         "B0": {
                             "stats": {
-                                "sampleCount": 12,
-                                "noDataCount": 1,
+                                # TASK_246: a 47.5 ha polygon on a 10 m grid (bounding box 9500 px).
+                                "sampleCount": 9500,
+                                "noDataCount": 4500,
                                 "mean": 0.5,
                                 "min": 0.2,
                                 "max": 0.8,
@@ -78,7 +79,9 @@ def _stats_body() -> dict:
                             }
                         }
                     }
-                }
+                },
+                # TASK_246: the observed footprint output on the same request grid.
+                "observed": {"bands": {"B0": {"stats": {"sampleCount": 9500, "noDataCount": 4400}}}},
             },
         }]
     }
@@ -153,7 +156,13 @@ def test_token_statistics_and_process_share_one_provider_and_cached_token(
 
     assert process_response.status_code == 200
     assert stats and stats["captured_date"] == "2026-07-25"
-    assert stats["captured_date_semantics"] == "aggregation_interval_start_utc_date_not_acquisition_date"
+    # TASK_246: a P1D interval holds one UTC day of acquisitions.
+    assert stats["captured_date_semantics"] == "utc_acquisition_day_of_p1d_interval"
+    assert stats["field_samples_accepted"] is True
+    assert (stats["valid_pixel_count"], stats["field_pixel_count"]) == (5000, 5100)
+    bounds = statistical_payloads[0]["input"]["bounds"]
+    assert bounds["properties"]["crs"] == "http://www.opengis.net/def/crs/EPSG/0/32641"
+    assert statistical_payloads[0]["aggregation"]["resx"] == 10
     assert stats["interval_from_utc"] == "2026-07-25T00:00:00Z"
     assert stats["interval_to_utc"] == "2026-07-26T00:00:00Z"
     assert stats["acquisition_timestamp_available"] is False
@@ -187,7 +196,8 @@ def _interval(from_value, to_value, *, sample_count=12, no_data_count=1, mean=0.
                         }
                     }
                 }
-            }
+            },
+            "observed": {"bands": {"B0": {"stats": {"sampleCount": sample_count, "noDataCount": 0}}}},
         },
     }
 

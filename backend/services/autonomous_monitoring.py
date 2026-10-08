@@ -40,6 +40,14 @@ DETECTION_LOOKBACK_DAYS = 120
 DETECTION_BASELINE_SCENES = 12
 DETECTION_PERSISTENCE_WINDOW = 3
 SUPPORT_WINDOW_DAYS = 3
+# Until TASK_246 the NDVI collector stored the latest 5-day (P5D) aggregation
+# bucket under its START date on every daily run, so one Sentinel acquisition
+# was persisted on up to five consecutive captured dates with identical
+# statistics. Such rows are one acquisition, never persistence: rows of a field
+# whose statistics are identical within this many days of the first one
+# collapse into that first row (its id and date stay the scene identity, so a
+# later duplicate cannot pose as a new scene).
+DUPLICATE_ACQUISITION_SPAN_DAYS = 4
 CANDIDATE_PRIORITY = {"EXTREME": "urgent", "HIGH": "high", "MODERATE": "normal", "LOW": "low"}
 FIELD_SCOPE_LIMITATION = (
     "Field-mean statistics of accepted Sentinel-2 observations: the zone is the whole field. "
@@ -344,7 +352,14 @@ def apply_freshness_recovery(session) -> int:
 
 
 def _detection_series(session, *, as_of_date: date, lookback_from: date) -> dict[int, dict]:
-    """Bounded accepted NDVI series for every active field, oldest first."""
+    """Bounded accepted NDVI series for every active field, oldest first.
+
+    Each scene is one acquisition: duplicate rows (see
+    ``DUPLICATE_ACQUISITION_SPAN_DAYS``) are collapsed before the window of
+    ``DETECTION_BASELINE_SCENES + DETECTION_PERSISTENCE_WINDOW`` scenes is taken,
+    so a repeated row can neither lengthen a baseline nor count as persistence.
+    """
+    scenes_per_field = DETECTION_BASELINE_SCENES + DETECTION_PERSISTENCE_WINDOW
     rows = _rows(session.execute(text(f"""
         WITH scope AS (
           SELECT f.id,f.enterprise_id,
@@ -354,10 +369,12 @@ def _detection_series(session, *, as_of_date: date, lookback_from: date) -> dict
              AND NOT ST_IsEmpty(f.geometry) AND ST_IsValid(f.geometry)
         )
         SELECT s.id AS field_id,s.enterprise_id,s.area_ha,
-               obs.id,obs.captured_date,obs.value,obs.valid_pixels_pct,obs.cloud_cover_pct
+               obs.id,obs.captured_date,obs.value,obs.valid_pixels_pct,obs.cloud_cover_pct,
+               obs.min_ndvi,obs.max_ndvi,obs.std_ndvi,obs.p10_ndvi,obs.p90_ndvi
           FROM scope s
           CROSS JOIN LATERAL (
-            SELECT n.id,n.captured_date,n.mean_ndvi AS value,n.valid_pixels_pct,n.cloud_cover_pct
+            SELECT n.id,n.captured_date,n.mean_ndvi AS value,n.valid_pixels_pct,n.cloud_cover_pct,
+                   n.min_ndvi,n.max_ndvi,n.std_ndvi,n.p10_ndvi,n.p90_ndvi
               FROM ndvi_records n
              WHERE n.field_id=s.id AND n.captured_date<=:as_of_date
                AND n.captured_date>=:lookback_from AND {_DETECTION_NDVI_ACCEPTED}
@@ -367,7 +384,7 @@ def _detection_series(session, *, as_of_date: date, lookback_from: date) -> dict
          ORDER BY s.id,obs.captured_date,obs.id
     """), {
         "as_of_date": as_of_date, "lookback_from": lookback_from,
-        "per_field": DETECTION_BASELINE_SCENES + DETECTION_PERSISTENCE_WINDOW,
+        "per_field": scenes_per_field * (DUPLICATE_ACQUISITION_SPAN_DAYS + 1),
     }))
     series: dict[int, dict] = {}
     for row in rows:
@@ -376,11 +393,22 @@ def _detection_series(session, *, as_of_date: date, lookback_from: date) -> dict
             "area_ha": float(row["area_ha"]) if row["area_ha"] is not None else 0.0,
             "scenes": [],
         })
+        statistics = tuple(row[key] for key in (
+            "value", "min_ndvi", "max_ndvi", "std_ndvi", "p10_ndvi", "p90_ndvi", "valid_pixels_pct",
+        ))
+        previous = entry["scenes"][-1] if entry["scenes"] else None
+        if (previous is not None and previous["statistics"] == statistics
+                and (row["captured_date"] - previous["date"]).days <= DUPLICATE_ACQUISITION_SPAN_DAYS):
+            previous["duplicate_ids"].append(int(row["id"]))
+            continue
         entry["scenes"].append({
             "id": int(row["id"]), "date": row["captured_date"], "value": float(row["value"]),
             "valid_pixels_pct": float(row["valid_pixels_pct"]),
             "cloud_cover_pct": row["cloud_cover_pct"],
+            "statistics": statistics, "duplicate_ids": [],
         })
+    for entry in series.values():
+        entry["scenes"] = entry["scenes"][-scenes_per_field:]
     return series
 
 
@@ -531,6 +559,7 @@ def _observation_assessments(session, *, as_of: datetime) -> tuple[list[dict], d
                          "dates": [scene["date"].isoformat() for scene in baseline_scenes]},
             "persistence": {"scenes": persistence,
                             "record_ids": [scene["id"] for scene in scenes[len(scenes) - persistence:]]},
+            "duplicate_rows_collapsed": sum(len(scene["duplicate_ids"]) for scene in scenes),
             "supporting": supporting,
             "quality": {"valid_pixels_pct": current["valid_pixels_pct"],
                         "cloud_cover_pct": current["cloud_cover_pct"],

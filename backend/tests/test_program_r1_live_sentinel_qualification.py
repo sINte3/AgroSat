@@ -71,42 +71,12 @@ def _rgba_png(*, visible=True):
 
 
 def _statistical_payload(start: date, end_inclusive: date):
-    from services.satellite import (
-        NDVI_EVALSCRIPT,
-        SENTINEL_CRS,
-        SENTINEL_DATASET,
-        SENTINEL_MAX_CLOUD_COVERAGE,
-    )
+    # TASK_246: the application's own builder (metric UTM grid, 10 m).
+    from services.satellite import build_ndvi_statistical_payload
 
-    end_exclusive = end_inclusive + timedelta(days=1)
-    time_range = {
-        "from": f"{start.isoformat()}T00:00:00Z",
-        "to": f"{end_exclusive.isoformat()}T00:00:00Z",
-    }
-    return {
-        "input": {
-            "bounds": {
-                "geometry": HARNESS.QUALIFICATION_GEOMETRY,
-                "properties": {"crs": SENTINEL_CRS},
-            },
-            "data": [{
-                "type": SENTINEL_DATASET,
-                "dataFilter": {
-                    "timeRange": dict(time_range),
-                    "maxCloudCoverage": SENTINEL_MAX_CLOUD_COVERAGE,
-                },
-                "processing": {"harmonizeValues": True},
-            }],
-        },
-        "aggregation": {
-            "timeRange": dict(time_range),
-            "aggregationInterval": {"of": "P1D"},
-            "evalscript": NDVI_EVALSCRIPT,
-            "resx": 10,
-            "resy": 10,
-        },
-        "calculations": {"default": {}},
-    }
+    return build_ndvi_statistical_payload(
+        HARNESS.QUALIFICATION_GEOMETRY, start, end_inclusive, "P1D"
+    )
 
 
 def _process_payload(
@@ -132,6 +102,7 @@ def _stats_interval(
     sample_count=12,
     no_data_count=1,
     mean=0.5,
+    observed_no_data=0,
 ):
     return {
         "interval": {"from": interval_from, "to": interval_to},
@@ -150,16 +121,22 @@ def _stats_interval(
                         }
                     }
                 }
-            }
+            },
+            "observed": {"bands": {"B0": {"stats": {"sampleCount": sample_count,
+                                                    "noDataCount": observed_no_data}}}},
         },
     }
 
 
 def _stats_body():
+    # TASK_246: the 95 ha qualification square on a 10 m grid (9510 field pixels).
     return {
         "data": [_stats_interval(
             "2026-07-30T00:00:00Z",
             "2026-07-31T00:00:00Z",
+            sample_count=19600,
+            no_data_count=9900,
+            observed_no_data=9800,
         )]
     }
 
@@ -431,7 +408,7 @@ def test_current_real_application_chain_uses_one_cdse_token_exact_interval_and_d
             "sameDataset",
             "sameIndex",
             "sameGeometryFingerprint",
-            "sameCrs",
+            "consistentCrs",
             "exactIntervalBounds",
             "compatibleMaskContract",
         )

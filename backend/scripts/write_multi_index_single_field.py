@@ -80,47 +80,20 @@ def _build_statistical_payload(
     resolution: int = 20,
     max_cloud_coverage: int = 80,
 ) -> dict:
-    return {
-        "input": {
-            "bounds": {
-                "geometry": geometry_geojson,
-                "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"},
-            },
-            "data": [
-                {
-                    "type": "sentinel-2-l2a",
-                    "dataFilter": {
-                        "timeRange": {
-                            "from": f"{date_from.isoformat()}T00:00:00Z",
-                            "to": f"{date_to.isoformat()}T23:59:59Z",
-                        },
-                        "maxCloudCoverage": max_cloud_coverage,
-                    },
-                    "processing": {"harmonizeValues": True},
-                }
-            ],
-        },
-        "aggregation": {
-            "timeRange": {
-                "from": f"{date_from.isoformat()}T00:00:00Z",
-                "to": f"{date_to.isoformat()}T23:59:59Z",
-            },
-            "aggregationInterval": {"of": aggregation_interval},
-            "evalscript": evalscript,
-            "resx": resolution,
-            "resy": resolution,
-        },
-        "calculations": {
-            code: {
-                "statistics": {
-                    "default": {
-                        "percentiles": {"k": [10, 90]},
-                    }
-                }
-            }
-            for code in index_codes
-        },
-    }
+    # TASK_246: one canonical payload (metric UTM grid, resolution in metres,
+    # shared mask contract); this legacy tool never builds its own request.
+    from services.satellite_collection import build_statistical_payload as _canonical_payload
+
+    return _canonical_payload(
+        geometry_geojson=geometry_geojson,
+        evalscript=evalscript,
+        index_codes=index_codes,
+        date_from=date_from,
+        date_to=date_to,
+        aggregation_interval=aggregation_interval,
+        resolution=resolution,
+        max_cloud_coverage=max_cloud_coverage,
+    )
 
 
 # ── Preflight checks ───────────────────────────────────────────────────────
@@ -183,6 +156,12 @@ def _prepare_records(parsed: dict[str, dict]) -> list[dict]:
     """Convert parsed results into row dicts for upsert. Rejects NaN/Inf."""
     records = []
     for code, d in parsed.items():
+        if d.get("field_samples_accepted") is not True:
+            # TASK_246: a point sample or a statistic without provider pixel
+            # counts is not a field statistic and is never written.
+            reason = d.get("field_samples_reason") or "missing_sample_counts"
+            print(f"SKIP: {code} is not a field-level statistic ({reason})", file=sys.stderr)
+            continue
         for key in ("mean_value", "min_value", "max_value", "std_value", "valid_pixels_pct"):
             val = d.get(key)
             if val is not None:
@@ -419,6 +398,8 @@ def _mock_multi_index_response() -> dict:
                     "ndre": {"bands": {"B0": {"stats": {"sampleCount": 1200, "noDataCount": 80,
                         "mean": "0.281", "min": "0.095", "max": "0.498", "stDev": "0.039",
                         "percentiles": {"10.0": "0.145", "90.0": "0.412"}}}}},
+                    "observed": {"bands": {"B0": {"stats": {"sampleCount": 1200, "noDataCount": 40,
+                        "mean": "1", "min": "1", "max": "1", "stDev": "0"}}}},
                 },
             }
         ]
@@ -451,6 +432,7 @@ def run_self_test() -> None:
             "valid_pixels_pct": 100.0,
             "cloud_cover_pct": None,
             "satellite": "Sentinel-2",
+            "field_samples_accepted": True,
         }
     }
     recs = _prepare_records(parsed_with_zero)
@@ -475,6 +457,7 @@ def run_self_test() -> None:
             "valid_pixels_pct": 100.0,
             "cloud_cover_pct": None,
             "satellite": "Sentinel-2",
+            "field_samples_accepted": True,
         }
     }
     try:
@@ -496,6 +479,7 @@ def run_self_test() -> None:
             "valid_pixels_pct": 100.0,
             "cloud_cover_pct": None,
             "satellite": "Sentinel-2",
+            "field_samples_accepted": True,
         }
     }
     try:

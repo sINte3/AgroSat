@@ -121,47 +121,20 @@ def build_statistical_payload(
     max_cloud_coverage: int = 80,
 ) -> dict:
     """Build a Sentinel Hub Statistical API payload dict (no IO)."""
-    return {
-        "input": {
-            "bounds": {
-                "geometry": geometry_geojson,
-                "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"},
-            },
-            "data": [
-                {
-                    "type": "sentinel-2-l2a",
-                    "dataFilter": {
-                        "timeRange": {
-                            "from": f"{date_from.isoformat()}T00:00:00Z",
-                            "to": f"{date_to.isoformat()}T23:59:59Z",
-                        },
-                        "maxCloudCoverage": max_cloud_coverage,
-                    },
-                    "processing": {"harmonizeValues": True},
-                }
-            ],
-        },
-        "aggregation": {
-            "timeRange": {
-                "from": f"{date_from.isoformat()}T00:00:00Z",
-                "to": f"{date_to.isoformat()}T23:59:59Z",
-            },
-            "aggregationInterval": {"of": aggregation_interval},
-            "evalscript": evalscript,
-            "resx": resolution,
-            "resy": resolution,
-        },
-        "calculations": {
-            code: {
-                "statistics": {
-                    "default": {
-                        "percentiles": {"k": [10, 90]},
-                    }
-                }
-            }
-            for code in index_codes
-        },
-    }
+    # TASK_246: one canonical payload (metric UTM grid, resolution in metres,
+    # shared mask contract); this legacy tool never builds its own request.
+    from services.satellite_collection import build_statistical_payload as _canonical_payload
+
+    return _canonical_payload(
+        geometry_geojson=geometry_geojson,
+        evalscript=evalscript,
+        index_codes=index_codes,
+        date_from=date_from,
+        date_to=date_to,
+        aggregation_interval=aggregation_interval,
+        resolution=resolution,
+        max_cloud_coverage=max_cloud_coverage,
+    )
 
 
 # -- Diagnostic helpers --
@@ -323,6 +296,21 @@ def _mock_multi_index_response() -> dict:
                                     "max": "0.498",
                                     "stDev": "0.039",
                                     "percentiles": {"10.0": "0.145", "90.0": "0.412"},
+                                }
+                            }
+                        }
+                    },
+                    # TASK_246: observed footprint on the same grid (1160 field pixels with data).
+                    "observed": {
+                        "bands": {
+                            "B0": {
+                                "stats": {
+                                    "sampleCount": 1200,
+                                    "noDataCount": 40,
+                                    "mean": "1",
+                                    "min": "1",
+                                    "max": "1",
+                                    "stDev": "0",
                                 }
                             }
                         }

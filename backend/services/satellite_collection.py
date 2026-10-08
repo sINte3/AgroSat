@@ -22,7 +22,10 @@ from shapely import wkt
 from shapely.geometry import mapping
 
 from config import settings
+from services import observation_quality
+from services.sentinel_grid import SUPPORTING_INDEX_RESOLUTION_M, metric_request_grid
 from services.sentinel_provider import resolve_sentinel_provider
+from services.satellite import OBSERVED_FOOTPRINT_OUTPUT
 from services.satellite_safety import (
     MOCK_SATELLITE_SOURCE,
     REAL_SATELLITE_SOURCE,
@@ -57,16 +60,19 @@ def build_statistical_payload(
     date_from: date,
     date_to: date,
     aggregation_interval: str = "P1D",
-    resolution: int = 20,
+    resolution: int = SUPPORTING_INDEX_RESOLUTION_M,
     max_cloud_coverage: int = 80,
 ) -> dict:
-    """Build a Sentinel Hub Statistical API payload dict (no IO)."""
+    """Build a Sentinel Hub Statistical API payload dict (no IO).
+
+    ``geometry_geojson`` is the canonical EPSG:4326 field polygon. It is
+    re-projected onto its UTM zone through the shared ``services.sentinel_grid``
+    helper (the same one the NDVI request uses) and ``resolution`` is in metres.
+    """
+    grid = metric_request_grid(geometry_geojson, resolution)
     return {
         "input": {
-            "bounds": {
-                "geometry": geometry_geojson,
-                "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"},
-            },
+            "bounds": grid.bounds(),
             "data": [
                 {
                     "type": "sentinel-2-l2a",
@@ -88,8 +94,7 @@ def build_statistical_payload(
             },
             "aggregationInterval": {"of": aggregation_interval},
             "evalscript": evalscript,
-            "resx": resolution,
-            "resy": resolution,
+            **grid.resolution(),
         },
         "calculations": {
             code: {
@@ -229,7 +234,10 @@ class MultiIndexSentinelHubService:
         # before the next collect_indices call overwrites it.
         self._last_response_data = response_data
 
-        parsed = parse_multi_index_stats_response(response_data, codes)
+        parsed = parse_multi_index_stats_response(
+            response_data, codes,
+            expected_field_pixels=metric_request_grid(geojson_geom, resolution).expected_field_pixels,
+        )
         return parsed
 
     def collect_indices_flat(
@@ -284,7 +292,10 @@ class MultiIndexSentinelHubService:
         response_data = resp.json()
         self._last_response_data = response_data
 
-        return parse_multi_index_stats_response_flat(response_data, codes)
+        return parse_multi_index_stats_response_flat(
+            response_data, codes,
+            expected_field_pixels=metric_request_grid(geojson_geom, resolution).expected_field_pixels,
+        )
 
     def get_last_intervals_metadata(self, index_codes: list[str]) -> list[dict]:
         """Return sanitized interval metadata from the last API response.
@@ -298,6 +309,12 @@ class MultiIndexSentinelHubService:
 
 
 # ─── Mock multi-index service (for testability without credentials) ─────────
+
+
+def _mock_observed_footprint() -> dict:
+    """Mock observed footprint on the same 1000-pixel grid: 970 field pixels with data."""
+    return {"bands": {"B0": {"stats": {"sampleCount": 1000, "noDataCount": 30,
+                                       "mean": 1.0, "min": 1.0, "max": 1.0, "stDev": 0.0}}}}
 
 
 class MockMultiIndexSatelliteService:
@@ -404,6 +421,7 @@ class MockMultiIndexSatelliteService:
                     }
                 }
 
+            outputs[OBSERVED_FOOTPRINT_OUTPUT] = _mock_observed_footprint()
             intervals.append({
                 "interval": {
                     "from": cursor.strftime("%Y-%m-%d") + "T00:00:00Z",
@@ -477,6 +495,7 @@ class MockMultiIndexSatelliteService:
                     }
                 }
 
+            outputs[OBSERVED_FOOTPRINT_OUTPUT] = _mock_observed_footprint()
             intervals.append({
                 "interval": {
                     "from": cursor.strftime("%Y-%m-%d") + "T00:00:00Z",
@@ -547,6 +566,8 @@ def filter_by_quality(
             max_value=data.get("max_value"),
             valid_pixels_pct=vp,
         )
+        if valid:
+            valid, reason = observation_quality.field_sample_gate(data)
         if valid:
             passed[norm] = data
         else:

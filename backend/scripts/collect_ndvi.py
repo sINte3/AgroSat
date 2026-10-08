@@ -148,6 +148,13 @@ def validate_observation(observation: Any, start: date, end: date) -> tuple[dict
     mean = observation.get("mean_ndvi")
     if isinstance(mean, bool) or not isinstance(mean, (int, float)) or not math.isfinite(mean):
         return observation, True
+    # TASK_246: a point sample or an observation without provider pixel counts
+    # is never a field statistic; it is quality blocked, not persisted.
+    from services.observation_quality import field_sample_gate
+
+    samples_ok, _samples_reason = field_sample_gate(observation)
+    if not samples_ok:
+        return observation, True
     valid, _reason = validate_ndvi_quality(mean, observation.get("cloud_cover_pct"), observation.get("min_ndvi"), observation.get("max_ndvi"))
     return observation, not valid
 

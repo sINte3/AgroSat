@@ -61,6 +61,7 @@ from services.collector_locking import (
     acquire_lock,
     release_lock,
 )
+from services.observation_quality import field_sample_gate
 from services.satellite_indices import (
     SUPPORTED_INDEX_CODES as MULTI_INDEX_CODES,
     build_multi_index_evalscript,
@@ -1041,6 +1042,9 @@ def run_real(args: argparse.Namespace) -> None:
                 max_value=rec.get("max_value"),
                 valid_pixels_pct=rec.get("valid_pixels_pct"),
             )
+            if valid:
+                # TASK_246: only real field-level spatial samples are persisted.
+                valid, reason = field_sample_gate(rec)
             if not valid:
                 print(f"      QUALITY BLOCKED: [{code}] date={captured_date_str} — {reason}")
                 field_quality_blocked += 1

@@ -19,6 +19,7 @@ from shapely import wkt
 
 from config import settings
 from services import observation_quality
+from services.sentinel_grid import NDVI_RESOLUTION_M, metric_request_grid
 from services.sentinel_provider import resolve_sentinel_provider
 from services.satellite_safety import (
     MOCK_SATELLITE_SOURCE,
@@ -90,6 +91,17 @@ def validate_ndvi_quality(mean_ndvi, cloud_cover_pct=None, min_ndvi=None, max_nd
         )
         return False, f"NDVI exceeds 1.0 ({mean_ndvi:.4f})"
 
+    # A field MEAN this high needs near-zero red reflectance in every valid
+    # pixel; it is an artefact, not a canopy (see observation_quality).
+    if mean_ndvi > observation_quality.MAX_NDVI_FIELD_MEAN:
+        logger.warning(
+            f"NDVI quality gate REJECT [{field_name}]: implausible field mean NDVI {mean_ndvi:.4f}"
+        )
+        return False, (
+            f"NDVI field mean {mean_ndvi:.4f} exceeds "
+            f"{observation_quality.MAX_NDVI_FIELD_MEAN:.2f}"
+        )
+
     if cloud_cover_pct is not None:
         try:
             cloud_cover_pct = float(cloud_cover_pct)
@@ -138,7 +150,18 @@ NDVI_INVALID_SCL_CLASSES = (0, 1, 3, 8, 9, 10, 11)
 NDVI_DENOMINATOR_EPSILON = "0.000001"
 NDVI_MASK_CONTRACT_ID = "s2l2a-datamask-scl-0-1-3-8-9-10-11-v1"
 STATISTICAL_INTERVAL_SEMANTICS = "half_open_utc_aggregation_bucket_[from,to)"
-CANONICAL_DATE_SEMANTICS = "aggregation_interval_start_utc_date_not_acquisition_date"
+#: P1D (one UTC day) is the canonical aggregation: each interval holds only the
+#: acquisitions sensed on that UTC day, so its start date is the acquisition day.
+#: Multi-day buckets mosaic several acquisitions and their start date is not an
+#: acquisition date; repeated daily runs over a moving window would re-store one
+#: acquisition under several bucket-start dates (TASK_246 root cause C).
+CANONICAL_AGGREGATION_INTERVAL = "P1D"
+CANONICAL_DATE_SEMANTICS = "utc_acquisition_day_of_p1d_interval"
+MULTI_DAY_DATE_SEMANTICS = "aggregation_interval_start_utc_date_not_acquisition_date"
+#: Evalscript output besides the index: the observed footprint, masked by the
+#: input dataMask only (0 outside the polygon and where the acquisition has no
+#: data). See services/observation_quality.py for how field pixels follow.
+OBSERVED_FOOTPRINT_OUTPUT = "observed"
 
 
 def parse_provider_utc_timestamp(value: object) -> datetime:
@@ -198,7 +221,9 @@ class SentinelObservationInterval:
     def as_result_metadata(self) -> dict[str, object]:
         return {
             "captured_date": self.canonical_date.isoformat(),
-            "captured_date_semantics": CANONICAL_DATE_SEMANTICS,
+            "captured_date_semantics": (
+                CANONICAL_DATE_SEMANTICS if self.is_daily else MULTI_DAY_DATE_SEMANTICS
+            ),
             "interval_from_utc": format_utc_timestamp(self.interval_from_utc),
             "interval_to_utc": format_utc_timestamp(self.interval_to_utc),
             "aggregation_interval": self.aggregation_interval,
@@ -219,6 +244,9 @@ def _utc_midnight(day: date) -> datetime:
 _NDVI_INVALID_SCL_JS = json.dumps(list(NDVI_INVALID_SCL_CLASSES), separators=(",", ":"))
 
 # NDVI with one shared provider data-mask and SCL contract for statistics/raster.
+# Each output has its own dataMask band (Statistical API per-output masks):
+#   ndvi      valid inside the polygon where data exists and the SCL class is usable;
+#   observed  valid inside the polygon where the acquisition has data.
 NDVI_EVALSCRIPT = """
 //VERSION=3
 
@@ -227,7 +255,8 @@ function setup() {
     input: [{ bands: ["B04", "B08", "SCL", "dataMask"] }],
     output: [
       { id: "ndvi", bands: 1, sampleType: "FLOAT32" },
-      { id: "dataMask", bands: 1 }
+      { id: "observed", bands: 1, sampleType: "UINT8" },
+      { id: "dataMask", bands: ["ndvi", "observed"] }
     ]
   };
 }
@@ -237,12 +266,94 @@ function evaluatePixel(sample) {
   let ndvi = (sample.B08 - sample.B04) / (sample.B08 + sample.B04 + __EPSILON__);
   return {
     ndvi: [ndvi],
-    dataMask: [isValid ? 1 : 0]
+    observed: [sample.dataMask],
+    dataMask: [isValid ? 1 : 0, sample.dataMask]
   };
 }
 """.replace("__INVALID_SCL__", _NDVI_INVALID_SCL_JS).replace(
     "__EPSILON__", NDVI_DENOMINATOR_EPSILON
 )
+
+
+def build_ndvi_statistical_payload(
+    geometry: object,
+    date_from: date,
+    date_to: date,
+    aggregation_interval: str = CANONICAL_AGGREGATION_INTERVAL,
+) -> dict:
+    """Build the NDVI Statistical API payload (no IO).
+
+    ``geometry`` is the canonical EPSG:4326 field polygon (GeoJSON mapping,
+    Shapely geometry or WKT). It is re-projected onto its UTM zone and sent with
+    a 10 m grid through the shared ``services.sentinel_grid`` helper.
+    """
+    if isinstance(geometry, str):
+        geometry = wkt.loads(geometry)
+    grid = metric_request_grid(geometry, NDVI_RESOLUTION_M)
+    request_from_utc = format_utc_timestamp(_utc_midnight(date_from))
+    request_to_utc = format_utc_timestamp(_utc_midnight(date_to + timedelta(days=1)))
+    return {
+        "input": {
+            "bounds": grid.bounds(),
+            "data": [{
+                "type": SENTINEL_DATASET,
+                "dataFilter": {
+                    "timeRange": {
+                        "from": request_from_utc,
+                        "to": request_to_utc,
+                    },
+                    "maxCloudCoverage": SENTINEL_MAX_CLOUD_COVERAGE,
+                },
+                "processing": {
+                    "harmonizeValues": True
+                }
+            }]
+        },
+        "aggregation": {
+            "timeRange": {
+                "from": request_from_utc,
+                "to": request_to_utc,
+            },
+            "aggregationInterval": {"of": aggregation_interval},
+            "evalscript": NDVI_EVALSCRIPT,
+            **grid.resolution(),
+        },
+        "calculations": {
+            "default": {
+                "statistics": {
+                    "default": {
+                        "percentiles": {"k": [10, 25, 75, 90]}
+                    }
+                }
+            }
+        }
+    }
+
+
+def _finite_number(value: object) -> Optional[float]:
+    """A provider statistic as a finite float; missing or non-finite is ``None``, never 0."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if np.isfinite(number) else None
+
+
+def _rounded(value: Optional[float]) -> Optional[float]:
+    return None if value is None else round(value, 4)
+
+
+def _band_stats(interval: dict, output_id: str) -> Optional[dict]:
+    stats = (
+        (interval.get("outputs") or {})
+        .get(output_id, {})
+        .get("bands", {})
+        .get("B0", {})
+        .get("stats")
+    )
+    return stats if isinstance(stats, dict) else None
 
 
 class SentinelHubService:
@@ -334,7 +445,7 @@ class SentinelHubService:
         geometry_wkt: str,
         date_from: date,
         date_to: date,
-        aggregation_interval: str = "P5D",
+        aggregation_interval: str = CANONICAL_AGGREGATION_INTERVAL,
     ) -> Optional[dict]:
         """
         Получить статистику NDVI для поля за период.
@@ -356,52 +467,15 @@ class SentinelHubService:
             logger.error(safe_provider_error_summary(error))
             return None
 
-        # Преобразуем WKT в GeoJSON
-        geom = wkt.loads(geometry_wkt)
-        geojson_geom = mapping(geom)
-        request_from_utc = format_utc_timestamp(_utc_midnight(date_from))
-        request_to_utc = format_utc_timestamp(_utc_midnight(date_to + timedelta(days=1)))
-
-        payload = {
-            "input": {
-                "bounds": {
-                    "geometry": geojson_geom,
-                    "properties": {"crs": SENTINEL_CRS}
-                },
-                "data": [{
-                    "type": SENTINEL_DATASET,
-                    "dataFilter": {
-                        "timeRange": {
-                            "from": request_from_utc,
-                            "to": request_to_utc,
-                        },
-                        "maxCloudCoverage": SENTINEL_MAX_CLOUD_COVERAGE,
-                    },
-                    "processing": {
-                        "harmonizeValues": True
-                    }
-                }]
-            },
-            "aggregation": {
-                "timeRange": {
-                    "from": request_from_utc,
-                    "to": request_to_utc,
-                },
-                "aggregationInterval": {"of": aggregation_interval},
-                "evalscript": NDVI_EVALSCRIPT,
-                "resx": 10,
-                "resy": 10
-            },
-            "calculations": {
-                "default": {
-                    "statistics": {
-                        "default": {
-                            "percentiles": {"k": [10, 25, 75, 90]}
-                        }
-                    }
-                }
-            }
-        }
+        try:
+            geometry = wkt.loads(geometry_wkt) if isinstance(geometry_wkt, str) else geometry_wkt
+            expected_field_pixels = metric_request_grid(geometry, NDVI_RESOLUTION_M).expected_field_pixels
+            payload = build_ndvi_statistical_payload(
+                geometry, date_from, date_to, aggregation_interval
+            )
+        except Exception as error:
+            logger.error(safe_provider_error_summary(error))
+            return None
 
         try:
             response = httpx.post(
@@ -416,6 +490,7 @@ class SentinelHubService:
             return self._parse_stats_response(
                 data,
                 aggregation_interval=aggregation_interval,
+                expected_field_pixels=expected_field_pixels,
             )
 
         except httpx.HTTPStatusError as error:
@@ -429,18 +504,31 @@ class SentinelHubService:
         self,
         response_data: dict,
         *,
-        aggregation_interval: str = "P1D",
+        aggregation_interval: str = CANONICAL_AGGREGATION_INTERVAL,
+        expected_field_pixels: Optional[float] = None,
     ) -> Optional[dict]:
-        """Return the latest usable Statistical aggregation interval by UTC time."""
+        """Return the latest interval whose statistics are a real field sample.
+
+        Pixel counts come from the provider only: the NDVI output's
+        ``sampleCount``/``noDataCount`` give the valid pixels, the ``observed``
+        output gives each interval's observed footprint, and the field pixels of
+        the grid are the largest observed footprint (floored by
+        ``expected_field_pixels``, the polygon area in pixels). Missing or
+        non-finite statistics make an interval unusable; they never become 0.
+
+        The latest interval that satisfies the field-sample contract wins, so a
+        later partial-swath or mostly cloudy acquisition cannot displace a
+        complete one. When no interval does, the latest interval with at least
+        one valid pixel is returned with ``field_samples_accepted = False`` so
+        the write path records a quality block instead of a silent gap.
+        """
         try:
             intervals = response_data.get("data", [])
             if not isinstance(intervals, list) or not intervals:
                 logger.warning("Sentinel Hub вернул пустой ответ (возможно, нет снимков за период)")
                 return None
 
-            usable: list[
-                tuple[SentinelObservationInterval, dict, int, int]
-            ] = []
+            parsed: list[tuple[SentinelObservationInterval, dict, Optional[int]]] = []
             for interval in intervals:
                 if not isinstance(interval, dict):
                     continue
@@ -459,58 +547,68 @@ class SentinelHubService:
                     )
                 except (TypeError, ValueError):
                     continue
-                stats = (
-                    interval.get("outputs", {})
-                    .get(NDVI_INDEX_CODE, {})
-                    .get("bands", {})
-                    .get("B0", {})
-                    .get("stats", {})
-                )
-                if not isinstance(stats, dict):
+                stats = _band_stats(interval, NDVI_INDEX_CODE)
+                if stats is None:
                     continue
-                try:
-                    sample_count = int(stats.get("sampleCount", 0))
-                    no_data_count = int(stats.get("noDataCount", 0))
-                except (TypeError, ValueError, OverflowError):
-                    continue
-                if (
-                    sample_count <= 0
-                    or no_data_count < 0
-                    or no_data_count > sample_count
-                    or sample_count - no_data_count <= 0
-                ):
-                    continue
-                usable.append(
-                    (observation_interval, stats, sample_count, no_data_count)
-                )
+                observed = _band_stats(interval, OBSERVED_FOOTPRINT_OUTPUT) or {}
+                parsed.append((
+                    observation_interval,
+                    stats,
+                    observation_quality.observed_pixel_count(
+                        observed.get("sampleCount"), observed.get("noDataCount"),
+                    ),
+                ))
 
-            if not usable:
+            field_pixels = observation_quality.field_pixel_count(
+                [observed for _, _, observed in parsed], expected_field_pixels,
+            )
+            candidates: list[tuple[SentinelObservationInterval, dict, bool]] = []
+            for observation_interval, stats, observed in parsed:
+                verdict = observation_quality.evaluate_field_samples(
+                    sample_count=stats.get("sampleCount"),
+                    no_data_count=stats.get("noDataCount"),
+                    # An interval without its own observed footprint is not evaluated.
+                    field_pixel_count=field_pixels if observed is not None else None,
+                )
+                if not verdict.valid_sample_count:
+                    continue  # no valid pixel (or no counts): nothing was observed
+                values = {
+                    key: _finite_number(stats.get(key))
+                    for key in ("mean", "min", "max", "stDev")
+                }
+                if any(value is None for value in values.values()):
+                    continue
+                percentiles = stats.get("percentiles")
+                percentiles = percentiles if isinstance(percentiles, dict) else {}
+                fields = {
+                    "mean_ndvi": round(values["mean"], 4),
+                    "min_ndvi": round(values["min"], 4),
+                    "max_ndvi": round(values["max"], 4),
+                    "std_ndvi": round(values["stDev"], 4),
+                    "p10_ndvi": _rounded(_finite_number(percentiles.get("10.0"))),
+                    "p90_ndvi": _rounded(_finite_number(percentiles.get("90.0"))),
+                    "valid_pixels_pct": verdict.valid_pixels_pct,
+                    "sample_count": verdict.sample_count,
+                    "no_data_count": verdict.no_data_count,
+                    "valid_pixel_count": verdict.valid_sample_count,
+                    "field_pixel_count": verdict.field_sample_count,
+                    "observed_pixel_count": observed,
+                    "field_samples_accepted": verdict.accepted,
+                    "field_samples_reason": verdict.reason,
+                }
+                candidates.append((observation_interval, fields, verdict.accepted))
+
+            if not candidates:
                 return None
 
-            observation_interval, stats, sample_count, no_data_count = max(
-                usable,
-                key=lambda candidate: (
-                    candidate[0].interval_from_utc,
-                    candidate[0].interval_to_utc,
-                ),
-            )
-            valid_pixel_count = sample_count - no_data_count
-            valid_pct = valid_pixel_count / sample_count * 100
+            def latest(items):
+                return max(items, key=lambda item: (item[0].interval_from_utc, item[0].interval_to_utc))
 
-            percentiles = stats.get("percentiles", {})
-
+            accepted = [item for item in candidates if item[2]]
+            observation_interval, fields, _ = latest(accepted or candidates)
             return {
                 **observation_interval.as_result_metadata(),
-                "mean_ndvi": round(safe_float(stats.get("mean", 0)), 4),
-                "min_ndvi": round(safe_float(stats.get("min", 0)), 4),
-                "max_ndvi": round(safe_float(stats.get("max", 0)), 4),
-                "std_ndvi": round(safe_float(stats.get("stDev", 0)), 4),
-                "p10_ndvi": round(safe_float(percentiles.get("10.0", 0)), 4),
-                "p90_ndvi": round(safe_float(percentiles.get("90.0", 0)), 4),
-                "valid_pixels_pct": round(valid_pct, 1),
-                "sample_count": sample_count,
-                "no_data_count": no_data_count,
-                "valid_pixel_count": valid_pixel_count,
+                **fields,
                 "mask_contract_id": NDVI_MASK_CONTRACT_ID,
                 "satellite": REAL_SATELLITE_SOURCE,
             }
@@ -661,6 +759,11 @@ def fetch_ndvi_for_field_date(db, field, target_date: date, *, service) -> Optio
     ndvi_data = service.get_ndvi_stats_for_date(geometry_wkt, target_date)
 
     if ndvi_data is None:
+        return None
+
+    samples_ok, samples_reason = observation_quality.field_sample_gate(ndvi_data)
+    if not samples_ok:
+        logger.debug(f"Field-sample gate rejected {field.name} @ {target_date}: {samples_reason}")
         return None
 
     # Quality gate
