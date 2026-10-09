@@ -440,16 +440,26 @@ class SentinelHubService:
         )
 
     def get_catalog_response(self, payload: dict):
-        """Request one bounded STAC search from the immutable provider allowlist."""
+        """Request one bounded STAC search from the immutable provider allowlist.
+
+        TASK_253: in a standalone collector process the attached provider governor
+        paces the request and handles HTTP 429, with the read timeout clipped to its
+        deadline; without a governor (web requests) the call is unchanged.
+        """
         token = self._get_access_token()
         timeout = httpx.Timeout(connect=10.0, read=30.0, write=10.0, pool=10.0)
-        return httpx.post(
-            self._provider_endpoints.catalog_url,
-            json=payload,
-            headers={"Authorization": f"Bearer {token}", "Accept": "application/geo+json"},
-            timeout=timeout,
-            follow_redirects=False,
-        )
+
+        def send(clipped):
+            return httpx.post(
+                self._provider_endpoints.catalog_url,
+                json=payload,
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/geo+json"},
+                timeout=timeout if clipped is None else httpx.Timeout(
+                    connect=min(10.0, clipped), read=clipped, write=min(10.0, clipped), pool=min(10.0, clipped)),
+                follow_redirects=False,
+            )
+
+        return self._provider_post("catalog", send, timeout=None if self.provider_governor is None else 30.0)
 
     def get_ndvi_stats(
         self,

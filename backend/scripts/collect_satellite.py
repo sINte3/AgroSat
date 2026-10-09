@@ -30,6 +30,7 @@ REPO_ROOT = BACKEND.parent
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
+from services import acquisition_gate as gate
 from services.collection_failure import canonical_failure_category
 from services.collector_locking import acquire_lock, release_lock
 from services.collector_status import (
@@ -382,6 +383,14 @@ def operational_snapshot(
             if record is not None
         ),
     }
+    report = summary.get("acquisition_gate")
+    if isinstance(report, dict):
+        # TASK_253, optional and only with the gate enabled: a skipped cycle is visible
+        # as such, next to an empty provider list, instead of passing for a collection.
+        snapshot["acquisition_gate"] = {
+            "outcome": report.get("outcome"),
+            "statistical_collection": report.get("statistical_collection"),
+        }
     return sanitize(snapshot)
 
 
@@ -450,6 +459,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="Total HTTP 429 wait per provider request (10-1800).")
     parser.add_argument("--provider-429-max-retry-after-seconds", type=float, default=defaults.max_retry_after_seconds,
                         help="A longer provider Retry-After is treated as a suspected quota (30-3600).")
+    # TASK_253 acquisition-aware preflight. Off unless --acquisition-gate is passed; the
+    # Scheduled Task passes none of these, so the production cycle is unchanged.
+    parser.add_argument("--acquisition-gate", action="store_true",
+                        help="Skip the Statistical stages when a complete Catalog search proves that no "
+                             "acquisition changed since a verified complete cycle (apply mode only).")
+    parser.add_argument("--acquisition-gate-reconcile-days", type=int, default=gate.DEFAULT_RECONCILE_DAYS,
+                        help="Force a full collection when the last verified one is this many days old (1-7).")
+    parser.add_argument("--acquisition-gate-policy", choices=gate.POLICIES, default=gate.DEFAULT_POLICY,
+                        help="strict (default): any acquisition leaving the window means a collection; "
+                             "footprint: needs live qualification first (see services/acquisition_gate.py).")
     return parser.parse_args(argv)
 
 
@@ -504,7 +523,9 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
         if selected_mode(args) != "dry-run":
             raise ContractError(f"provider timeout contract: {exc}") from exc
         contract = {"field_timeout_seconds": args.field_timeout_seconds, "violation": sanitize_text(exc, 300)}
+    acquisition_gate = validate_acquisition_gate(args)
     return {
+        "acquisition_gate": acquisition_gate,
         "provider_policy": provider_policy,
         "timeout_contract": contract,
         "mode": selected_mode(args),
@@ -516,6 +537,26 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
         "state_dir": external_directory(args.state_dir, "--state-dir"),
         "lock_dir": external_directory(args.lock_dir, "--lock-dir"),
     }
+
+
+def validate_acquisition_gate(args: argparse.Namespace) -> dict[str, Any]:
+    """TASK_253: the gate is for the rolling all-fields cycle only, with a reconciliation
+    interval that leaves a missed acquisition inside the lookback for a second attempt."""
+    enabled = bool(getattr(args, "acquisition_gate", False))
+    reconcile_days = getattr(args, "acquisition_gate_reconcile_days", gate.DEFAULT_RECONCILE_DAYS)
+    policy = getattr(args, "acquisition_gate_policy", gate.DEFAULT_POLICY)
+    if type(reconcile_days) is not int or not gate.MIN_RECONCILE_DAYS <= reconcile_days <= gate.MAX_RECONCILE_DAYS:
+        raise ContractError("--acquisition-gate-reconcile-days must be between 1 and 7")
+    if policy not in gate.POLICIES:
+        raise ContractError("--acquisition-gate-policy is unknown")
+    if enabled:
+        if not args.all_active_fields or args.date_from or args.date_to:
+            raise ContractError(
+                "--acquisition-gate requires --all-active-fields and the rolling --lookback-days window"
+            )
+        if args.lookback_days < 2 * reconcile_days:
+            raise ContractError("--lookback-days must be at least twice --acquisition-gate-reconcile-days")
+    return {"enabled": enabled, "reconcile_days": reconcile_days, "policy": policy}
 
 
 def child_mode(mode: str) -> str:
@@ -591,6 +632,79 @@ def resolve_active_field_ids() -> list[int]:
     if not values or len(values) > MAX_ACTIVE_FIELDS or len(values) != len(set(values)):
         raise ContractError("active-field scope is empty, duplicated, or exceeds the safety cap")
     return values
+
+
+def resolve_acquisition_scope() -> gate.Scope:
+    """TASK_253: active fields, a fingerprint of every geometry and their extent, read in
+    one READ ONLY transaction. An active field without a usable geometry has no
+    fingerprint, so the gate never trusts such a scope."""
+    from database import SessionLocal
+    from sqlalchemy import text
+
+    db = SessionLocal()
+    try:
+        db.execute(text("SET TRANSACTION READ ONLY"))
+        rows = db.execute(text(
+            "SELECT id, CASE WHEN geometry IS NULL OR ST_IsEmpty(geometry) THEN NULL "
+            "ELSE md5(ST_AsBinary(geometry)) END FROM fields WHERE is_active=true ORDER BY id"
+        )).fetchall()
+        extent = db.execute(text(
+            "SELECT ST_XMin(e), ST_YMin(e), ST_XMax(e), ST_YMax(e), hull FROM ("
+            "SELECT ST_Extent(geometry) AS e, ST_AsGeoJSON(ST_ConvexHull(ST_Collect(geometry))) AS hull "
+            "FROM fields WHERE is_active=true AND geometry IS NOT NULL AND NOT ST_IsEmpty(geometry)) s"
+        )).first()
+    finally:
+        db.rollback()
+        db.close()
+    if extent is None:
+        raise gate.GateError("active-field extent is unavailable")
+    return gate.scope_from_rows([(int(row[0]), row[1]) for row in rows], extent[:4], extent[4])
+
+
+def provider_identity() -> tuple[str, str]:
+    """The configured provider preset, without credentials."""
+    from config import settings
+    from services.sentinel_provider import resolve_sentinel_provider
+
+    endpoints = resolve_sentinel_provider(settings.sentinel_hub_provider)
+    return endpoints.name, endpoints.endpoint_class
+
+
+def catalog_search_factory(plan: dict[str, Any], run_id: str, deadline: float):
+    """TASK_253: an in-process Catalog client whose token and search requests go through
+    the run's shared provider governor (pacing, 429 cooldown, deadline), stage ``catalog``."""
+    from services.provider_governor import ProviderGovernor
+    from services.satellite import get_satellite_service
+    from services.satellite_safety import require_real_service
+
+    def factory():
+        service = get_satellite_service()
+        require_real_service(service)
+        governor = ProviderGovernor(plan["provider_policy"], plan["state_dir"], run_id=run_id,
+                                    stage="catalog", deadline=deadline)
+        service.provider_governor = governor
+        return service.get_catalog_response, governor
+    return factory
+
+
+def build_acquisition_gate(plan: dict[str, Any], args: argparse.Namespace, run_id: str,
+                           cycle_deadline: float, *,
+                           scope_resolver: Callable[[], gate.Scope] = resolve_acquisition_scope,
+                           search_factory: Callable[[], Any] | None = None,
+                           identity: Callable[[], tuple[str, str]] = provider_identity,
+                           backend_root: Path = BACKEND) -> gate.GateRun:
+    """The gate of one applying cycle. The keyword arguments exist for tests; the
+    collector always uses the defaults."""
+    deadline = min(time.time() + gate.DISCOVERY_BUDGET_SECONDS, cycle_deadline)
+    return gate.GateRun(
+        state_dir=plan["state_dir"], output_dir=plan["output_dir"], run_id=run_id, indices=plan["indices"],
+        lookback_days=args.lookback_days, date_from=plan["date_from"], date_to=plan["date_to"],
+        reconcile_days=plan["acquisition_gate"]["reconcile_days"], policy=plan["acquisition_gate"]["policy"],
+        backend_root=backend_root, provider_identity=identity, scope_resolver=scope_resolver,
+        search_factory=search_factory or catalog_search_factory(plan, run_id, deadline), write_json=atomic_json,
+        history_files=(LAST_SUCCESS_FILENAME, LAST_FAILURE_FILENAME),
+        retry_files=("ndvi_state.json", "multi_state.json"),
+    )
 
 
 def _read_bounded(path: Path) -> str:
@@ -830,19 +944,50 @@ def stage_report(batches: list[list[int]], ran: dict[int, tuple[Path, int]]) -> 
     return report
 
 
-def run_status(final_code: int, stage_stops: dict[str, str], stages: dict[str, Any]) -> str:
-    """SUCCESS only for a complete cycle; never for unfinished work (TASK_251)."""
+def run_status(final_code: int, stage_stops: dict[str, str], stages: dict[str, Any], *,
+               statistical_skipped: bool = False) -> str:
+    """SUCCESS only for a complete cycle; never for unfinished work (TASK_251).
+
+    TASK_253: a cycle whose Statistical stages the acquisition gate skipped is
+    NO_NEW_ACQUISITIONS, never SUCCESS.
+    """
     if final_code not in (0, 1):
         return "FAILED"
     if stage_stops:
         return "DEGRADED"
+    if statistical_skipped:
+        return gate.OUTCOME_SKIP if final_code == 0 else "PARTIAL"
     if final_code == 1 or any(stage.get("unfinished_count") or stage.get("unverified_batch_count")
                               for stage in stages.values()):
         return "PARTIAL"
     return "SUCCESS"
 
 
+def gate_counters(summary: dict[str, Any]) -> dict[str, Any]:
+    """TASK_253: the gate outcome in the run row's counters, only when the gate ran."""
+    report = summary.get("acquisition_gate")
+    if not isinstance(report, dict) or not report.get("evaluated"):
+        return {}
+    requests = report.get("requests") or {}
+    return {"acquisition_gate": {
+        "outcome": report.get("outcome"),
+        "statistical_collection": report.get("statistical_collection"),
+        "reasons": list(report.get("reasons") or [])[:10],
+        "catalog_requests": requests.get("catalog", 0),
+        "oauth_requests": requests.get("oauth", 0),
+    }}
+
+
+def statistical_skipped(summary: dict[str, Any]) -> bool:
+    report = summary.get("acquisition_gate")
+    return isinstance(report, dict) and report.get("statistical_collection") == "skipped"
+
+
 def provider_status(summary: dict[str, Any]) -> str:
+    if summary.get("exit_code") == 0 and statistical_skipped(summary):
+        # TASK_253: the Statistical provider was not called; the database vocabulary
+        # (ck_collection_runs_provider) already names exactly that.
+        return "not_called"
     failure = classify_failure(summary)
     counters = aggregate_counters(summary)
     if failure in {"auth", "quota", "network", "operational", "partial"}:
@@ -861,6 +1006,7 @@ def run(
     lock_acquire: Callable[..., Any] = acquire_lock,
     lock_release: Callable[[Any], None] = release_lock,
     run_id_factory: Callable[[], str] = lambda: uuid.uuid4().hex,
+    gate_factory: Callable[..., Any] = build_acquisition_gate,
 ) -> tuple[int, dict[str, Any]]:
     started = time.monotonic()
     started_epoch = time.time()
@@ -885,6 +1031,7 @@ def run(
     stage_plan: tuple[list[str], list[list[int]]] | None = None
     stage_runs: dict[str, dict[int, tuple[Path, int]]] = {}
     stage_stops: dict[str, str] = {}
+    gate_run: gate.GateRun | None = None
     try:
         plan = validate(args)
         # TASK_251A: the cycle budget as an absolute deadline every batch runner can read.
@@ -947,14 +1094,46 @@ def run(
             providers.append("ndvi")
         if any(code in MULTI_INDICES for code in plan["indices"]):
             providers.append("multi")
-        # TASK_251: one provider policy, one shared pacer and one 429 cooldown for every
-        # child of this run, across both stages.
-        provider_env = provider_environment.enter_context(
-            ProviderEnvironment(plan["provider_policy"], plan["state_dir"], run_id, providers[0],
-                                cycle_deadline=cycle_deadline)
-        )
+        gate_stop = None
+        if plan["acquisition_gate"]["enabled"]:
+            # TASK_253: before any Statistical request, decide whether this cycle's
+            # collection is provably redundant. Only an applying cycle persists
+            # observations, so only it may skip or touch the checkpoint.
+            if plan["mode"] != "apply":
+                summary["acquisition_gate"] = {"enabled": True, "evaluated": False,
+                                               "reason": f"{plan['mode']}_mode"}
+            else:
+                try:
+                    gate_run = gate_factory(plan, args, run_id, cycle_deadline)
+                except Exception as exc:
+                    # The gate can only ever remove redundant work: without it, collect.
+                    summary["acquisition_gate"] = {"enabled": True, "evaluated": False,
+                                                   "reason": f"gate_unavailable:{type(exc).__name__}"}
+                    decision = None
+                else:
+                    decision = gate_run.evaluate(active_ids)
+                    summary["acquisition_gate"] = gate_run.report()
+                if decision is None:
+                    pass
+                elif decision.outcome == gate.OUTCOME_SKIP:
+                    providers = []
+                elif decision.outcome == gate.OUTCOME_STOP:
+                    providers = []
+                    gate_stop = decision.stop_category
+                    stage_stops["catalog"] = gate_stop
+                    summary["diagnostics"].append(
+                        f"acquisition gate provider stop category={gate_stop}: no Statistical request was sent"
+                    )
+        provider_env = None
+        if providers:
+            # TASK_251: one provider policy, one shared pacer and one 429 cooldown for every
+            # child of this run, across both stages.
+            provider_env = provider_environment.enter_context(
+                ProviderEnvironment(plan["provider_policy"], plan["state_dir"], run_id, providers[0],
+                                    cycle_deadline=cycle_deadline)
+            )
         stage_plan = (providers, field_batches)
-        final_code = 0
+        final_code = 0 if gate_stop is None else 1
         stop = False
         for provider in providers:
             provider_env.set_stage(provider)
@@ -1117,12 +1296,26 @@ def run(
             try:
                 finish_apply_run(
                     apply_run, exit_code=final_code, provider_status=status,
-                    counters={**aggregate_counters(summary), **summary.get("monitoring", {})},
+                    counters={**aggregate_counters(summary), **summary.get("monitoring", {}),
+                              **gate_counters(summary)},
                     failure_category=classify_failure(provisional),
                 )
             except Exception as exc:
                 final_code = 4
                 summary["diagnostics"].append(sanitize_text(f"collection run finish failed: {exc}"))
+        if gate_run is not None and gate_run.decision is not None:
+            # TASK_253: the checkpoint is written while the canonical lock is still held,
+            # from the outcome this cycle has reached so far; a later persistence failure
+            # breaks the chain the next cycle checks, so it can only cost a skip.
+            outcome_code = 4 if state_persistence_failed else final_code
+            try:
+                gate_run.finalize(final_code=outcome_code, run_status=run_status(
+                    outcome_code, stage_stops, summary.get("stages", {}),
+                    statistical_skipped=statistical_skipped(summary)))
+            except Exception as exc:
+                summary["diagnostics"].append(persistence_failure("acquisition checkpoint", exc))
+            if isinstance(summary.get("acquisition_gate"), dict):
+                summary["acquisition_gate"]["checkpoint_after"] = gate_run.checkpoint_after
         if lock is not None:
             try:
                 lock_release(lock)
@@ -1138,7 +1331,8 @@ def run(
                 "finished_at": utc_now(),
                 "duration_seconds": round(time.monotonic() - started, 3),
                 "exit_code": final_code,
-                "run_status": run_status(final_code, stage_stops, summary.get("stages", {})),
+                "run_status": run_status(final_code, stage_stops, summary.get("stages", {}),
+                                         statistical_skipped=statistical_skipped(summary)),
             }
         )
         summary_persisted = False
@@ -1149,7 +1343,8 @@ def run(
             except Exception as exc:
                 final_code = 4
                 summary["exit_code"] = final_code
-                summary["run_status"] = run_status(final_code, stage_stops, summary.get("stages", {}))
+                summary["run_status"] = run_status(final_code, stage_stops, summary.get("stages", {}),
+                                                   statistical_skipped=statistical_skipped(summary))
                 summary["diagnostics"].append(persistence_failure("summary", exc))
         if latest_status_path is not None:
             try:
@@ -1164,7 +1359,8 @@ def run(
             except Exception as exc:
                 final_code = 4
                 summary["exit_code"] = final_code
-                summary["run_status"] = run_status(final_code, stage_stops, summary.get("stages", {}))
+                summary["run_status"] = run_status(final_code, stage_stops, summary.get("stages", {}),
+                                                   statistical_skipped=statistical_skipped(summary))
                 summary["diagnostics"].append(persistence_failure("latest status", exc))
                 if summary_persisted:
                     # The run's forensic record states the failure as well.

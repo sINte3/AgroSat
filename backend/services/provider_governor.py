@@ -82,7 +82,8 @@ ENDPOINT_BUDGET = {
     "catalog": BUDGET_PROCESSING,
     "oauth": BUDGET_OAUTH,
 }
-KNOWN_STAGES = ("ndvi", "multi", "standalone")
+#: ``catalog`` is the canonical collector's own acquisition preflight (TASK_253).
+KNOWN_STAGES = ("ndvi", "multi", "standalone", "catalog")
 MAX_TIMESTAMPS = 1200
 RATE_LIMIT_HEADERS = (
     "retry-after",
