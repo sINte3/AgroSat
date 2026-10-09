@@ -63,6 +63,11 @@ _CANONICAL_BY_LABEL = {
     "connection": "network",
     "dns": "network",
     "provider_error": "operational",
+    # TASK_251 provider throttling: a short-window 429 that outlasted the bounded
+    # retry budget, and a suspected account quota, are both provider quota outcomes.
+    "rate_limited": "quota",
+    "quota_suspected": "quota",
+    "quota_or_rate_limit": "quota",
     # conditions the database expresses differently. Cloud cover and a failed
     # quality gate are the same outcome to a reader: the scene was not usable.
     "cloud": "quality",

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Bounded, durable process runner for the standalone NDVI collector."""
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -19,6 +20,14 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 from services.collector_locking import acquire_lock, release_lock
+from services.provider_governor import (
+    ProviderPolicyError,
+    STAGE_TERMINAL_CATEGORIES,
+    aggregate_process_summaries,
+    child_failure_category,
+    ensure_collector_environment,
+    structured_failure,
+)
 
 SCHEMA = 1
 MAX_BATCH = 100
@@ -58,25 +67,16 @@ def sanitize(value: Any) -> Any:
 
 
 def provider_failure_category(outcome: dict[str, Any], child: dict[str, Any]) -> str | None:
-    """Return only a bounded operational class, never an upstream response body."""
-    searchable = " ".join(
-        [
-            str(outcome.get("stdout", "")),
-            str(outcome.get("stderr", "")),
-            *(str(item) for item in child.get("diagnostics", [])),
-        ]
-    ).lower()
-    markers = (
-        ("authentication", ("category=authentication", "invalid_client", "unauthorized", " 401", " 403")),
-        ("quota", ("category=quota", "rate limit", " 429")),
-        ("network", ("category=network", "category=provider_unavailable", "connection", "dns")),
-        ("timeout", ("category=timeout", "timeout", "timed out")),
-        ("cloud", ("cloud", "quality_blocked")),
+    """Return only a bounded operational class, never an upstream response body.
+
+    TASK_251: the governor's structured terminal category wins; a persistent short-window
+    throttle is ``rate_limited`` (stops this stage only), a suspected quota is ``quota``.
+    """
+    return child_failure_category(
+        [outcome.get("stdout", ""), outcome.get("stderr", ""), *child.get("diagnostics", [])],
+        structured_failure(child),
+        had_errors=bool(child.get("error_count")),
     )
-    for category, values in markers:
-        if any(value in searchable for value in values):
-            return category
-    return "provider_error" if child.get("error_count") else None
 
 
 def external(raw: str | None, label: str, required: bool = False) -> Path | None:
@@ -365,6 +365,7 @@ def run(args: argparse.Namespace, *, field_query: Callable[[], list[int]] = quer
     results: list[dict[str, Any]] = []
     state_advanced = False
     summary: dict[str, Any] = {"schema_version": SCHEMA, "run_id": run_id, "exit_code": 4, "started_at": now(), "diagnostics": []}
+    provider_environment = contextlib.ExitStack()
     try:
         current_mode, state_file, output_dir, lock_override = validate(args)
         start, end = resolve_dates(args.date_from, args.date_to, args.lookback_days)
@@ -394,6 +395,15 @@ def run(args: argparse.Namespace, *, field_query: Callable[[], list[int]] = quer
         fatal_field_id: int | None = None
         terminal_provider_category: str | None = None
         totals = {"attempts": 0, "timeouts": 0, "inserted": 0, "skipped": 0, "blocked": 0}
+        provider_summaries: list[Any] = []
+        # TASK_251: every child shares one pacer and one 429 cooldown (the canonical
+        # run's when present, else a standalone default next to this runner's state).
+        try:
+            provider_environment.enter_context(ensure_collector_environment(
+                "ndvi", (state_file or lock_override or DEFAULT_LOCK).parent, run_id
+            ))
+        except ProviderPolicyError as exc:
+            raise ValidationError(f"provider policy is invalid: {exc}") from exc
         for field_id in selected:
             attempted.append(field_id)
             succeeded = False
@@ -424,6 +434,7 @@ def run(args: argparse.Namespace, *, field_query: Callable[[], list[int]] = quer
                     category = provider_failure_category(outcome, child) if process_exit else None
                     if category is not None:
                         record["failure_category"] = category
+                    provider_summaries.append(child.get("provider_resilience"))
                     totals["inserted"] += child["inserted_count"]
                     totals["skipped"] += child["skipped_existing_count"]
                     totals["blocked"] += child["quality_blocked_count"]
@@ -439,7 +450,10 @@ def run(args: argparse.Namespace, *, field_query: Callable[[], list[int]] = quer
                         break
                     record["classification"] = "RETRYABLE"
                     results.append(record)
-                    if category in {"authentication", "quota"}:
+                    if category in STAGE_TERMINAL_CATEGORIES:
+                        # The child already spent its bounded 429 budget, or the provider
+                        # refused authentication / reported a quota: stop this batch and
+                        # keep the remaining fields recorded as unattempted.
                         terminal_provider_category = category
                         break
                     if attempt < args.max_attempts:
@@ -466,6 +480,7 @@ def run(args: argparse.Namespace, *, field_query: Callable[[], list[int]] = quer
                 final_exit_code = 1
                 break
         unattempted = [item for item in selected if item not in attempted]
+        summary["provider_resilience"] = aggregate_process_summaries(provider_summaries)
         if fatal_field_id is None:
             final_exit_code = 1 if failed else 0
         retry_queue = retry_after(state, selected, failed)
@@ -483,6 +498,7 @@ def run(args: argparse.Namespace, *, field_query: Callable[[], list[int]] = quer
         final_exit_code = 4
         summary["diagnostics"].append(sanitize_text(exc))
     finally:
+        provider_environment.close()
         summary.update(finished_at=now(), duration_seconds=round(time.monotonic() - started, 3))
 
         def write_summary() -> None:

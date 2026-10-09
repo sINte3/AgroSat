@@ -809,6 +809,15 @@ def run_real(args: argparse.Namespace) -> None:
     service = _get_satellite_service(use_mock, args.no_sentinel)
     if do_db_writes:
         require_real_service(service)
+    # TASK_251: global pacing and bounded HTTP 429 retries, coordinated with every
+    # other collector child through the shared pacer state (collector runs only).
+    from services.provider_governor import ProviderPolicyError, attach_provider_governor, service_governor
+    try:
+        provider_governor = attach_provider_governor(service) or service_governor(service)
+    except ProviderPolicyError as exc:
+        print(f"ERROR: provider policy is invalid: {exc}", file=sys.stderr)
+        release_lock(lock_path)
+        sys.exit(2)
 
     # Fetch fields
     max_fields = args.max_fields
@@ -1250,6 +1259,7 @@ def run_real(args: argparse.Namespace) -> None:
             "finished_at": finished_at.isoformat(),
             "duration_seconds": duration,
             "exit_code": 0,
+            "provider_resilience": None if provider_governor is None else provider_governor.process_summary(),
             # Sentinel interval metadata for date-mapping audit
             "per_field_intervals": [
                 {

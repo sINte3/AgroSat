@@ -8,6 +8,7 @@ behind their existing, independently idempotent child collectors.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -36,6 +37,14 @@ from services.collector_status import (
     STATUS_SCHEMA_VERSION,
     batch_record,
     summarize_provider_batches,
+)
+from services.provider_governor import (
+    CYCLE_FAILURE_CATEGORIES,
+    RUN_TERMINAL_CATEGORIES,
+    ProviderEnvironment,
+    ProviderPolicy,
+    ProviderPolicyError,
+    run_report,
 )
 
 
@@ -319,6 +328,9 @@ def _failure_condition(summary: dict[str, Any]) -> str | None:
     ).lower()
     if any(marker in searchable for marker in ("authentication", "invalid_client", "unauthorized", "401", "403")):
         return "auth"
+    if any(child.get("failure_category") == "rate_limited" for child in children):
+        # TASK_251: a short-window throttle that outlasted the bounded retry budget.
+        return "rate_limited"
     if any(marker in searchable for marker in ("quota", "rate limit", "429")):
         return "quota"
     if any(marker in searchable for marker in ("cloud", "quality_blocked")):
@@ -424,6 +436,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--state-dir", required=True)
     parser.add_argument("--lock-dir", required=True)
+    # TASK_251 provider pacing and HTTP 429 handling. The defaults are the production
+    # policy (the Scheduled Task passes none of these); bounds: services.provider_governor.
+    defaults = ProviderPolicy()
+    parser.add_argument("--provider-min-interval-seconds", type=float, default=defaults.min_interval_seconds,
+                        help="Minimum spacing of Statistical requests across all collector children (1-120).")
+    parser.add_argument("--provider-oauth-min-interval-seconds", type=float, default=defaults.oauth_min_interval_seconds,
+                        help="Minimum spacing of OAuth token requests (0-60).")
+    parser.add_argument("--provider-429-max-retries", type=int, default=defaults.max_retries,
+                        help="HTTP 429 retries per provider request (0-10).")
+    parser.add_argument("--provider-429-retry-budget-seconds", type=float, default=defaults.retry_budget_seconds,
+                        help="Total HTTP 429 wait per provider request (10-1800).")
+    parser.add_argument("--provider-429-max-retry-after-seconds", type=float, default=defaults.max_retry_after_seconds,
+                        help="A longer provider Retry-After is treated as a suspected quota (30-3600).")
     return parser.parse_args(argv)
 
 
@@ -458,7 +483,19 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
         args.date_to,
         args.lookback_days,
     )
+    defaults = ProviderPolicy()
+    try:
+        provider_policy = ProviderPolicy(
+            min_interval_seconds=getattr(args, "provider_min_interval_seconds", defaults.min_interval_seconds),
+            oauth_min_interval_seconds=getattr(args, "provider_oauth_min_interval_seconds", defaults.oauth_min_interval_seconds),
+            max_retries=getattr(args, "provider_429_max_retries", defaults.max_retries),
+            retry_budget_seconds=getattr(args, "provider_429_retry_budget_seconds", defaults.retry_budget_seconds),
+            max_retry_after_seconds=getattr(args, "provider_429_max_retry_after_seconds", defaults.max_retry_after_seconds),
+        )
+    except ProviderPolicyError as exc:
+        raise ContractError(f"provider policy: {exc}") from exc
     return {
+        "provider_policy": provider_policy,
         "mode": selected_mode(args),
         "indices": indices,
         "field_ids": field_ids,
@@ -675,7 +712,71 @@ def provider_failure_category(provider_output: Path) -> str | None:
         )
     except (OSError, UnicodeError, json.JSONDecodeError):
         return None
-    return value if value in {"authentication", "quota", "network", "timeout", "cloud", "provider_error"} else None
+    return value if value in CYCLE_FAILURE_CATEGORIES else None
+
+
+def cycle_summary(provider_output: Path) -> dict[str, Any] | None:
+    summaries = list(provider_output.glob("cycle_*/cycle_summary.json"))
+    if len(summaries) != 1:
+        return None
+    try:
+        if summaries[0].stat().st_size > MAX_CYCLE_SUMMARY_BYTES:
+            return None
+        payload = json.loads(summaries[0].read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _field_ids(value: Any) -> list[int]:
+    return [item for item in value if type(item) is int and item > 0] if isinstance(value, list) else []
+
+
+def _count(value: Any) -> int:
+    return value if type(value) is int and 0 <= value <= 10_000_000 else 0
+
+
+def stage_report(batches: list[list[int]], ran: dict[int, tuple[Path, int]]) -> dict[str, Any]:
+    """One provider stage: field outcomes and every field ID it did not finish (TASK_251).
+
+    A batch that never ran leaves all its fields unfinished; a batch that ran reports its
+    failed and unattempted fields; a failed batch without a readable summary leaves all
+    its fields unfinished. Nothing is silently dropped.
+    """
+    report = {"batches_planned": len(batches), "batches_run": len(ran), "attempted": 0, "completed": 0,
+              "skipped_existing": 0, "quality_blocked": 0, "failed": 0}
+    unfinished: list[int] = []
+    for number, batch in enumerate(batches, start=1):
+        if number not in ran:
+            unfinished.extend(batch)
+            continue
+        output, exit_code = ran[number]
+        payload = cycle_summary(output)
+        if payload is None:
+            if exit_code != 0:
+                unfinished.extend(batch)
+            continue
+        report["completed"] += _count(payload.get("success_count"))
+        report["failed"] += _count(payload.get("failure_count"))
+        report["attempted"] += _count(payload.get("success_count")) + _count(payload.get("failure_count"))
+        report["skipped_existing"] += _count(payload.get("skipped_existing_count"))
+        report["quality_blocked"] += _count(payload.get("quality_blocked_count"))
+        unfinished.extend(_field_ids(payload.get("failed_field_ids")))
+        unfinished.extend(_field_ids(payload.get("unattempted_field_ids")))
+    report["unfinished_field_ids"] = list(dict.fromkeys(unfinished))
+    report["unfinished_count"] = len(report["unfinished_field_ids"])
+    return report
+
+
+def run_status(final_code: int, stage_stops: dict[str, str], stages: dict[str, Any]) -> str:
+    """SUCCESS only for a complete cycle; never for unfinished work (TASK_251)."""
+    if final_code not in (0, 1):
+        return "FAILED"
+    if stage_stops:
+        return "DEGRADED"
+    if final_code == 1 or any(stage.get("unfinished_count") for stage in stages.values()):
+        return "PARTIAL"
+    return "SUCCESS"
 
 
 def provider_status(summary: dict[str, Any]) -> str:
@@ -715,6 +816,11 @@ def run(
     latest_status_path: Path | None = None
     apply_run = None
     heartbeat_publisher: HeartbeatPublisher | None = None
+    provider_environment = contextlib.ExitStack()
+    plan: dict[str, Any] | None = None
+    stage_plan: tuple[list[str], list[list[int]]] | None = None
+    stage_runs: dict[str, dict[int, tuple[Path, int]]] = {}
+    stage_stops: dict[str, str] = {}
     try:
         plan = validate(args)
         for directory in (
@@ -775,9 +881,17 @@ def run(
             providers.append("ndvi")
         if any(code in MULTI_INDICES for code in plan["indices"]):
             providers.append("multi")
+        # TASK_251: one provider policy, one shared pacer and one 429 cooldown for every
+        # child of this run, across both stages.
+        provider_env = provider_environment.enter_context(
+            ProviderEnvironment(plan["provider_policy"], plan["state_dir"], run_id, providers[0])
+        )
+        stage_plan = (providers, field_batches)
         final_code = 0
         stop = False
         for provider in providers:
+            provider_env.set_stage(provider)
+            stage_runs[provider] = {}
             for batch_number, field_batch in enumerate(field_batches, start=1):
                 provider_output = run_dir / f"{provider}_batch_{batch_number:04d}"
                 provider_output.mkdir(parents=False, exist_ok=False)
@@ -792,6 +906,7 @@ def run(
                 code = outcome.get("exit_code")
                 if type(code) is not int or code not in (0, 1, 2, 3, 4):
                     raise ContractError("child returned an invalid exit code")
+                stage_runs[provider][batch_number] = (provider_output, code)
                 summary["children"].append(
                     {
                         "provider": provider, "batch": batch_number,
@@ -810,10 +925,16 @@ def run(
                     final_code = code; stop = True; break
                 if code == 1 and final_code == 0:
                     final_code = code
-                if code == 1 and summary["children"][-1]["failure_category"] in {
-                    "authentication", "quota",
-                }:
+                category = summary["children"][-1]["failure_category"]
+                if code == 1 and category in RUN_TERMINAL_CATEGORIES:
+                    # Provider-wide: authentication refused or a quota is suspected.
+                    stage_stops[provider] = category
                     stop = True
+                    break
+                if code == 1 and category == "rate_limited":
+                    # TASK_251: a throttle outlasted the bounded retry budget. Stop this
+                    # stage only; the next stage still runs, after the shared cooldown.
+                    stage_stops[provider] = category
                     break
             if stop:
                 break
@@ -833,6 +954,20 @@ def run(
             "LOCK_CONTENTION" if final_code == 3 else detail
         )
     finally:
+        provider_environment.close()
+        if stage_plan is not None:
+            stage_providers, stage_batches = stage_plan
+            summary["stages"] = {
+                provider: stage_report(stage_batches, stage_runs.get(provider, {}))
+                for provider in stage_providers
+            }
+            summary["stage_stops"] = stage_stops
+        if plan is not None and plan["mode"] != "dry-run":
+            summary["provider_resilience"] = {
+                "policy": json.loads(plan["provider_policy"].to_json()),
+                "provider_limit": "UNKNOWN",
+                "ledger": run_report(plan["state_dir"], run_id),
+            }
         # The heartbeat and status files are operational state, published
         # around the collection and never into it. Failing to persist them is
         # still an operational failure (exit code 4), but it is applied only
@@ -922,6 +1057,7 @@ def run(
                 "finished_at": utc_now(),
                 "duration_seconds": round(time.monotonic() - started, 3),
                 "exit_code": final_code,
+                "run_status": run_status(final_code, stage_stops, summary.get("stages", {})),
             }
         )
         summary_persisted = False
@@ -932,6 +1068,7 @@ def run(
             except Exception as exc:
                 final_code = 4
                 summary["exit_code"] = final_code
+                summary["run_status"] = run_status(final_code, stage_stops, summary.get("stages", {}))
                 summary["diagnostics"].append(persistence_failure("summary", exc))
         if latest_status_path is not None:
             try:
@@ -946,6 +1083,7 @@ def run(
             except Exception as exc:
                 final_code = 4
                 summary["exit_code"] = final_code
+                summary["run_status"] = run_status(final_code, stage_stops, summary.get("stages", {}))
                 summary["diagnostics"].append(persistence_failure("latest status", exc))
                 if summary_persisted:
                     # The run's forensic record states the failure as well.

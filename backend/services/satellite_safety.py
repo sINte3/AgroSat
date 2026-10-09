@@ -28,8 +28,42 @@ class ProviderErrorClassification:
         return asdict(self)
 
 
+def provider_endpoint_label(error: BaseException) -> str | None:
+    """Which provider endpoint failed, from the request URL path only (never query or host).
+
+    TASK_251: the token request and the Statistical request used to log one identical
+    line, so a 429 could not be attributed (TASK_250 E6).
+    """
+    explicit = getattr(error, "endpoint", None)
+    if isinstance(explicit, str) and explicit:
+        return explicit
+    try:
+        path = error.request.url.path.lower()  # type: ignore[attr-defined]
+    except Exception:
+        return None
+    if "openid-connect" in path or path.endswith("/token"):
+        return "oauth"
+    if "statistic" in path:
+        return "statistical"
+    if "catalog" in path:
+        return "catalog"
+    if "process" in path:
+        return "process"
+    return "other"
+
+
 def classify_provider_error(error: BaseException) -> ProviderErrorClassification:
     """Classify provider failures without retaining exception text or response bodies."""
+    from services.provider_governor import ProviderPacingError, ProviderThrottleError
+
+    if isinstance(error, ProviderThrottleError):
+        # The collector governor already retried within its bounded budget:
+        # rate_limited = a short-window throttle that persisted for the whole budget;
+        # quota_suspected = the provider asked for a long wait or reported a quota.
+        return ProviderErrorClassification(error.kind, error.kind == "rate_limited", error.response.status_code)
+    if isinstance(error, ProviderPacingError):
+        # A local coordination failure (pacer lock/state), not a provider response.
+        return ProviderErrorClassification("pacing_unavailable", False)
     if isinstance(error, SatelliteConfigurationError):
         return ProviderErrorClassification("configuration", False)
     if isinstance(error, httpx.TimeoutException):
@@ -58,7 +92,9 @@ def safe_provider_error_summary(error: BaseException) -> str:
     classification = classify_provider_error(error)
     status = "" if classification.status_code is None else f" status={classification.status_code}"
     retryable = str(classification.retryable).lower()
-    return f"Sentinel provider error category={classification.category}{status} retryable={retryable}"
+    endpoint = provider_endpoint_label(error)
+    suffix = "" if endpoint is None else f" endpoint={endpoint}"
+    return f"Sentinel provider error category={classification.category}{status} retryable={retryable}{suffix}"
 
 
 def validate_credentials(client_id, client_secret):

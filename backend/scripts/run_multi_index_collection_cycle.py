@@ -7,6 +7,7 @@ scheduler-facing process boundary.
 """
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -25,6 +26,14 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 from services.collector_locking import acquire_lock, release_lock
+from services.provider_governor import (
+    ProviderPolicyError,
+    STAGE_TERMINAL_CATEGORIES,
+    aggregate_process_summaries,
+    child_failure_category,
+    ensure_collector_environment,
+    structured_failure,
+)
 
 DEFAULT_INDICES = ("savi", "evi", "ndmi", "ndre")
 STATE_SCHEMA_VERSION = 1
@@ -310,6 +319,7 @@ def run(args: argparse.Namespace, *, field_query: Callable[[], list[int]] = quer
     final_exit_code, state, next_state = 4, default_state(), None
     results: list[dict[str, Any]] = []
     summary: dict[str, Any] = {"schema_version": 1, "run_id": run_id, "exit_code": 4, "started_at": utc_now(), "diagnostics": []}
+    provider_environment = contextlib.ExitStack()
     try:
         mode, indices, state_file, output_dir = validate_args(args)
         start_date, end_date = resolve_dates(args.date_from, args.date_to, args.lookback_days)
@@ -338,6 +348,15 @@ def run(args: argparse.Namespace, *, field_query: Callable[[], list[int]] = quer
         if not selected:
             raise CycleValidationError("NO_ACTIVE_FIELDS_OR_EMPTY_BATCH")
         failures: list[int] = []; successes: list[int] = []; totals = {"inserted": 0, "skipped_existing": 0, "quality_blocked": 0, "timeouts": 0, "attempts": 0}; fatal = False
+        provider_summaries: list[Any] = []; provider_stop: str | None = None
+        # TASK_251: every child shares one pacer and one 429 cooldown (the canonical
+        # run's when present, else a standalone default next to this runner's state).
+        try:
+            provider_environment.enter_context(ensure_collector_environment(
+                "multi", (state_file or Path(lock_file)).parent, run_id
+            ))
+        except ProviderPolicyError as exc:
+            raise CycleValidationError(f"provider policy is invalid: {exc}") from exc
         for field_id in selected:
             success = False
             for attempt in range(1, args.max_attempts + 1):
@@ -363,11 +382,20 @@ def run(args: argparse.Namespace, *, field_query: Callable[[], list[int]] = quer
                     code = int(record.get("exit_code", 4))
                     record["exit_code"] = code
                     record["classification"] = "SUCCESS" if code == 0 else "FATAL_CHILD_CONTRACT_ERROR" if code == 2 else "RETRYABLE_LOCK_CONTENTION" if code == 3 else "RETRYABLE_FAILURE"
+                    provider_summaries.append(child.get("provider_resilience"))
+                    category = None if code == 0 else child_failure_category([outcome.get("stdout", ""), outcome.get("stderr", "")], structured_failure(child), had_errors=bool(child.get("errors")))
+                    if category is not None:
+                        record["failure_category"] = category
                     results.append(record)
                     if code == 0:
                         success = True; break
                     if code == 2:
                         fatal = True; break
+                    if category in STAGE_TERMINAL_CATEGORIES:
+                        # The child already spent its bounded 429 budget, or the provider
+                        # refused authentication / reported a quota: never re-spawn it, and
+                        # stop this batch with the remaining fields recorded as unattempted.
+                        provider_stop = category; break
                     if attempt < args.max_attempts:
                         sleeper(min(args.retry_base_seconds * (2 ** (attempt - 1)), MAX_BACKOFF_SECONDS))
                 finally:
@@ -380,14 +408,14 @@ def run(args: argparse.Namespace, *, field_query: Callable[[], list[int]] = quer
                 successes.append(field_id)
             else:
                 failures.append(field_id)
-            if fatal:
+            if fatal or provider_stop:
                 break
         retry_after = [item for item in state["retry_field_ids"] if item not in selected and item not in failures]
         retry_after.extend(item for item in failures if item not in retry_after)
         retry_after = retry_after[:MAX_BATCH_SIZE]
         final_exit_code = 2 if fatal else (1 if failures else 0)
         unattempted = [field_id for field_id in selected if field_id not in successes and field_id not in failures]
-        summary.update({"mode": mode, "indices": indices, "date_from": start_date.isoformat(), "date_to": end_date.isoformat(), "selected_field_ids": selected, "successful_field_ids": successes, "failed_field_ids": failures, "unattempted_field_ids": unattempted, "unattempted_count": len(unattempted), "batch_source_counts": {"retry": retry_count, "rotation": rotation_count}, "attempt_counts": totals["attempts"], "success_count": len(successes), "failure_count": len(failures), "timeout_count": totals["timeouts"], "inserted_count": totals["inserted"], "skipped_existing_count": totals["skipped_existing"], "quality_blocked_count": totals["quality_blocked"], "retry_queue_before": state["retry_field_ids"], "retry_queue_after": retry_after, "state_advanced": False})
+        summary.update({"mode": mode, "indices": indices, "date_from": start_date.isoformat(), "date_to": end_date.isoformat(), "selected_field_ids": selected, "successful_field_ids": successes, "failed_field_ids": failures, "unattempted_field_ids": unattempted, "unattempted_count": len(unattempted), "batch_source_counts": {"retry": retry_count, "rotation": rotation_count}, "attempt_counts": totals["attempts"], "success_count": len(successes), "failure_count": len(failures), "timeout_count": totals["timeouts"], "inserted_count": totals["inserted"], "skipped_existing_count": totals["skipped_existing"], "quality_blocked_count": totals["quality_blocked"], "retry_queue_before": state["retry_field_ids"], "retry_queue_after": retry_after, "state_advanced": False, "provider_failure_category": provider_stop, "provider_resilience": aggregate_process_summaries(provider_summaries)})
         if not fatal and state_file:
             next_state = {"schema_version": STATE_SCHEMA_VERSION, "next_offset": next_offset, "retry_field_ids": retry_after, "last_completed_run_id": run_id, "updated_at": utc_now()}
     except CycleValidationError as exc:
@@ -397,6 +425,7 @@ def run(args: argparse.Namespace, *, field_query: Callable[[], list[int]] = quer
     except Exception as exc:
         final_exit_code = 4; summary["classification"] = "ORCHESTRATION_ERROR"; summary["diagnostics"].append(sanitize_text(str(exc)))
     finally:
+        provider_environment.close()
         summary["finished_at"] = utc_now(); summary["duration_seconds"] = round(time.monotonic() - started, 3)
         if run_dir:
             try:

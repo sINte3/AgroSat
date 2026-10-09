@@ -373,6 +373,14 @@ class SentinelHubService:
         self._access_token: Optional[str] = None
         self._token_expires_at: float = 0
 
+    #: Set only by a standalone collector process (services.provider_governor.
+    #: attach_provider_governor); web requests never pace or retry here.
+    provider_governor = None
+
+    def _provider_post(self, endpoint: str, send):
+        governor = self.provider_governor
+        return send() if governor is None else governor.post(endpoint, send)
+
     @property
     def provider(self) -> str:
         return self._provider_endpoints.name
@@ -398,14 +406,14 @@ class SentinelHubService:
 
         import time
 
-        response = httpx.post(
+        response = self._provider_post("oauth", lambda: httpx.post(
             self._provider_endpoints.token_url,
             data={
                 "grant_type": "client_credentials",
                 "client_id": self.client_id,
                 "client_secret": self.client_secret,
             }
-        )
+        ))
         response.raise_for_status()
         token_data = response.json()
         self._access_token = token_data["access_token"]
@@ -478,12 +486,12 @@ class SentinelHubService:
             return None
 
         try:
-            response = httpx.post(
+            response = self._provider_post("statistical", lambda: httpx.post(
                 self._provider_endpoints.statistical_url,
                 json=payload,
                 headers={"Authorization": f"Bearer {token}"},
                 timeout=60.0
-            )
+            ))
             response.raise_for_status()
             data = response.json()
 

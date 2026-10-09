@@ -130,6 +130,14 @@ class MultiIndexSentinelHubService:
         self._token_expires_at: float = 0
         self._last_response_data: Optional[dict] = None  # raw JSON, for diagnostics
 
+    #: Set only by a standalone collector process (services.provider_governor.
+    #: attach_provider_governor); web requests never pace or retry here.
+    provider_governor = None
+
+    def _provider_post(self, endpoint: str, send):
+        governor = self.provider_governor
+        return send() if governor is None else governor.post(endpoint, send)
+
     @property
     def provider(self) -> str:
         return self._provider_endpoints.name
@@ -151,7 +159,7 @@ class MultiIndexSentinelHubService:
                 "Set SENTINEL_HUB_CLIENT_ID and SENTINEL_HUB_CLIENT_SECRET in .env"
             )
 
-        resp = httpx.post(
+        resp = self._provider_post("oauth", lambda: httpx.post(
             self._provider_endpoints.token_url,
             data={
                 "grant_type": "client_credentials",
@@ -159,7 +167,7 @@ class MultiIndexSentinelHubService:
                 "client_secret": self.client_secret,
             },
             timeout=30.0,
-        )
+        ))
         resp.raise_for_status()
         data = resp.json()
         self._access_token = data["access_token"]
@@ -220,12 +228,12 @@ class MultiIndexSentinelHubService:
             max_cloud_coverage=max_cloud_coverage,
         )
 
-        resp = httpx.post(
+        resp = self._provider_post("statistical", lambda: httpx.post(
             self._provider_endpoints.statistical_url,
             json=payload,
             headers={"Authorization": f"Bearer {token}"},
             timeout=timeout_s,
-        )
+        ))
         resp.raise_for_status()
         response_data = resp.json()
 
@@ -282,12 +290,12 @@ class MultiIndexSentinelHubService:
             max_cloud_coverage=max_cloud_coverage,
         )
 
-        resp = httpx.post(
+        resp = self._provider_post("statistical", lambda: httpx.post(
             self._provider_endpoints.statistical_url,
             json=payload,
             headers={"Authorization": f"Bearer {token}"},
             timeout=timeout_s,
-        )
+        ))
         resp.raise_for_status()
         response_data = resp.json()
         self._last_response_data = response_data

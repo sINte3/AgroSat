@@ -204,6 +204,7 @@ def run(args: argparse.Namespace, *, lookup: Callable[[int], dict[str, Any]] = f
     result: dict[str, Any] = {"schema_version": SCHEMA, "field_id": args.field_id, "mode": mode(args), "scenes_received": 0, "candidate_count": 0, "inserted_count": 0, "skipped_existing_count": 0, "quality_blocked_count": 0, "error_count": 0, "started_at": datetime.now(timezone.utc).isoformat(), "diagnostics": []}
     lock = None
     output_log: Path | None = None
+    governor = None
     code = 4
     try:
         current_mode = mode(args)
@@ -230,6 +231,13 @@ def run(args: argparse.Namespace, *, lookup: Callable[[int], dict[str, Any]] = f
             from services.satellite_safety import require_real_service
             service = service_factory()
             require_real_service(service)
+            # TASK_251: global pacing and bounded HTTP 429 retries, coordinated with
+            # every other collector child through the shared pacer state.
+            from services.provider_governor import ProviderPolicyError, attach_provider_governor, service_governor
+            try:
+                governor = attach_provider_governor(service) or service_governor(service)
+            except ProviderPolicyError as exc:
+                raise ValidationError(f"provider policy is invalid: {exc}") from exc
             observation = service.get_ndvi_stats(field["geometry_wkt"], start, end)
             result["scenes_received"] = 0 if observation is None else 1
             if observation is None:
@@ -272,6 +280,8 @@ def run(args: argparse.Namespace, *, lookup: Callable[[int], dict[str, Any]] = f
             except Exception as exc:
                 code = 4
                 result["diagnostics"].append(sanitize_text(f"lock release failed: {exc}"))
+        if governor is not None:
+            result["provider_resilience"] = governor.process_summary()
         result.update(finished_at=datetime.now(timezone.utc).isoformat(), duration_seconds=round(time.monotonic() - started, 3), exit_code=code)
         if output_log is not None:
             try:
