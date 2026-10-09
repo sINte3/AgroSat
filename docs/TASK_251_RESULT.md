@@ -2,6 +2,10 @@
 
 **TASK_251_RESULT: PASS** (development only; NOT DEPLOYED; detector remains disabled)
 
+> **Corrected by TASK_251A** (independent review, two release blockers, §14). The retry defaults below were
+> superseded: retry budget **120 s** (was 300 s) and maximum back-off **60 s** (was 120 s), so the policy fits the
+> production 180 s field timeout. Batch completion now requires verifiable evidence. Superseded values are marked inline.
+
 | | |
 |---|---|
 | Branch | `task/251-sentinel-collector-429-resilience` (local, not pushed), base `f3458818f4dabca07b649fe5a502229219a8c848` |
@@ -23,7 +27,7 @@ TASK_251 replaces the accidental pacing with explicit, global pacing, and turns 
 | | Before (f3458818) | After (925f37c) |
 |---|---|---|
 | Request spacing | none; ~2 s per child after the rebuild (Redis side effect before) | ≥ 5 s between Statistical requests across all children and both stages (≤ 12/min) |
-| HTTP 429 in NDVI | terminal: batch and whole cycle stop | retried in the child: Retry-After honoured, back-off 15/30/60/120 s, max 4 retries, 300 s budget, shared cooldown |
+| HTTP 429 in NDVI | terminal: batch and whole cycle stop | retried in the child: Retry-After honoured, back-off 15/30/60 s (TASK_251A; was …/120), max 4 retries, 120 s budget (TASK_251A; was 300 s), shared cooldown, never past the child's deadline |
 | HTTP 429 in indices | runner re-spawned the child after 2 s (no Retry-After) | same in-child policy; no re-spawn of an exhausted child |
 | Persistent throttling | whole cycle stopped at the first 429 | `rate_limited` stops only that stage; the other stage still runs |
 | Suspected quota / auth | `quota` stopped the cycle | `quota_suspected` (long Retry-After, quota wording) / `authentication`: provider-wide stop, as before |
@@ -81,8 +85,8 @@ Unchanged: no frontend change, migration, schema, statistics calculation, resolu
 - **`Retry-After`.** Sentinel Hub documents it in **milliseconds**: `3398` = 3.4 s (docs.sentinel-hub.com, rate limiting; sentinelhub-py divides by 1000). The OAuth endpoint uses RFC 9110 seconds or an HTTP date. Negative or unparsable values are ignored.
 - **Delay.**
   - With `Retry-After`: max(Retry-After, pacing floor).
-  - Without it: 15 s doubling, capped at 120 s.
-- **Bounds.** Max 4 retries (configurable 0–10) and a 300 s total wait per request (10–1800).
+  - Without it: 15 s doubling, capped at 60 s (TASK_251A; was 120 s).
+- **Bounds.** Max 4 retries (configurable 0–10) and a 120 s total wait per request (TASK_251A; was 300 s). The budget is configurable 10–1800 s but must fit the field timeout (§14).
 - **Escalation.**
   - A `Retry-After` above 600 s, or provider quota wording, gives `quota_suspected`: not retried, provider-wide stop.
   - Exhausting retries or budget gives `rate_limited`.
@@ -131,7 +135,7 @@ It is a simplified model; the real limiter is UNKNOWN, and the legacy collector 
 - **Normal case.** 550 Statistical requests × 5 s = **≈ 46 min** (simulated 45.8 min). OAuth spacing and child start-up overlap inside the 5 s slots. Historical pre-TASK_247 cycles took 30–42 min.
 - **Stricter limit.** About 70 min in the 8/min simulation.
 - **Upper bound.**
-  - Each request can wait at most 300 s on 429 retries.
+  - Each request can wait at most 120 s on 429 retries, and a child never outlives its field timeout (TASK_251A, §14).
   - A `rate_limited` stage stops after one exhausted budget.
   - The existing 6 h cycle timeout and 180 s field timeout still bound the run.
 - **Schedule fit.** The 06:00 Asia/Tashkent schedule (01:00Z) finishes about 01:46Z.
@@ -188,3 +192,107 @@ Production stays on f3458818 / R20261008-task247 (`prod/release_pointer.txt`):
 ## 13. Deployment
 
 **NOT DEPLOYED.** Deploying requires a separate release task through the control plane. The new options need no runtime-config change: their defaults are the policy. **DETECTOR REMAINS DISABLED.**
+
+## 14. TASK_251A review addendum — release-blocking safety corrections
+
+An independent code review of `00114cc` found two release blockers. Both are fixed in corrective commit **`b585773`** (a new commit on the same branch; no history rewrite, not pushed).
+
+### 14.1 Blocker 1 — inconsistent timeout budgets: FIXED
+
+**Before.**
+- The runner killed a child at the field timeout: 180 s from the Scheduled Task's `--field-timeout-seconds`.
+- The child's own 429 policy could wait 300 s.
+- A single pacer wait could reach 900 s, and one multi-index Statistical request alone could take 120 s.
+- A recoverable throttle could therefore end as an accidental kill, classified `timeout`, with the 429 evidence lost.
+
+**Effective contract after the fix** (outermost first):
+
+| Level | Bound | Enforced by |
+|---|---|---|
+| Cycle | 6 h (`--cycle-timeout-seconds 21600`, unchanged) | top-level kills a batch runner at the remaining cycle time; the cycle deadline is exported as `AGROSAT_PROVIDER_CYCLE_DEADLINE` |
+| Batch runner | starts a child only with a viable window: `min(field timeout, cycle deadline − 30 s)` ≥ the no-throttle minimum (51 s by default) | `run_*_collection_cycle.py`; otherwise the remaining fields are unattempted, `provider_failure_category=timeout`, exit 1 |
+| Child | killed at its timeout (180 s in production) | runner (`child_runner(…, timeout)`) |
+| Provider work in the child | must end by `spawn + timeout − 15 s` (`AGROSAT_PROVIDER_CHILD_DEADLINE`, set per spawn) | governor: never starts a pacing wait, retry wait or request that cannot finish by then; HTTP timeouts are clipped to the time left; what cannot fit ends as explicit `rate_limited` (shared cooldown) or `timeout` |
+| 429 waiting per request | 120 s budget, ≤ 4 retries, Retry-After honoured | governor (`retry_budget`, `max_retries`, `child_deadline` reasons) |
+
+**Validation before any provider request** (`timeout_contract`):
+- The no-throttle reserve is start-up 10 s + exit margin 15 s + one pacing slot per budget (1 s + 5 s) + a 10 s request window per call (2 calls) = **51 s**.
+- The retry budget must fit `field timeout − 51 s`. The production 180 s therefore allows up to 129 s, and the default is 120 s.
+- An incompatible combination is refused before any child starts:
+  - `collect_satellite.py` exits 2 (`provider timeout contract …`);
+  - a standalone runner given an incompatible inherited policy also exits 2.
+- A dry run, which makes no provider request, only reports the violation.
+- The largest consistent setting is field timeout 900 s (the existing maximum) with a retry budget of 849 s.
+
+**Worst-case durations.** The runner retries only non-terminal failures, and `rate_limited`, `quota` and `authentication` stop the stage.
+
+| Scenario | Bound |
+|---|---|
+| Normal cycle | about 46 min (unchanged) |
+| One child | ≤ 180 s, with provider work ending by 165 s |
+| One field | ≤ 2 × 180 s + 2 s back-off (`max_attempts 2`) |
+| Permanently throttled provider (simulated, Retry-After 30 s) | each stage stops after one child's budget; the run ends **DEGRADED in about 4.3 min** |
+| Slow provider | still bounded by the unchanged 6 h cycle limit; no timeout was raised |
+
+**Compatibility.** The Scheduled Task, `Invoke-Collector.ps1` and `collector-task.json` are unchanged; the production arguments validate under the new contract (tested). Without a governor (web processes), every call site keeps its previous timeout byte-for-byte; the NDVI token request still passes none.
+
+### 14.2 Blocker 2 — exit code accepted as completion evidence: FIXED
+
+**Before.** A batch child that exited 0 with a missing, unreadable or counter-only `cycle_summary.json` was counted as complete. The run could report `SUCCESS` and `succeeded` with unproven fields.
+
+**After.** `verify_batch` accepts a batch only if its summary:
+- exists, is unique, at most 1 MiB and valid JSON;
+- carries the runner contract that both runners already write on every exit 0/1 path:
+  - `selected/successful/failed/unattempted_field_ids` (positive, unique ids);
+  - `success/failure/unattempted/skipped_existing/quality_blocked_count`;
+  - `exit_code`;
+- selects exactly the planned field IDs, with successful, failed and unattempted disjoint and covering the plan;
+- has counts equal to the list lengths;
+- records the same exit code;
+- and, for exit 0, leaves no failed or unattempted field.
+
+**Fail-closed behaviour.**
+- Any violation leaves every planned field of that batch **unfinished**, adds a bounded `unverified_batches` entry with the reason, and raises a clean exit to **1**.
+- This happens before the run row is finalized, so the status file says `failed`, the database category is the existing `operational`, and `run_status` is `PARTIAL`, or `DEGRADED` together with a stage stop.
+- Fields are never marked completed from counters.
+- Bounded and sanitized: at most 50 reasons per stage, no summary content copied.
+- Unchanged: the status schema (2), `ck_collection_runs_failure` and the database categories.
+- The runners themselves now exit 1 whenever a field was left unattempted (previously only failed fields counted).
+
+**Existing tests.** Seven existing collector test files had fake children writing counter-only summaries that no real runner produces. They now write the real contract through `tests/collector_evidence.py`. One fixture (two fields, exit 0, `success_count` 1) was contradictory and was corrected along with its expected counters.
+
+### 14.3 Regression tests (new: `tests/test_task251a_timeout_and_evidence.py`, 34 tests)
+
+| Required scenario | Tests |
+|---|---|
+| HTTP 429 recovery needing > 180 s | explicit `rate_limited` inside the default 165 s window; succeeds when the field timeout is configured to 600 s |
+| Default effective timeout configuration | 51 s reserve, 129 s capacity ≥ 120 s budget, 165 s provider window |
+| Maximum permitted retry settings | 849 s/900 s accepted; 850 s, 1800 s and 120 s/170 s refused |
+| Pacing wait + retry back-off | a shared cooldown plus the child's own back-off never sleeps past the deadline; the provider's wait is kept for the next child |
+| Persistent throttling and termination | ends inside the child window as `rate_limited`; runners stop starting children when the cycle budget is spent (NDVI and indices) |
+| Child exit 0 with missing / corrupt / oversized / counters-only summary | each is `PARTIAL`, exit 1, status `failed`, category `operational`, all fields unfinished |
+| Incomplete or contradictory counts | 8 cases (count, field set, partition, exit code, negative values) |
+| Normal valid completed batches | `SUCCESS`, exit 0 |
+| Partially completed NDVI and index stages | `PARTIAL` with exact unfinished IDs |
+| Correctly classified incomplete runs | throttled stage plus missing index evidence gives `DEGRADED` and DB category `quota` |
+
+Also tested: request timeouts are clipped; without a governor, call-site timeouts are unchanged; each child's deadline env is set per spawn and restored; and the cycle deadline reaches every batch runner.
+
+### 14.4 Results
+
+| Lane | Result |
+|---|---|
+| TASK_251 + TASK_251A focused | **82 passed** |
+| Full backend suite | **1662 passed, 174 skipped, 0 failed** |
+| Ops suite | **117 passed** |
+| Isolated PostgreSQL lane (`agrosat_h0a_task240`, 13 suites) | **175 passed** |
+| Simulation (child deadlines enforced) | every child ≤ 180 s; observed-limit scenario 275 + 275 complete; permanent throttling → DEGRADED in 4.3 min |
+
+**Production.**
+- Zero-write proof PASS (48/48, zero DML).
+- f3458818 / R20261008-task247 unchanged, Scheduled Tasks unchanged, detector false.
+- No provider request, no migration.
+
+Evidence: `C:\AgroSat_backups\TASK_251A_COLLECTOR_SAFETY_20261009_111219`.
+
+**TASK_251A_RESULT: PASS** — NOT DEPLOYED. PRODUCTION UNCHANGED. DETECTOR DISABLED.
