@@ -666,16 +666,14 @@ def test_the_collectors_own_multibatch_output_is_accepted(tmp_path, monkeypatch)
         # child cycle reports a batch in which some fields failed.
         failing = provider == "multi" and seen[provider] == 3
         fields = len(command[command.index("--field-ids") + 1].split(","))
-        output = Path(command[command.index("--output-dir") + 1])
-        (output / "cycle_1").mkdir()
         values = counters(
             success_count=fields - int(failing),
             failure_count=int(failing),
             inserted_count=fields - int(failing),
         )
-        (output / "cycle_1" / "cycle_summary.json").write_text(
-            json.dumps(values), encoding="utf-8"
-        )
+        from collector_evidence import write_cycle_summary
+
+        write_cycle_summary(command, 1 if failing else 0, values)
         return {
             "exit_code": 1 if failing else 0,
             "timed_out": False,

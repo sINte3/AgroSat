@@ -661,14 +661,11 @@ def test_a_real_shaped_cycle_reads_back_as_succeeded(tmp_path, monkeypatch):
     monkeypatch.setattr(collector, "resolve_active_field_ids", lambda: list(range(1001, 1276)))
 
     def provider_child(command, timeout):
+        from collector_evidence import write_cycle_summary
+
         fields = len(command[command.index("--field-ids") + 1].split(","))
-        output = Path(command[command.index("--output-dir") + 1])
-        (output / "cycle_1").mkdir()
-        (output / "cycle_1" / "cycle_summary.json").write_text(
-            json.dumps(counters(success_count=fields, inserted_count=fields // 2,
-                                skipped_existing_count=fields - fields // 2)),
-            encoding="utf-8",
-        )
+        write_cycle_summary(command, 0, counters(success_count=fields, inserted_count=fields // 2,
+                                                 skipped_existing_count=fields - fields // 2))
         return {"exit_code": 0, "timed_out": False, "stdout": "ok", "stderr": ""}
 
     output = tmp_path / "output"

@@ -26,6 +26,17 @@ Scope and safety
 * Diagnostics keep only counts, endpoint labels, retry delays and allow-listed numeric
   rate-limit header values. No response body text, credential or bearer token is
   stored; a provider error is reduced to a code/reason token and a quota-keyword flag.
+
+Timeout contract (TASK_251A). One child process may live at most the field timeout
+(``--field-timeout-seconds``, production 180 s) before its batch runner kills it; a batch
+runner may live at most what is left of the 6 h cycle. So that a recoverable 429 never
+turns into an accidental kill, the batch runner hands every child an absolute provider
+deadline (``AGROSAT_PROVIDER_CHILD_DEADLINE`` = spawn + child timeout - exit margin,
+never beyond the cycle deadline). The governor never starts a pacing wait, a retry
+wait or a request it cannot finish before that deadline, and it clips each request's
+HTTP timeout to the time left; what cannot fit ends as an explicit ``rate_limited`` (or
+``timeout``) outcome while the child is still alive to report it. ``timeout_contract``
+refuses, before any provider request, a retry budget that cannot fit the field timeout.
 """
 
 from __future__ import annotations
@@ -43,6 +54,20 @@ from typing import Any, Callable
 import httpx
 
 POLICY_ENV = "AGROSAT_PROVIDER_POLICY"
+CHILD_DEADLINE_ENV = "AGROSAT_PROVIDER_CHILD_DEADLINE"
+CYCLE_DEADLINE_ENV = "AGROSAT_PROVIDER_CYCLE_DEADLINE"
+#: Reserved after a child's last provider call: parsing, persistence, its JSON summary, exit.
+CHILD_EXIT_MARGIN_SECONDS = 15.0
+#: Interpreter start, imports and the field lookup before a child's first provider call.
+CHILD_STARTUP_ALLOWANCE_SECONDS = 10.0
+#: The shortest HTTP timeout worth starting a provider request with.
+MIN_REQUEST_WINDOW_SECONDS = 10.0
+#: Provider calls one collector child makes on the no-throttle path (token + Statistical).
+PROVIDER_CALLS_PER_CHILD = 2
+#: Reserved for a batch runner to write its summary before the cycle deadline kills it.
+BATCH_EXIT_MARGIN_SECONDS = 30.0
+#: httpx's own default timeout, used when a call site passes none.
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 5.0
 PACER_DIR_ENV = "AGROSAT_PROVIDER_PACER_DIR"
 RUN_ID_ENV = "AGROSAT_PROVIDER_RUN_ID"
 STAGE_ENV = "AGROSAT_PROVIDER_STAGE"
@@ -93,7 +118,7 @@ class ProviderThrottleError(httpx.HTTPStatusError):
     """
 
     def __init__(self, kind: str, endpoint: str, response: httpx.Response, *, attempts: int,
-                 waited_seconds: float, retry_after_seconds: float | None):
+                 waited_seconds: float, retry_after_seconds: float | None, reason: str = "retry_budget"):
         try:
             request = response.request
         except RuntimeError:
@@ -104,6 +129,21 @@ class ProviderThrottleError(httpx.HTTPStatusError):
         self.attempts = attempts
         self.waited_seconds = round(waited_seconds, 3)
         self.retry_after_seconds = retry_after_seconds
+        self.reason = reason
+
+
+class ProviderDeadlineError(RuntimeError):
+    """A wait or request that cannot finish before the child's provider deadline.
+
+    ``kind`` is ``rate_limited`` when a shared 429 cooldown is what does not fit, else
+    ``timeout``. Raised before sleeping, so the child reports it instead of being killed.
+    """
+
+    def __init__(self, kind: str, endpoint: str, reason: str):
+        super().__init__(f"provider deadline {kind} endpoint={endpoint} reason={reason}")
+        self.kind = kind
+        self.endpoint = endpoint
+        self.reason = reason
 
 
 def _bounded(name: str, value: Any, low: float, high: float, *, integer: bool = False) -> float | int:
@@ -128,15 +168,17 @@ class ProviderPolicy:
     oauth_min_interval_seconds: float = 1.0
     #: HTTP 429 retries per request (attempts = retries + 1).
     max_retries: int = 4
-    #: Total time one request may spend waiting on 429 retries.
-    retry_budget_seconds: float = 300.0
+    #: Total time one request may spend waiting on 429 retries. 120 s fits the production
+    #: 180 s field timeout (see ``timeout_contract``); larger budgets need a larger one.
+    retry_budget_seconds: float = 120.0
     #: First back-off when the provider sends no usable Retry-After; doubles per retry.
     base_backoff_seconds: float = 15.0
     #: Upper bound of one back-off wait.
-    max_backoff_seconds: float = 120.0
+    max_backoff_seconds: float = 60.0
     #: A provider-requested wait above this is treated as quota_suspected (no retry).
     max_retry_after_seconds: float = 600.0
-    #: Safety cap on any single pacer wait (never sleep longer than this).
+    #: Safety cap on any single pacer wait. Inside a collector child the provider deadline
+    #: is the tighter bound; this cap only matters for a child run without one.
     max_pacer_wait_seconds: float = 900.0
     #: Bound on waiting for the shared pacer file lock.
     lock_timeout_seconds: float = 30.0
@@ -167,6 +209,54 @@ class ProviderPolicy:
         if not isinstance(data, dict) or not set(data) <= set(cls.__dataclass_fields__):
             raise ProviderPolicyError("provider policy has unknown or malformed settings")
         return cls(**data)
+
+
+def timeout_contract(policy: ProviderPolicy, field_timeout_seconds: float) -> dict[str, Any]:
+    """Check that the retry policy fits one child's field timeout; refuse it otherwise.
+
+    The no-throttle path of a child needs its start-up, its exit margin, one pacing slot
+    per budget and a minimal request window per provider call. Whatever is left is the
+    longest 429 waiting a child can complete; a larger retry budget would be cut short by
+    the parent's kill, so it is rejected before any provider request.
+    """
+    field_timeout = _bounded("field_timeout_seconds", field_timeout_seconds, 1, 900)
+    reserve = (CHILD_STARTUP_ALLOWANCE_SECONDS + CHILD_EXIT_MARGIN_SECONDS + policy.oauth_min_interval_seconds
+               + policy.min_interval_seconds + PROVIDER_CALLS_PER_CHILD * MIN_REQUEST_WINDOW_SECONDS)
+    available = field_timeout - reserve
+    if available < policy.retry_budget_seconds:
+        raise ProviderPolicyError(
+            f"retry budget {policy.retry_budget_seconds:g}s does not fit the {field_timeout:g}s field timeout: "
+            f"at most {max(available, 0):g}s remain after the {reserve:g}s no-throttle reserve"
+        )
+    return {"field_timeout_seconds": field_timeout, "no_throttle_reserve_seconds": reserve,
+            "retry_budget_seconds": policy.retry_budget_seconds, "max_retry_wait_capacity_seconds": available,
+            "child_provider_window_seconds": field_timeout - CHILD_EXIT_MARGIN_SECONDS,
+            "child_exit_margin_seconds": CHILD_EXIT_MARGIN_SECONDS,
+            "max_pacer_wait_seconds": policy.max_pacer_wait_seconds}
+
+
+def minimum_child_seconds(policy: ProviderPolicy) -> float:
+    """The shortest child timeout that still allows the no-throttle path."""
+    return (CHILD_STARTUP_ALLOWANCE_SECONDS + CHILD_EXIT_MARGIN_SECONDS + policy.oauth_min_interval_seconds
+            + policy.min_interval_seconds + PROVIDER_CALLS_PER_CHILD * MIN_REQUEST_WINDOW_SECONDS)
+
+
+def child_timeout(field_timeout_seconds: float, now: float, cycle_deadline: float | None, policy: ProviderPolicy) -> float | None:
+    """The timeout a batch runner gives its next child, or None when the cycle has no
+    room left for a viable child (the runner then stops starting children)."""
+    timeout = float(field_timeout_seconds)
+    if cycle_deadline is not None:
+        timeout = min(timeout, cycle_deadline - now - BATCH_EXIT_MARGIN_SECONDS)
+    return timeout if timeout >= minimum_child_seconds(policy) else None
+
+
+def cycle_deadline_from_environment(environ: dict[str, str] | None = None) -> float | None:
+    raw = (os.environ if environ is None else environ).get(CYCLE_DEADLINE_ENV)
+    try:
+        value = float(raw) if raw else None
+    except ValueError:
+        return None
+    return value if value is not None and math.isfinite(value) else None
 
 
 def parse_retry_after(value: str | None, endpoint: str, *, now: float | None = None) -> float | None:
@@ -315,7 +405,8 @@ class ProviderGovernor:
     """Shared pacing plus bounded 429 retries for one collector process."""
 
     def __init__(self, policy: ProviderPolicy, state_dir: Path, *, run_id: str, stage: str,
-                 clock: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep):
+                 clock: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep,
+                 deadline: float | None = None):
         if stage not in KNOWN_STAGES:
             raise ProviderPolicyError("unknown provider stage")
         if not run_id or not _TOKEN.fullmatch(run_id):
@@ -327,6 +418,8 @@ class ProviderGovernor:
         self.clock = clock
         self.sleep = sleep
         self.counters = ProcessCounters()
+        #: Absolute (epoch) time by which every provider wait and request must be over.
+        self.deadline = deadline
         self._state_path = self.state_dir / STATE_FILENAME
         self._lock_path = self.state_dir / LOCK_FILENAME
 
@@ -359,6 +452,9 @@ class ProviderGovernor:
         return _FileLock(self._lock_path, self.policy.lock_timeout_seconds)
 
     # -- pacing ---------------------------------------------------------------------------
+    def remaining(self) -> float | None:
+        return None if self.deadline is None else self.deadline - self.clock()
+
     def acquire(self, endpoint: str) -> float:
         """Reserve the next request slot of the endpoint's budget; sleep until it.
 
@@ -384,6 +480,19 @@ class ProviderGovernor:
             wait = slot - now
             if wait > self.policy.max_pacer_wait_seconds:
                 raise ProviderPacingError("provider pacer wait exceeds the policy cap")
+            if self.deadline is not None and now + wait + MIN_REQUEST_WINDOW_SECONDS > self.deadline:
+                # The slot cannot be reached with a usable request window before the
+                # child's deadline: report it now instead of sleeping into a kill.
+                kind = "rate_limited" if cooldown > now else "timeout"
+                failure = {"category": kind, "endpoint": endpoint, "status": None, "retries": 0,
+                           "waited_seconds": 0.0, "retry_after_seconds": None, "provider_code": None,
+                           "reason": "child_deadline"}
+                self.counters.last_failure = failure
+                stage = state["run"]["stages"][self.stage]
+                key = f"{kind}:{endpoint}"
+                stage["terminal"][key] = stage["terminal"].get(key, 0) + 1
+                self._save(state)
+                raise ProviderDeadlineError(kind, endpoint, "child_deadline")
             entry["next_at"] = slot + interval
             stage = state["run"]["stages"][self.stage]
             stage["requests"][endpoint] = stage["requests"].get(endpoint, 0) + 1
@@ -417,16 +526,23 @@ class ProviderGovernor:
             self._save(state)
 
     # -- requests -------------------------------------------------------------------------
-    def post(self, endpoint: str, send: Callable[[], httpx.Response]) -> httpx.Response:
-        """Send one provider request with pacing and bounded HTTP 429 handling."""
+    def post(self, endpoint: str, send: Callable[[float], httpx.Response], *, timeout: float | None = None) -> httpx.Response:
+        """Send one provider request with pacing and bounded HTTP 429 handling.
+
+        ``send(timeout)`` performs the HTTP call; the governor passes the call site's own
+        timeout, clipped to the time left before the child's provider deadline.
+        """
         if endpoint not in ENDPOINT_BUDGET:
             raise ProviderPolicyError("unknown provider endpoint")
+        requested = DEFAULT_REQUEST_TIMEOUT_SECONDS if timeout is None else float(timeout)
         retries = 0
         waited = 0.0
         while True:
             self.acquire(endpoint)
+            remaining = self.remaining()
+            effective = requested if remaining is None else max(min(requested, remaining), 1.0)
             try:
-                response = send()
+                response = send(effective)
             except Exception:
                 def note_error(stage: dict[str, Any]) -> None:
                     key = f"{endpoint}:transport_error"
@@ -441,7 +557,7 @@ class ProviderGovernor:
                 stage["statuses"][key] = stage["statuses"].get(key, 0) + 1
             self._record(note)
             if status == 403 and signal and signal["mentions_quota"]:
-                self._fail("quota_suspected", endpoint, response, retries, waited, None, signal)
+                self._fail("quota_suspected", endpoint, response, retries, waited, None, signal, "quota_wording")
             if status != 429:
                 return response
             retry_after = parse_retry_after(response.headers.get("retry-after"), endpoint, now=self.clock())
@@ -457,10 +573,13 @@ class ProviderGovernor:
                     stage["provider_error_codes"] = (stage["provider_error_codes"] + [code])[-10:]
             self._record(note429)
             self.counters.http_429[endpoint] = self.counters.http_429.get(endpoint, 0) + 1
-            if signal["mentions_quota"] or (retry_after is not None and retry_after > self.policy.max_retry_after_seconds):
-                self._fail("quota_suspected", endpoint, response, retries, waited, retry_after, signal)
+            if signal["mentions_quota"]:
+                self._fail("quota_suspected", endpoint, response, retries, waited, retry_after, signal, "quota_wording")
+            if retry_after is not None and retry_after > self.policy.max_retry_after_seconds:
+                self._fail("quota_suspected", endpoint, response, retries, waited, retry_after, signal,
+                           "retry_after_exceeds_policy")
             if retries >= self.policy.max_retries:
-                self._fail("rate_limited", endpoint, response, retries, waited, retry_after, signal)
+                self._fail("rate_limited", endpoint, response, retries, waited, retry_after, signal, "max_retries")
             floor = max(self.policy.interval(ENDPOINT_BUDGET[endpoint]), 1.0)
             if retry_after is not None:
                 # Honour the provider's wait (already below max_retry_after_seconds).
@@ -468,7 +587,13 @@ class ProviderGovernor:
             else:
                 delay = max(min(self.policy.base_backoff_seconds * (2 ** retries), self.policy.max_backoff_seconds), floor)
             if waited + delay > self.policy.retry_budget_seconds:
-                self._fail("rate_limited", endpoint, response, retries, waited, retry_after, signal)
+                self.cooldown(endpoint, delay)
+                self._fail("rate_limited", endpoint, response, retries, waited, retry_after, signal, "retry_budget")
+            remaining = self.remaining()
+            if remaining is not None and delay + MIN_REQUEST_WINDOW_SECONDS > remaining:
+                # Waiting would outlive this child; keep the cooldown for the next one.
+                self.cooldown(endpoint, delay)
+                self._fail("rate_limited", endpoint, response, retries, waited, retry_after, signal, "child_deadline")
             self.cooldown(endpoint, delay)
             waited += delay
             retries += 1
@@ -479,10 +604,10 @@ class ProviderGovernor:
             self._record(note_retry)
 
     def _fail(self, kind: str, endpoint: str, response: httpx.Response, retries: int, waited: float,
-              retry_after: float | None, signal: dict[str, Any] | None) -> None:
+              retry_after: float | None, signal: dict[str, Any] | None, reason: str) -> None:
         failure = {"category": kind, "endpoint": endpoint, "status": int(response.status_code), "retries": retries,
                    "waited_seconds": round(waited, 3), "retry_after_seconds": retry_after,
-                   "provider_code": (signal or {}).get("code") or (signal or {}).get("reason")}
+                   "provider_code": (signal or {}).get("code") or (signal or {}).get("reason"), "reason": reason}
         self.counters.last_failure = failure
 
         def note(stage: dict[str, Any]) -> None:
@@ -490,7 +615,7 @@ class ProviderGovernor:
             stage["terminal"][key] = stage["terminal"].get(key, 0) + 1
         self._record(note)
         raise ProviderThrottleError(kind, endpoint, response, attempts=retries + 1, waited_seconds=waited,
-                                    retry_after_seconds=retry_after)
+                                    retry_after_seconds=retry_after, reason=reason)
 
     # -- reporting ------------------------------------------------------------------------
     def process_summary(self) -> dict[str, Any]:
@@ -545,8 +670,15 @@ def governor_from_environment(environ: dict[str, str] | None = None, **kwargs) -
         return None
     if not Path(pacer_dir).is_absolute():
         raise ProviderPolicyError("AGROSAT_PROVIDER_PACER_DIR must be absolute")
+    raw_deadline = environ.get(CHILD_DEADLINE_ENV)
+    try:
+        deadline = float(raw_deadline) if raw_deadline else None
+    except ValueError as exc:
+        raise ProviderPolicyError("AGROSAT_PROVIDER_CHILD_DEADLINE is malformed") from exc
+    if deadline is not None and not math.isfinite(deadline):
+        raise ProviderPolicyError("AGROSAT_PROVIDER_CHILD_DEADLINE is malformed")
     return ProviderGovernor(policy, Path(pacer_dir), run_id=environ.get(RUN_ID_ENV) or "standalone",
-                            stage=environ.get(STAGE_ENV) or "standalone", **kwargs)
+                            stage=environ.get(STAGE_ENV) or "standalone", deadline=deadline, **kwargs)
 
 
 def attach_provider_governor(service: Any, environ: dict[str, str] | None = None) -> ProviderGovernor | None:
@@ -560,8 +692,11 @@ def attach_provider_governor(service: Any, environ: dict[str, str] | None = None
 class ProviderEnvironment:
     """Set the governor environment for spawned collector children; restore afterwards."""
 
-    def __init__(self, policy: ProviderPolicy, pacer_dir: Path, run_id: str, stage: str):
+    def __init__(self, policy: ProviderPolicy, pacer_dir: Path, run_id: str, stage: str,
+                 cycle_deadline: float | None = None):
         self.values = {POLICY_ENV: policy.to_json(), PACER_DIR_ENV: str(pacer_dir), RUN_ID_ENV: run_id, STAGE_ENV: stage}
+        if cycle_deadline is not None:
+            self.values[CYCLE_DEADLINE_ENV] = repr(float(cycle_deadline))
         self.previous: dict[str, str | None] = {}
 
     def __enter__(self):
@@ -648,7 +783,8 @@ def aggregate_process_summaries(summaries: list[Any]) -> dict[str, Any]:
         failure = item.get("last_failure")
         if isinstance(failure, dict) and len(total["terminal_failures"]) < 20:
             total["terminal_failures"].append({k: failure.get(k) for k in ("category", "endpoint", "status", "retries",
-                                                                          "waited_seconds", "retry_after_seconds")})
+                                                                          "waited_seconds", "retry_after_seconds",
+                                                                          "reason")})
     return total
 
 
@@ -688,3 +824,25 @@ def service_governor(service: Any) -> ProviderGovernor | None:
     """The governor a provider service actually uses (only a real ProviderGovernor counts)."""
     candidate = getattr(service, "provider_governor", None)
     return candidate if isinstance(candidate, ProviderGovernor) else None
+
+
+class ChildDeadline:
+    """Per-spawn ``AGROSAT_PROVIDER_CHILD_DEADLINE`` for a batch runner's children.
+
+    ``set(epoch)`` before each spawn; the previous value is restored on exit.
+    """
+
+    def __init__(self):
+        self.previous = os.environ.get(CHILD_DEADLINE_ENV)
+
+    def __enter__(self):
+        return self
+
+    def set(self, deadline: float) -> None:
+        os.environ[CHILD_DEADLINE_ENV] = repr(float(deadline))
+
+    def __exit__(self, *exc):
+        if self.previous is None:
+            os.environ.pop(CHILD_DEADLINE_ENV, None)
+        else:
+            os.environ[CHILD_DEADLINE_ENV] = self.previous

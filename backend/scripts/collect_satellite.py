@@ -45,6 +45,7 @@ from services.provider_governor import (
     ProviderPolicy,
     ProviderPolicyError,
     run_report,
+    timeout_contract,
 )
 
 
@@ -494,8 +495,18 @@ def validate(args: argparse.Namespace) -> dict[str, Any]:
         )
     except ProviderPolicyError as exc:
         raise ContractError(f"provider policy: {exc}") from exc
+    # TASK_251A: a retry budget that cannot finish inside one child's field timeout would
+    # be cut short by the runner's kill; refuse it before any provider request. A dry run
+    # makes no provider request, so it only reports the contract.
+    try:
+        contract = timeout_contract(provider_policy, args.field_timeout_seconds)
+    except ProviderPolicyError as exc:
+        if selected_mode(args) != "dry-run":
+            raise ContractError(f"provider timeout contract: {exc}") from exc
+        contract = {"field_timeout_seconds": args.field_timeout_seconds, "violation": sanitize_text(exc, 300)}
     return {
         "provider_policy": provider_policy,
+        "timeout_contract": contract,
         "mode": selected_mode(args),
         "indices": indices,
         "field_ids": field_ids,
@@ -715,56 +726,107 @@ def provider_failure_category(provider_output: Path) -> str | None:
     return value if value in CYCLE_FAILURE_CATEGORIES else None
 
 
-def cycle_summary(provider_output: Path) -> dict[str, Any] | None:
+#: TASK_251A: the completion evidence every batch runner writes (cycle_summary.json).
+#: Both runners (scripts/run_ndvi_collection_cycle.py, run_multi_index_collection_cycle.py)
+#: record these keys on every path that exits 0 or 1.
+EVIDENCE_ID_LISTS = ("selected_field_ids", "successful_field_ids", "failed_field_ids", "unattempted_field_ids")
+EVIDENCE_COUNTS = ("success_count", "failure_count", "unattempted_count", "skipped_existing_count",
+                   "quality_blocked_count", "exit_code")
+MAX_UNVERIFIED_REPORTED = 50
+
+
+def cycle_summary(provider_output: Path) -> tuple[dict[str, Any] | None, str | None]:
+    """The batch's cycle summary, or why it cannot be used as evidence."""
     summaries = list(provider_output.glob("cycle_*/cycle_summary.json"))
+    if not summaries:
+        return None, "missing_summary"
     if len(summaries) != 1:
-        return None
+        return None, "multiple_summaries"
     try:
         if summaries[0].stat().st_size > MAX_CYCLE_SUMMARY_BYTES:
-            return None
+            return None, "oversized_summary"
         payload = json.loads(summaries[0].read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
+        return None, "unreadable_summary"
+    if not isinstance(payload, dict):
+        return None, "unreadable_summary"
+    return payload, None
+
+
+def verify_batch(batch: list[int], exit_code: int, provider_output: Path) -> tuple[dict[str, Any] | None, str | None]:
+    """Completion evidence of one batch, reconciled with the planned field IDs.
+
+    An exit code alone proves nothing: the summary must account for exactly the planned
+    fields (successful + failed + unattempted, disjoint), with matching counts and exit
+    code, and a clean exit must leave no field failed or unattempted.
+    """
+    payload, problem = cycle_summary(provider_output)
+    if problem:
+        return None, problem
+    lists: dict[str, list[int]] = {}
+    for key in EVIDENCE_ID_LISTS:
+        value = payload.get(key)
+        if (not isinstance(value, list) or len(value) > MAX_FIELDS
+                or any(type(item) is not int or item <= 0 for item in value) or len(set(value)) != len(value)):
+            return None, f"incomplete_summary:{key}"
+        lists[key] = value
+    for key in EVIDENCE_COUNTS:
+        value = payload.get(key)
+        if type(value) is not int or not 0 <= value <= 10_000_000:
+            return None, f"incomplete_summary:{key}"
+    planned = set(batch)
+    if len(lists["selected_field_ids"]) != len(batch) or set(lists["selected_field_ids"]) != planned:
+        return None, "field_set_mismatch"
+    done, failed, todo = (set(lists[key]) for key in EVIDENCE_ID_LISTS[1:])
+    if done & failed or done & todo or failed & todo or (done | failed | todo) != planned:
+        return None, "outcome_partition_mismatch"
+    for count_key, list_key in (("success_count", "successful_field_ids"), ("failure_count", "failed_field_ids"),
+                                ("unattempted_count", "unattempted_field_ids")):
+        if payload[count_key] != len(lists[list_key]):
+            return None, f"count_mismatch:{count_key}"
+    if payload["exit_code"] != exit_code:
+        return None, "exit_code_mismatch"
+    if exit_code == 0 and (failed or todo):
+        return None, "exit_zero_with_unfinished_fields"
+    return payload, None
 
 
 def _field_ids(value: Any) -> list[int]:
     return [item for item in value if type(item) is int and item > 0] if isinstance(value, list) else []
 
 
-def _count(value: Any) -> int:
-    return value if type(value) is int and 0 <= value <= 10_000_000 else 0
-
-
 def stage_report(batches: list[list[int]], ran: dict[int, tuple[Path, int]]) -> dict[str, Any]:
-    """One provider stage: field outcomes and every field ID it did not finish (TASK_251).
+    """One provider stage: field outcomes and every field ID it did not finish (TASK_251/251A).
 
-    A batch that never ran leaves all its fields unfinished; a batch that ran reports its
-    failed and unattempted fields; a failed batch without a readable summary leaves all
-    its fields unfinished. Nothing is silently dropped.
+    A field counts as finished only with verifiable evidence: a batch that never ran, or
+    whose summary is missing, unreadable, incomplete or contradicts the plan, leaves all
+    its fields unfinished, whatever its exit code. Nothing is silently dropped.
     """
     report = {"batches_planned": len(batches), "batches_run": len(ran), "attempted": 0, "completed": 0,
               "skipped_existing": 0, "quality_blocked": 0, "failed": 0}
     unfinished: list[int] = []
+    unverified: list[dict[str, Any]] = []
     for number, batch in enumerate(batches, start=1):
         if number not in ran:
             unfinished.extend(batch)
             continue
         output, exit_code = ran[number]
-        payload = cycle_summary(output)
-        if payload is None:
-            if exit_code != 0:
-                unfinished.extend(batch)
+        payload, problem = verify_batch(batch, exit_code, output)
+        if problem:
+            unfinished.extend(batch)
+            unverified.append({"batch": number, "exit_code": exit_code, "reason": problem})
             continue
-        report["completed"] += _count(payload.get("success_count"))
-        report["failed"] += _count(payload.get("failure_count"))
-        report["attempted"] += _count(payload.get("success_count")) + _count(payload.get("failure_count"))
-        report["skipped_existing"] += _count(payload.get("skipped_existing_count"))
-        report["quality_blocked"] += _count(payload.get("quality_blocked_count"))
-        unfinished.extend(_field_ids(payload.get("failed_field_ids")))
-        unfinished.extend(_field_ids(payload.get("unattempted_field_ids")))
+        report["completed"] += payload["success_count"]
+        report["failed"] += payload["failure_count"]
+        report["attempted"] += payload["success_count"] + payload["failure_count"]
+        report["skipped_existing"] += payload["skipped_existing_count"]
+        report["quality_blocked"] += payload["quality_blocked_count"]
+        unfinished.extend(_field_ids(payload["failed_field_ids"]))
+        unfinished.extend(_field_ids(payload["unattempted_field_ids"]))
     report["unfinished_field_ids"] = list(dict.fromkeys(unfinished))
     report["unfinished_count"] = len(report["unfinished_field_ids"])
+    report["unverified_batch_count"] = len(unverified)
+    report["unverified_batches"] = unverified[:MAX_UNVERIFIED_REPORTED]
     return report
 
 
@@ -774,7 +836,8 @@ def run_status(final_code: int, stage_stops: dict[str, str], stages: dict[str, A
         return "FAILED"
     if stage_stops:
         return "DEGRADED"
-    if final_code == 1 or any(stage.get("unfinished_count") for stage in stages.values()):
+    if final_code == 1 or any(stage.get("unfinished_count") or stage.get("unverified_batch_count")
+                              for stage in stages.values()):
         return "PARTIAL"
     return "SUCCESS"
 
@@ -800,6 +863,7 @@ def run(
     run_id_factory: Callable[[], str] = lambda: uuid.uuid4().hex,
 ) -> tuple[int, dict[str, Any]]:
     started = time.monotonic()
+    started_epoch = time.time()
     run_id = run_id_factory()
     summary: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -823,6 +887,8 @@ def run(
     stage_stops: dict[str, str] = {}
     try:
         plan = validate(args)
+        # TASK_251A: the cycle budget as an absolute deadline every batch runner can read.
+        cycle_deadline = started_epoch + args.cycle_timeout_seconds
         for directory in (
             plan["output_dir"],
             plan["state_dir"],
@@ -884,7 +950,8 @@ def run(
         # TASK_251: one provider policy, one shared pacer and one 429 cooldown for every
         # child of this run, across both stages.
         provider_env = provider_environment.enter_context(
-            ProviderEnvironment(plan["provider_policy"], plan["state_dir"], run_id, providers[0])
+            ProviderEnvironment(plan["provider_policy"], plan["state_dir"], run_id, providers[0],
+                                cycle_deadline=cycle_deadline)
         )
         stage_plan = (providers, field_batches)
         final_code = 0
@@ -938,6 +1005,19 @@ def run(
                     break
             if stop:
                 break
+        # TASK_251A: completion is proven by evidence, never by an exit code alone.
+        summary["stages"] = {
+            provider: stage_report(field_batches, stage_runs.get(provider, {}))
+            for provider in providers
+        }
+        summary["stage_stops"] = stage_stops
+        unverified = sum(stage["unverified_batch_count"] for stage in summary["stages"].values())
+        if unverified and final_code == 0:
+            final_code = 1
+            summary["diagnostics"].append(
+                f"batch completion evidence missing or invalid for {unverified} batch(es); "
+                "their fields are reported as unfinished"
+            )
     except ContractError as exc:
         final_code = 2
         summary["diagnostics"].append(sanitize_text(exc))
@@ -955,7 +1035,7 @@ def run(
         )
     finally:
         provider_environment.close()
-        if stage_plan is not None:
+        if stage_plan is not None and "stages" not in summary:
             stage_providers, stage_batches = stage_plan
             summary["stages"] = {
                 provider: stage_report(stage_batches, stage_runs.get(provider, {}))
@@ -965,6 +1045,7 @@ def run(
         if plan is not None and plan["mode"] != "dry-run":
             summary["provider_resilience"] = {
                 "policy": json.loads(plan["provider_policy"].to_json()),
+                "timeout_contract": plan["timeout_contract"],
                 "provider_limit": "UNKNOWN",
                 "ledger": run_report(plan["state_dir"], run_id),
             }

@@ -54,8 +54,12 @@ def provider_endpoint_label(error: BaseException) -> str | None:
 
 def classify_provider_error(error: BaseException) -> ProviderErrorClassification:
     """Classify provider failures without retaining exception text or response bodies."""
-    from services.provider_governor import ProviderPacingError, ProviderThrottleError
+    from services.provider_governor import ProviderDeadlineError, ProviderPacingError, ProviderThrottleError
 
+    if isinstance(error, ProviderDeadlineError):
+        # TASK_251A: a wait or request that could not finish before the child's deadline;
+        # rate_limited when a shared 429 cooldown is what did not fit.
+        return ProviderErrorClassification(error.kind, True)
     if isinstance(error, ProviderThrottleError):
         # The collector governor already retried within its bounded budget:
         # rate_limited = a short-window throttle that persisted for the whole budget;

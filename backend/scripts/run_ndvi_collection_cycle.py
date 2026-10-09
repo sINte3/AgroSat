@@ -21,12 +21,18 @@ if str(BACKEND) not in sys.path:
 
 from services.collector_locking import acquire_lock, release_lock
 from services.provider_governor import (
+    CHILD_EXIT_MARGIN_SECONDS,
+    ChildDeadline,
     ProviderPolicyError,
     STAGE_TERMINAL_CATEGORIES,
     aggregate_process_summaries,
     child_failure_category,
+    child_timeout,
+    cycle_deadline_from_environment,
     ensure_collector_environment,
+    policy_from_environment,
     structured_failure,
+    timeout_contract,
 )
 
 SCHEMA = 1
@@ -402,13 +408,27 @@ def run(args: argparse.Namespace, *, field_query: Callable[[], list[int]] = quer
             provider_environment.enter_context(ensure_collector_environment(
                 "ndvi", (state_file or lock_override or DEFAULT_LOCK).parent, run_id
             ))
+            # TASK_251A: the retry policy must fit the child timeout before any provider call.
+            policy = policy_from_environment()
+            summary["timeout_contract"] = timeout_contract(policy, args.field_timeout_seconds)
         except ProviderPolicyError as exc:
             raise ValidationError(f"provider policy is invalid: {exc}") from exc
+        cycle_deadline = cycle_deadline_from_environment()
+        child_deadline = provider_environment.enter_context(ChildDeadline())
+        cycle_exhausted = False
         for field_id in selected:
             attempted.append(field_id)
             succeeded = False
             field_fatal_code: int | None = None
             for attempt in range(1, args.max_attempts + 1):
+                # TASK_251A: each child gets an absolute provider deadline inside its own
+                # timeout and inside the cycle budget; no child starts without a viable window.
+                spawn_at = time.time()
+                timeout = child_timeout(args.field_timeout_seconds, spawn_at, cycle_deadline, policy)
+                if timeout is None:
+                    cycle_exhausted = True
+                    break
+                child_deadline.set(spawn_at + timeout - CHILD_EXIT_MARGIN_SECONDS)
                 # Keep the child IPC artifact below the Windows path budget.  The
                 # parsed, sanitized contract is durably retained in field_results.
                 temporary_log = True
@@ -418,7 +438,7 @@ def run(args: argparse.Namespace, *, field_query: Callable[[], list[int]] = quer
                 os.close(descriptor)
                 log = Path(temporary_name)
                 try:
-                    outcome = sanitize(child_runner(command(field_id, start, end, current_mode, log, Path(str(lock_override or DEFAULT_LOCK) + f".child.{field_id}")), args.field_timeout_seconds))
+                    outcome = sanitize(child_runner(command(field_id, start, end, current_mode, log, Path(str(lock_override or DEFAULT_LOCK) + f".child.{field_id}")), max(1, int(timeout))))
                     totals["attempts"] += 1
                     totals["timeouts"] += int(bool(outcome.get("timed_out")))
                     if outcome.get("timed_out"):
@@ -468,10 +488,17 @@ def run(args: argparse.Namespace, *, field_query: Callable[[], list[int]] = quer
                             log.unlink()
                         except OSError:
                             pass
+            if cycle_exhausted and not any(record.get("field_id") == field_id for record in results):
+                # The cycle budget ran out before this field's first child: unattempted.
+                attempted.remove(field_id)
+                terminal_provider_category = "timeout"
+                break
             if succeeded:
                 successful.append(field_id)
             else:
                 failed.append(field_id)
+            if cycle_exhausted:
+                terminal_provider_category = terminal_provider_category or "timeout"
             if field_fatal_code is not None:
                 fatal_field_id = field_id
                 final_exit_code = field_fatal_code
@@ -482,7 +509,8 @@ def run(args: argparse.Namespace, *, field_query: Callable[[], list[int]] = quer
         unattempted = [item for item in selected if item not in attempted]
         summary["provider_resilience"] = aggregate_process_summaries(provider_summaries)
         if fatal_field_id is None:
-            final_exit_code = 1 if failed else 0
+            # TASK_251A: an unattempted field is unfinished work, never a clean batch.
+            final_exit_code = 1 if failed or unattempted else 0
         retry_queue = retry_after(state, selected, failed)
         summary.update(mode=current_mode, date_from=start.isoformat(), date_to=end.isoformat(), selected_field_ids=selected, attempted_field_ids=attempted, successful_field_ids=successful, failed_field_ids=failed, fatal_field_id=fatal_field_id, provider_failure_category=terminal_provider_category, unattempted_field_ids=unattempted, batch_source_counts={"retry": retry_count, "rotation": rotation_count}, attempt_counts=totals["attempts"], success_count=len(successful), failure_count=len(failed), unattempted_count=len(unattempted), timeout_count=totals["timeouts"], inserted_count=totals["inserted"], skipped_existing_count=totals["skipped"], quality_blocked_count=totals["blocked"], retry_queue_before=state["retry_field_ids"], retry_queue_after=retry_queue, state_advanced=False)
         if final_exit_code in (0, 1) and state_file is not None:

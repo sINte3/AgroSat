@@ -377,9 +377,11 @@ class SentinelHubService:
     #: attach_provider_governor); web requests never pace or retry here.
     provider_governor = None
 
-    def _provider_post(self, endpoint: str, send):
+    def _provider_post(self, endpoint: str, send, timeout=None):
+        """``send(timeout)`` performs the call. Without a governor the call site's own
+        timeout is used unchanged; a collector governor may clip it to its deadline."""
         governor = self.provider_governor
-        return send() if governor is None else governor.post(endpoint, send)
+        return send(timeout) if governor is None else governor.post(endpoint, send, timeout=timeout)
 
     @property
     def provider(self) -> str:
@@ -406,13 +408,14 @@ class SentinelHubService:
 
         import time
 
-        response = self._provider_post("oauth", lambda: httpx.post(
+        response = self._provider_post("oauth", lambda timeout: httpx.post(
             self._provider_endpoints.token_url,
             data={
                 "grant_type": "client_credentials",
                 "client_id": self.client_id,
                 "client_secret": self.client_secret,
-            }
+            },
+            **({} if timeout is None else {"timeout": timeout}),
         ))
         response.raise_for_status()
         token_data = response.json()
@@ -486,12 +489,12 @@ class SentinelHubService:
             return None
 
         try:
-            response = self._provider_post("statistical", lambda: httpx.post(
+            response = self._provider_post("statistical", lambda timeout: httpx.post(
                 self._provider_endpoints.statistical_url,
                 json=payload,
                 headers={"Authorization": f"Bearer {token}"},
-                timeout=60.0
-            ))
+                timeout=timeout
+            ), timeout=60.0)
             response.raise_for_status()
             data = response.json()
 

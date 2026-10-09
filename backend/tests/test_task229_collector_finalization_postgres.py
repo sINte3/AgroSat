@@ -57,15 +57,9 @@ DATABASE_URL = _isolated_database_url()
 
 
 def healthy_child(command, timeout):
-    provider_output = Path(command[command.index("--output-dir") + 1])
-    (provider_output / "cycle_1").mkdir()
-    (provider_output / "cycle_1" / "cycle_summary.json").write_text(
-        json.dumps({
-            "success_count": 1, "failure_count": 0, "inserted_count": 1,
-            "skipped_existing_count": 0, "quality_blocked_count": 0, "timeout_count": 0,
-        }),
-        encoding="utf-8",
-    )
+    from collector_evidence import write_cycle_summary
+
+    write_cycle_summary(command, 0, {"success_count": 1, "inserted_count": 1})
     return {"exit_code": 0, "timed_out": False, "stdout": "ok", "stderr": ""}
 
 

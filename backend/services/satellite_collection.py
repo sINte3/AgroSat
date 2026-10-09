@@ -134,9 +134,11 @@ class MultiIndexSentinelHubService:
     #: attach_provider_governor); web requests never pace or retry here.
     provider_governor = None
 
-    def _provider_post(self, endpoint: str, send):
+    def _provider_post(self, endpoint: str, send, timeout=None):
+        """``send(timeout)`` performs the call. Without a governor the call site's own
+        timeout is used unchanged; a collector governor may clip it to its deadline."""
         governor = self.provider_governor
-        return send() if governor is None else governor.post(endpoint, send)
+        return send(timeout) if governor is None else governor.post(endpoint, send, timeout=timeout)
 
     @property
     def provider(self) -> str:
@@ -159,15 +161,15 @@ class MultiIndexSentinelHubService:
                 "Set SENTINEL_HUB_CLIENT_ID and SENTINEL_HUB_CLIENT_SECRET in .env"
             )
 
-        resp = self._provider_post("oauth", lambda: httpx.post(
+        resp = self._provider_post("oauth", lambda timeout: httpx.post(
             self._provider_endpoints.token_url,
             data={
                 "grant_type": "client_credentials",
                 "client_id": self.client_id,
                 "client_secret": self.client_secret,
             },
-            timeout=30.0,
-        ))
+            timeout=timeout,
+        ), timeout=30.0)
         resp.raise_for_status()
         data = resp.json()
         self._access_token = data["access_token"]
@@ -228,12 +230,12 @@ class MultiIndexSentinelHubService:
             max_cloud_coverage=max_cloud_coverage,
         )
 
-        resp = self._provider_post("statistical", lambda: httpx.post(
+        resp = self._provider_post("statistical", lambda timeout: httpx.post(
             self._provider_endpoints.statistical_url,
             json=payload,
             headers={"Authorization": f"Bearer {token}"},
-            timeout=timeout_s,
-        ))
+            timeout=timeout,
+        ), timeout=timeout_s)
         resp.raise_for_status()
         response_data = resp.json()
 
@@ -290,12 +292,12 @@ class MultiIndexSentinelHubService:
             max_cloud_coverage=max_cloud_coverage,
         )
 
-        resp = self._provider_post("statistical", lambda: httpx.post(
+        resp = self._provider_post("statistical", lambda timeout: httpx.post(
             self._provider_endpoints.statistical_url,
             json=payload,
             headers={"Authorization": f"Bearer {token}"},
-            timeout=timeout_s,
-        ))
+            timeout=timeout,
+        ), timeout=timeout_s)
         resp.raise_for_status()
         response_data = resp.json()
         self._last_response_data = response_data

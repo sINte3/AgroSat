@@ -61,8 +61,8 @@ def scripted(*responses):
     queue = list(responses)
     calls = []
 
-    def send():
-        calls.append(1)
+    def send(timeout=None):
+        calls.append(timeout)
         return queue.pop(0)
     send.calls = calls
     return send
@@ -117,8 +117,10 @@ def test_c_total_wait_budget_is_never_exceeded(tmp_path):
     send = scripted(*[response(429, headers={"Retry-After": "200000"}) for _ in range(5)])
     with pytest.raises(pg.ProviderThrottleError) as caught:
         gov.post("statistical", send)
-    assert caught.value.kind == "rate_limited"
-    assert len(send.calls) == 2 and gov.counters.cooldown_seconds == 200
+    assert caught.value.kind == "rate_limited" and caught.value.reason == "retry_budget"
+    assert len(send.calls) == 2
+    # One 200 s wait was spent; the second is not waited but kept as the shared cooldown.
+    assert gov.counters.cooldown_seconds == 400
 
 
 def test_c_a_wait_beyond_the_policy_is_a_suspected_quota_and_is_not_retried(tmp_path):
@@ -286,11 +288,12 @@ def _child_writer(outcomes: dict[str, dict]):
         output = Path(command[command.index("--output-dir") + 1])
         cycle = output / f"cycle_{len(calls)}"
         cycle.mkdir()
+        unattempted = spec.get("unattempted", [])
         (cycle / "cycle_summary.json").write_text(json.dumps({
             "success_count": len(spec["ok"]), "failure_count": len(spec["failed"]), "inserted_count": 0,
             "skipped_existing_count": len(spec["ok"]), "quality_blocked_count": 0, "timeout_count": 0,
-            "successful_field_ids": spec["ok"], "failed_field_ids": spec["failed"],
-            "unattempted_field_ids": spec.get("unattempted", []),
+            "selected_field_ids": [4, 5], "successful_field_ids": spec["ok"], "failed_field_ids": spec["failed"],
+            "unattempted_field_ids": unattempted, "unattempted_count": len(unattempted), "exit_code": spec["code"],
             "provider_failure_category": spec.get("category"),
         }), encoding="utf-8")
         return {"exit_code": spec["code"], "timed_out": False, "stdout": "", "stderr": spec.get("stderr", "")}
@@ -547,6 +550,9 @@ def test_l_the_production_runner_arguments_still_parse_with_the_default_policy(t
     plan = collector.validate(args)
     assert plan["provider_policy"] == pg.ProviderPolicy()
     assert plan["provider_policy"].min_interval_seconds == 5.0
+    # TASK_251A: the default retry policy fits the production 180 s field timeout.
+    assert plan["timeout_contract"]["field_timeout_seconds"] == 180
+    assert plan["timeout_contract"]["max_retry_wait_capacity_seconds"] >= plan["provider_policy"].retry_budget_seconds
 
 
 @pytest.mark.parametrize("flag,value", [
@@ -592,12 +598,12 @@ def test_m_an_always_throttled_provider_terminates(tmp_path):
     gov = governor(tmp_path, clock, max_retries=10, retry_budget_seconds=1800)
     calls = []
 
-    def send():
+    def send(timeout=None):
         calls.append(1)
         return response(429)
     with pytest.raises(pg.ProviderThrottleError):
         gov.post("statistical", send)
-    assert len(calls) <= 11 and gov.counters.cooldown_seconds <= 1800
+    assert len(calls) <= 11 and gov.counters.cooldown_seconds <= 1800 + gov.policy.max_backoff_seconds
 
 
 def test_m_a_held_pacer_lock_times_out_instead_of_hanging(tmp_path):
@@ -660,7 +666,7 @@ class SlidingWindowProvider:
         self.accepted: list[float] = []
         self.throttled = 0
 
-    def send(self) -> httpx.Response:
+    def send(self, timeout: float | None = None) -> httpx.Response:
         now = self.clock.now
         window = [t for t in self.accepted if now - t < 60.0]
         self.clock.now += self.request_seconds

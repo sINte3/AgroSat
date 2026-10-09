@@ -6,6 +6,7 @@ import tempfile
 
 import pytest
 
+from collector_evidence import write_cycle_summary
 from scripts import collect_satellite as collector
 from services.collection_failure import RUN_FAILURE_CATEGORIES
 
@@ -104,22 +105,9 @@ def test_success_writes_one_sanitized_parent_summary():
 
         def child(command, timeout):
             calls.append((command, timeout))
-            provider_output = Path(command[command.index("--output-dir") + 1])
-            cycle = provider_output / f"cycle_{len(calls)}"
-            cycle.mkdir()
-            (cycle / "cycle_summary.json").write_text(
-                json.dumps(
-                    {
-                        "success_count": 1,
-                        "failure_count": 0,
-                        "inserted_count": 0,
-                        "skipped_existing_count": 1,
-                        "quality_blocked_count": 0,
-                        "timeout_count": 0,
-                    }
-                ),
-                encoding="utf-8",
-            )
+            # Fields 4 and 5 both completed (both already stored), as a real runner records.
+            write_cycle_summary(command, 0, {"success_count": 2, "skipped_existing_count": 2},
+                                cycle=f"cycle_{len(calls)}")
             return {"exit_code": 0, "timed_out": False, "stdout": "ok", "stderr": ""}
 
         args = invocation(root)
@@ -158,8 +146,8 @@ def test_success_writes_one_sanitized_parent_summary():
                 "failure_count": 0,
                 "inserted_count": 0,
                 "quality_blocked_count": 0,
-                "skipped_existing_count": 1,
-                "success_count": 1,
+                "skipped_existing_count": 2,
+                "success_count": 2,
                 "timeout_count": 0,
             },
             "counters_batch_count": 1,
@@ -189,6 +177,7 @@ def test_latest_status_is_running_while_child_executes():
         def child(command, timeout):
             latest_path = root / "output" / collector.LATEST_STATUS_FILENAME
             observed.append(json.loads(latest_path.read_text(encoding="utf-8")))
+            write_cycle_summary(command, 0, {"success_count": 2})
             return {"exit_code": 0, "timed_out": False}
 
         code, _ = collector.run(
@@ -307,6 +296,7 @@ def test_diagnostic_mode_never_maps_to_child_write():
 
         def child(command, timeout):
             seen.append(command)
+            write_cycle_summary(command, 0, {"success_count": 1})
             return {"exit_code": 0, "timed_out": False}
 
         code, _ = collector.run(

@@ -32,6 +32,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from collector_evidence import write_cycle_summary
 from scripts import collect_satellite as collector
 from task229_support import DISK_FULL, READER, SCANNER, ReplaceFaults, Rule
 
@@ -58,11 +59,7 @@ def apply_invocation(root: Path):
 
 def _child(exit_code: int, values: dict[str, int]):
     def child(command, timeout):
-        provider_output = Path(command[command.index("--output-dir") + 1])
-        (provider_output / "cycle_1").mkdir()
-        (provider_output / "cycle_1" / "cycle_summary.json").write_text(
-            json.dumps(values), encoding="utf-8"
-        )
+        write_cycle_summary(command, exit_code, values)
         return {"exit_code": exit_code, "timed_out": False, "stdout": "ok", "stderr": ""}
 
     return child
