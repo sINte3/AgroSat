@@ -4,6 +4,11 @@
 # database name starts with agrosat_h0a, the prefix the PostgreSQL suites
 # require before they touch anything. The container credential below exists
 # only inside this job and is not a secret.
+#
+# main.py refuses to import without a valid SECRET_KEY (TASK_256). The job draws
+# its own random key right after setup-python: masked before it is exported,
+# handed only to the later steps of this job through GITHUB_ENV, and never
+# stored, printed or shared with another job.
 name: PostgreSQL contracts
 
 on:
@@ -50,6 +55,19 @@ jobs:
           python-version: "3.14"
           cache: pip
           cache-dependency-path: backend/requirements*.txt
+      - name: Job-scoped ephemeral SECRET_KEY (test only)
+        shell: python
+        run: |
+          import os
+          import sys
+          from secrets import token_urlsafe
+
+          if "SECRET_KEY" in os.environ:
+              sys.exit("SECRET_KEY is preset; CI uses only a key generated for this job.")
+          key = token_urlsafe(48)
+          print(f"::add-mask::{key}", flush=True)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8", newline="\n") as github_env:
+              github_env.write(f"SECRET_KEY={key}\n")
       - name: Install backend dependencies
         run: python -m pip install -r backend/requirements-dev.txt
       - name: Upgrade an empty PostGIS database to the single head

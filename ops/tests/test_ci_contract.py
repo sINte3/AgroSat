@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 
 import pytest
 
@@ -74,3 +75,36 @@ def test_postgres_lane_is_isolated_and_runs_one_process_per_file():
     run = commands(workflow)
     assert "alembic upgrade head" in run and "alembic heads" in run
     assert 'for file in tests/*postgres*.py' in run
+
+
+KEY_STEP = "Job-scoped ephemeral SECRET_KEY (test only)"
+
+
+def runs_backend_tests(job: dict) -> bool:
+    return any(step.get("working-directory") == "backend" and "pytest" in step.get("run", "")
+               for step in job["steps"])
+
+
+def test_backend_jobs_draw_their_own_masked_secret_key():
+    """TASK_256: main.py refuses an empty SECRET_KEY, so every job that runs backend tests draws a
+    fresh key right after setup-python and masks it before exporting it through GITHUB_ENV. No key
+    is written into a workflow or shared between jobs; a job that never imports the backend gets none."""
+    for name in ("ci.yml", "postgres.yml"):
+        text = (WORKFLOWS / name).read_text(encoding="utf-8")
+        workflow = load(name)
+        assert re.search(r"SECRET_KEY\s*[:=]\s*[^{\s]", text) is None
+        assert "SECRET_KEY" not in (workflow.get("env") or {})
+        for job in workflow["jobs"].values():
+            assert "SECRET_KEY" not in (job.get("env") or {})
+            names = [step.get("name", step.get("uses")) for step in job["steps"]]
+            if not runs_backend_tests(job):
+                assert KEY_STEP not in names
+                continue
+            assert names.count(KEY_STEP) == 1
+            index = names.index(KEY_STEP)
+            assert job["steps"][index - 1]["uses"].startswith("actions/setup-python")
+            step = job["steps"][index]
+            script = step["run"]
+            assert step["shell"] == "python" and "token_urlsafe(48)" in script
+            assert 'if "SECRET_KEY" in os.environ' in script
+            assert script.index("::add-mask::") < script.index('os.environ["GITHUB_ENV"]')
