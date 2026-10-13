@@ -114,6 +114,9 @@ _RESERVED_NAMES = frozenset(
 # runtime; any other principal makes the location unusable.
 _TRUSTED_SIDS = frozenset({"S-1-5-18", "S-1-5-32-544", "S-1-3-4"})
 _CREATOR_OWNER_SID = "S-1-3-0"
+_SID_STRING = re.compile(r"S-1-\d+(?:-\d+)+")
+_ACL_KEYS = frozenset({"protected", "user", "rules"})
+_ACL_RULE_KEYS = frozenset({"sid", "allow", "inherit_only"})
 _ACL_TARGET_VARIABLE = "AGROSAT_CREDENTIAL_ACL_TARGET"
 _ACL_QUERY = r"""
 $ErrorActionPreference = 'Stop'
@@ -351,9 +354,52 @@ def _is_within(path: Path, root: Path) -> bool:
     return True
 
 
+def _acl_unreadable(stage: str) -> AccountError:
+    # Only a fixed stage word (or the exit code) is reported: never the path, a SID, an ACE
+    # or anything PowerShell printed.
+    return AccountError(
+        EXIT_CREDENTIAL_OUTPUT,
+        f"The access control list of the credential location could not be read (stage: {stage}).",
+    )
+
+
+def _acl_from_payload(payload: Any) -> dict[str, Any]:
+    """The probe's JSON in exactly the shape _ACL_QUERY emits; any other shape is unreadable."""
+    if not isinstance(payload, dict) or set(payload) != _ACL_KEYS:
+        raise _acl_unreadable("payload")
+    protected, user, rules = payload["protected"], payload["user"], payload["rules"]
+    if isinstance(rules, dict):
+        rules = [rules]
+    if (
+        not isinstance(protected, bool)
+        or not isinstance(user, str)
+        or not _SID_STRING.fullmatch(user)
+        or not isinstance(rules, list)
+    ):
+        raise _acl_unreadable("payload")
+    for rule in rules:
+        if (
+            not isinstance(rule, dict)
+            or set(rule) != _ACL_RULE_KEYS
+            or not isinstance(rule["sid"], str)
+            or not _SID_STRING.fullmatch(rule["sid"])
+            or not isinstance(rule["allow"], bool)
+            or not isinstance(rule["inherit_only"], bool)
+        ):
+            raise _acl_unreadable("payload")
+    return {"protected": protected, "user": user, "rules": rules}
+
+
 def _read_windows_acl(path: Path) -> dict[str, Any]:
-    """The DACL of ``path`` by SID, read with Get-Acl (locale independent)."""
-    environment = dict(os.environ)
+    """The DACL of ``path`` by SID, read with Get-Acl (locale independent).
+
+    Windows PowerShell is started without PSModulePath. An inherited value can come from
+    PowerShell 7 (a pwsh console, every GitHub Actions ``run:`` step on Windows) and lists
+    PowerShell 7's module folders first; Windows PowerShell then picks PowerShell 7's
+    Microsoft.PowerShell.Security, cannot load it, and Get-Acl does not exist. Without the
+    variable Windows PowerShell builds its own default module path (about_PSModulePath).
+    """
+    environment = {name: value for name, value in os.environ.items() if name.upper() != "PSMODULEPATH"}
     environment[_ACL_TARGET_VARIABLE] = str(path)
     try:
         completed = subprocess.run(
@@ -366,21 +412,17 @@ def _read_windows_acl(path: Path) -> dict[str, Any]:
             env=environment,
             stdin=subprocess.DEVNULL,
         )
-        payload = json.loads(completed.stdout.strip()) if completed.returncode == 0 else None
+    except subprocess.TimeoutExpired:
+        raise _acl_unreadable("timeout") from None
     except (OSError, subprocess.SubprocessError, ValueError):
-        payload = None
-    if not isinstance(payload, dict):
-        raise AccountError(
-            EXIT_CREDENTIAL_OUTPUT, "The access control list of the credential location could not be read."
-        )
-    rules = payload.get("rules") or []
-    if isinstance(rules, dict):
-        rules = [rules]
-    return {
-        "protected": bool(payload.get("protected")),
-        "user": str(payload.get("user") or ""),
-        "rules": [rule for rule in rules if isinstance(rule, dict)],
-    }
+        raise _acl_unreadable("start") from None
+    if completed.returncode != 0:
+        raise _acl_unreadable(f"exit code {completed.returncode}")
+    try:
+        payload = json.loads(completed.stdout.strip())
+    except ValueError:
+        raise _acl_unreadable("output") from None
+    return _acl_from_payload(payload)
 
 
 def _acl_problem(acl: dict[str, Any], *, directory: bool) -> Optional[str]:
