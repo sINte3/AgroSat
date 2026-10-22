@@ -152,5 +152,10 @@ jobs:
         run: npm run test:contracts
       - name: Production build
         run: npm run build
-      - name: npm audit (never --force)
-        run: npm audit --audit-level=high
+      # TASK_264: raw `npm audit --audit-level=high` keeps failing on the braces
+      # advisory GHSA-vfj7-8cjw-p6xm (no fixed release; build-only via Tailwind 3).
+      # The gate runs fresh full and --omit=dev audits and accepts only that
+      # advisory, dev-only, until 2026-11-14T23:59:59Z; any other HIGH or CRITICAL
+      # finding, npm or registry failure fails the job. Offline policy tests first.
+      - name: npm audit policy gate (never --force; time-limited braces waiver)
+        run: node scripts/security/audit-gate.test.mjs && node scripts/security/audit-gate.mjs
