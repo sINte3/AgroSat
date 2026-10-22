@@ -374,15 +374,16 @@ class CollectorModeTests(unittest.TestCase):
             "_invalidate_observation_cache",
             side_effect=RuntimeError("offline"),
         ) as invalidate:
-            session.return_value.execute.return_value = None
-            self.assertTrue(collector._insert_satellite_index_record(
+            # TASK_255: the INSERT returned an id and the COMMIT succeeded.
+            session.return_value.execute.return_value.scalar.return_value = 101
+            self.assertIs(collector._insert_satellite_index_record(
                 1,
                 __import__("datetime").date.today(),
                 "savi",
                 0.5,
                 "Sentinel-2",
                 enterprise_id=17,
-            ))
+            ), collector.PersistenceOutcome.INSERTED)
         session.assert_called_once()
         invalidate.assert_called_once_with(17)
 

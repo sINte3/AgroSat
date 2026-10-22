@@ -33,9 +33,11 @@ import json
 import logging
 import math
 import os
+import re
 import sys
 import time
 from datetime import date, datetime, timedelta, timezone
+from enum import Enum
 from typing import Any, Optional
 
 try:
@@ -346,7 +348,9 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--overwrite", action="store_true", default=False,
         help="Overwrite existing records on conflict (requires --write). "
-             "Not enabled by default -- idempotent skip is default.",
+             "Not enabled by default -- idempotent skip is default. The exact-key "
+             "row is deleted and its replacement inserted in one transaction: a "
+             "failed replacement keeps the original row and is reported as an error.",
     )
     parser.add_argument(
         "--output-log", type=str, default=None,
@@ -656,6 +660,85 @@ def _invalidate_observation_cache(enterprise_id: int) -> bool:
     )
 
 
+# -- Persistence outcome contract (TASK_255) --
+
+
+class PersistenceOutcome(Enum):
+    """What one satellite_index_records write did.
+
+    Before TASK_255 the writer returned a bool whose ``False`` meant both "the
+    exact key already exists" and "the write failed", so a failed write was
+    counted as a skip. Members refuse truth testing: a caller must name the
+    outcome it handles.
+    """
+
+    INSERTED = "inserted"              # this call's transaction committed; the row is durable
+    ALREADY_EXISTS = "already_exists"  # a row with the exact key is confirmed present
+    WRITE_FAILED = "write_failed"      # only ever carried by SatelliteIndexWriteError
+
+    def __bool__(self):
+        raise TypeError("PersistenceOutcome has no truth value; compare it with a member")
+
+
+_SQLSTATE = re.compile(r"^[0-9A-Z]{5}$")
+
+
+def _sqlstate(error: BaseException | None) -> str | None:
+    """The PostgreSQL SQLSTATE of a driver error, if it carries a well-formed one."""
+    code = getattr(getattr(error, "orig", None), "pgcode", None)
+    return code if isinstance(code, str) and _SQLSTATE.match(code) else None
+
+
+class SatelliteIndexWriteError(RuntimeError):
+    """WRITE_FAILED: one satellite index record was not provably persisted.
+
+    Carries identifiers, the failed stage, the exception class and the SQLSTATE
+    only -- never the driver message, SQL text, bind values or connection
+    target, so the summary is safe for child output and JSON evidence.
+    """
+
+    outcome = PersistenceOutcome.WRITE_FAILED
+
+    def __init__(
+        self,
+        field_id: int,
+        captured_date: date,
+        index_code: str,
+        stage: str,
+        error: BaseException | None,
+        *,
+        commit_outcome_unknown: bool = False,
+    ):
+        self.field_id = field_id
+        self.captured_date = captured_date
+        self.index_code = index_code
+        self.stage = stage
+        self.error_type = type(error).__name__ if error is not None else None
+        self.sqlstate = _sqlstate(error)
+        self.commit_outcome_unknown = commit_outcome_unknown
+        super().__init__(self.summary())
+
+    def summary(self) -> str:
+        text = (
+            f"persistence failed: field={self.field_id} date={self.captured_date} "
+            f"index={self.index_code} stage={self.stage} "
+            f"error={self.error_type or 'none'} sqlstate={self.sqlstate or 'none'}"
+        )
+        return text + (" commit_outcome=unknown" if self.commit_outcome_unknown else "")
+
+    def evidence(self) -> dict:
+        return {
+            "field_id": self.field_id,
+            "index_code": self.index_code,
+            "captured_date": str(self.captured_date),
+            "outcome": self.outcome.value,
+            "stage": self.stage,
+            "error_type": self.error_type,
+            "sqlstate": self.sqlstate,
+            "commit_outcome_unknown": self.commit_outcome_unknown,
+        }
+
+
 def _insert_satellite_index_record(
     field_id: int,
     captured_date: date,
@@ -670,35 +753,66 @@ def _insert_satellite_index_record(
     valid_pixels_pct: float | None = None,
     cloud_cover_pct: float | None = None,
     enterprise_id: int | None = None,
-) -> bool:
+    replace_existing: bool = False,
+) -> PersistenceOutcome:
     """
-    Insert a single satellite_index_record. Returns True on success, False on skip/error.
+    Persist one satellite_index_record and say exactly what happened (TASK_255).
 
-    Uses idempotent insert: checks (field_id, captured_date, index_code) uniqueness
-    before inserting. Does NOT overwrite existing records.
+    INSERTED is returned only after this call's transaction committed.
+    ALREADY_EXISTS is returned only when a row with the exact
+    (field_id, captured_date, index_code) key is confirmed present: by the
+    read-only pre-check, or by that unique key itself arbitrating the insert
+    (ON CONFLICT on exactly those columns) followed by a re-read of the row.
+    Every other failure -- the pre-check, the INSERT (foreign key, NOT NULL,
+    primary key, permissions, connection) or the COMMIT -- is rolled back and
+    raised as SatelliteIndexWriteError; it is never a skip.
+
+    ``replace_existing`` (--overwrite) deletes the exact-key row and inserts the
+    replacement in one transaction: both commit or neither does.
     """
     require_real_provenance(satellite)
     if type(enterprise_id) is not int or enterprise_id <= 0:
         raise ValueError("enterprise_id is required for cache invalidation")
-    if check_exists_by_key(field_id, captured_date, index_code):
-        logger.info("  SKIP (exists): field=%d date=%s code=%s", field_id, captured_date, index_code)
-        return False
 
+    def failure(stage: str, error: BaseException | None, **extra) -> SatelliteIndexWriteError:
+        failed = SatelliteIndexWriteError(field_id, captured_date, index_code, stage, error, **extra)
+        logger.error("  INSERT FAILED: %s", failed.summary())
+        return failed
+
+    if not replace_existing:
+        try:
+            exists = check_exists_by_key(field_id, captured_date, index_code)
+        except Exception as error:
+            raise failure("exists_check", error) from None
+        if exists:
+            logger.info("  SKIP (exists): field=%d date=%s code=%s", field_id, captured_date, index_code)
+            return PersistenceOutcome.ALREADY_EXISTS
+
+    key = {"fid": field_id, "cd": captured_date, "ic": index_code}
     db = SessionLocal()
+    stage = "replace_delete" if replace_existing else "insert"
     try:
         from sqlalchemy import text as sa_text
 
-        db.execute(
+        if replace_existing:
+            db.execute(
+                sa_text(
+                    "DELETE FROM satellite_index_records "
+                    "WHERE field_id = :fid AND captured_date = :cd AND index_code = :ic"
+                ),
+                key,
+            )
+            stage = "insert"
+        inserted_id = db.execute(
             sa_text(
                 "INSERT INTO satellite_index_records "
                 "(field_id, captured_date, index_code, mean_value, min_value, max_value, "
                 " std_value, p10_value, p90_value, valid_pixels_pct, cloud_cover_pct, satellite) "
-                "VALUES (:fid, :cd, :ic, :mv, :minv, :maxv, :stdv, :p10, :p90, :vpp, :ccp, :sat)"
+                "VALUES (:fid, :cd, :ic, :mv, :minv, :maxv, :stdv, :p10, :p90, :vpp, :ccp, :sat) "
+                "ON CONFLICT (field_id, captured_date, index_code) DO NOTHING RETURNING id"
             ),
             {
-                "fid": field_id,
-                "cd": captured_date,
-                "ic": index_code,
+                **key,
                 "mv": mean_value,
                 "minv": min_value,
                 "maxv": max_value,
@@ -709,22 +823,51 @@ def _insert_satellite_index_record(
                 "ccp": cloud_cover_pct,
                 "sat": satellite,
             },
-        )
+        ).scalar()
+        if inserted_id is None:
+            # Only the unique key on exactly these columns can arbitrate this conflict
+            # (a concurrent writer committed the key after the pre-check). Re-read the
+            # row; a replacement that did not happen is a failure, never a skip.
+            stage = "conflict_check"
+            present = db.execute(
+                sa_text(
+                    "SELECT 1 FROM satellite_index_records "
+                    "WHERE field_id = :fid AND captured_date = :cd AND index_code = :ic"
+                ),
+                key,
+            ).first() is not None
+            db.rollback()
+            if replace_existing or not present:
+                raise failure("conflict_check", None)
+            logger.info("  SKIP (exists, concurrent): field=%d date=%s code=%s", field_id, captured_date, index_code)
+            return PersistenceOutcome.ALREADY_EXISTS
+        stage = "commit"
         db.commit()
+    except SatelliteIndexWriteError:
+        raise
+    except Exception as error:
         try:
-            _invalidate_observation_cache(enterprise_id)
+            db.rollback()
         except Exception:
-            logger.warning(
-                "Redis invalidation failed after committed satellite-index write"
-            )
-        logger.info("  INSERTED: field=%d date=%s code=%s mean=%.4f", field_id, captured_date, index_code, mean_value or 0)
-        return True
-    except Exception:
-        db.rollback()
-        logger.exception("  INSERT FAILED: field=%d date=%s code=%s", field_id, captured_date, index_code)
-        return False
+            logger.warning("Rollback after a failed satellite-index write also failed")
+        # A COMMIT that raised may or may not have been applied by the server: fail
+        # closed and say so; the next run re-reads the key before writing again.
+        raise failure(stage, error, commit_outcome_unknown=stage == "commit") from None
     finally:
-        db.close()
+        try:
+            db.close()
+        except Exception:
+            logger.warning("Session close failed after a satellite-index write")
+
+    # Committed and durable from here on: a cache outage cannot undo that.
+    try:
+        _invalidate_observation_cache(enterprise_id)
+    except Exception:
+        logger.warning(
+            "Redis invalidation failed after committed satellite-index write"
+        )
+    logger.info("  INSERTED: field=%d date=%s code=%s mean=%.4f", field_id, captured_date, index_code, mean_value or 0)
+    return PersistenceOutcome.INSERTED
 
 
 def run_real(args: argparse.Namespace) -> None:
@@ -881,7 +1024,9 @@ def run_real(args: argparse.Namespace) -> None:
     total_quality_blocked = 0
     total_db_inserted = 0
     total_db_skipped = 0
+    total_db_write_failed = 0
     total_errors = 0
+    failed_fields = 0
 
     print()
     print("=" * 60)
@@ -924,6 +1069,8 @@ def run_real(args: argparse.Namespace) -> None:
         field_quality_blocked = 0
         field_db_inserted = 0
         field_db_skipped = 0
+        field_db_write_failed = 0
+        field_write_failures: list[dict] = []
 
         # Plan actions per index code
         planned = plan_actions(fid, codes, date_from, date_to, idempotency_mode)
@@ -990,6 +1137,7 @@ def run_real(args: argparse.Namespace) -> None:
             print(f"      ERROR: {err_msg}")
             field_errors.append(err_msg)
             total_errors += 1
+            failed_fields += 1
             per_field_results.append({
                 "field_id": fid,
                 "field_name": fname,
@@ -1106,59 +1254,54 @@ def run_real(args: argparse.Namespace) -> None:
                   f"min={min_val} max={max_val} valid_pct={vpp} cloud_pct={ccp}")
 
             if do_db_writes:
-                if not do_overwrite and check_exists_by_key(fid, cd, code):
+                try:
+                    outcome = _insert_satellite_index_record(
+                        field_id=fid,
+                        captured_date=cd,
+                        index_code=code,
+                        mean_value=mean_val,
+                        min_value=min_val,
+                        max_value=max_val,
+                        std_value=std_val,
+                        p10_value=p10_val,
+                        p90_value=p90_val,
+                        valid_pixels_pct=vpp,
+                        cloud_cover_pct=ccp,
+                        satellite=getattr(service, "source", None),
+                        enterprise_id=int(field["enterprise_id"]),
+                        replace_existing=do_overwrite,
+                    )
+                except SatelliteIndexWriteError as failed:
+                    # TASK_255: a write that did not provably persist is an error of
+                    # this field and invocation, never an existing-record skip.
+                    print(f"        WRITE FAILED: {failed.summary()}")
+                    field_errors.append(failed.summary())
+                    field_write_failures.append(failed.evidence())
+                    field_db_write_failed += 1
+                    total_db_write_failed += 1
+                    total_errors += 1
+                    continue
+                if outcome is PersistenceOutcome.INSERTED:
+                    if do_overwrite:
+                        print(f"        OVERWRITE: existing record for {code} replaced in one transaction")
+                    field_db_inserted += 1
+                    total_db_inserted += 1
+                elif outcome is PersistenceOutcome.ALREADY_EXISTS:
                     print(f"        SKIP (exists in DB)")
                     field_db_skipped += 1
                     total_db_skipped += 1
-                    continue
-
-                if do_overwrite:
-                    db = SessionLocal()
-                    try:
-                        from sqlalchemy import text as sa_text
-                        db.execute(
-                            sa_text(
-                                "DELETE FROM satellite_index_records "
-                                "WHERE field_id = :fid AND captured_date = :cd AND index_code = :ic"
-                            ),
-                            {"fid": fid, "cd": cd, "ic": code},
-                        )
-                        db.commit()
-                        print(f"        OVERWRITE: deleted existing record for {code}")
-                    except Exception:
-                        db.rollback()
-                    finally:
-                        db.close()
-
-                inserted = _insert_satellite_index_record(
-                    field_id=fid,
-                    captured_date=cd,
-                    index_code=code,
-                    mean_value=mean_val,
-                    min_value=min_val,
-                    max_value=max_val,
-                    std_value=std_val,
-                    p10_value=p10_val,
-                    p90_value=p90_val,
-                    valid_pixels_pct=vpp,
-                    cloud_cover_pct=ccp,
-                    satellite=getattr(service, "source", None),
-                    enterprise_id=int(field["enterprise_id"]),
-                )
-                if inserted:
-                    field_db_inserted += 1
-                    total_db_inserted += 1
                 else:
-                    field_db_skipped += 1
-                    total_db_skipped += 1
+                    raise RuntimeError("unexpected satellite-index persistence outcome")
             else:
                 field_would_insert += 1
                 total_would_insert += 1
 
+        if field_db_write_failed:
+            failed_fields += 1
         per_field_results.append({
             "field_id": fid,
             "field_name": fname,
-            "status": "ok",
+            "status": "write_failed" if field_db_write_failed else "ok",
             "errors": field_errors,
             "codes_to_collect": codes_to_collect,
             "candidates": field_candidates,
@@ -1169,6 +1312,8 @@ def run_real(args: argparse.Namespace) -> None:
             "would_skip_multi_day": field_would_skip_multi_day,
             "db_inserted": field_db_inserted,
             "db_skipped": field_db_skipped,
+            "db_write_failed": field_db_write_failed,
+            "write_failures": field_write_failures,
             "sentinel_intervals": field_intervals_meta,
             "candidate_records": field_candidate_records,
         })
@@ -1194,6 +1339,7 @@ def run_real(args: argparse.Namespace) -> None:
     print(f"  Would skip existing:  {total_would_skip_existing}")
     print(f"  DB inserted:          {total_db_inserted}")
     print(f"  DB skipped (exists):  {total_db_skipped}")
+    print(f"  DB write failed:      {total_db_write_failed}")
     print(f"  Errors:               {total_errors}")
     print(f"  Overwrite:            {do_overwrite}")
     print(f"  Idempotency mode:     {idempotency_mode}")
@@ -1221,10 +1367,14 @@ def run_real(args: argparse.Namespace) -> None:
         print()
 
     if do_db_writes:
-        print(f"  DB writes:            {total_db_inserted} inserted, {total_db_skipped} skipped")
+        print(f"  DB writes:            {total_db_inserted} inserted, {total_db_skipped} skipped, "
+              f"{total_db_write_failed} failed")
     else:
         print(f"  DB writes:            NONE ({mode_label})")
     print("=" * 60)
+
+    # The JSON summary states the exit code the process really exits with.
+    exit_code = 1 if total_errors > 0 else 0
 
     # JSON output if requested
     if args.output_log:
@@ -1246,6 +1396,9 @@ def run_real(args: argparse.Namespace) -> None:
             "would_skip_existing": total_would_skip_existing,
             "db_inserted": total_db_inserted,
             "db_skipped": total_db_skipped,
+            # TASK_255: candidates whose write did not provably persist; each one is
+            # also counted in ``errors``, never in ``db_skipped``.
+            "db_write_failed": total_db_write_failed,
             "errors": total_errors,
             "idempotency_mode": idempotency_mode,
             "overwrite": do_overwrite,
@@ -1253,13 +1406,23 @@ def run_real(args: argparse.Namespace) -> None:
             "sentinel_hub_calls_made": total_sentinel_calls,
             "db_writes_performed": total_db_inserted,
             "db_skipped_existing": total_db_skipped,
-            "success_count": total_fields - total_errors,
-            "failure_count": total_errors,
+            # Fields with at least one collection or persistence error.
+            "success_count": total_fields - failed_fields,
+            "failure_count": failed_fields,
             "started_at": started_at.isoformat(),
             "finished_at": finished_at.isoformat(),
             "duration_seconds": duration,
-            "exit_code": 0,
+            "exit_code": exit_code,
             "provider_resilience": None if provider_governor is None else provider_governor.process_summary(),
+            # Field-level outcome evidence: status, sanitized errors and every failed key.
+            "per_field_results": [
+                {
+                    key: r.get(key)
+                    for key in ("field_id", "status", "errors", "candidates", "quality_blocked",
+                                "db_inserted", "db_skipped", "db_write_failed", "write_failures")
+                }
+                for r in per_field_results
+            ],
             # Sentinel interval metadata for date-mapping audit
             "per_field_intervals": [
                 {
@@ -1271,9 +1434,7 @@ def run_real(args: argparse.Namespace) -> None:
             ],
         })
 
-    if total_errors > 0:
-        sys.exit(1)
-    sys.exit(0)
+    sys.exit(exit_code)
 
 
 # -- JSON output helper --
