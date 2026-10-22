@@ -60,7 +60,13 @@ def test_fast_lane_covers_the_required_checks():
     assert "python -m pytest tests -q" in run and "python -m pytest ops/tests -q" in run
     assert "Parser]::ParseFile" in run
     assert "npm ci" in run and "npm run test:contracts" in run and "npm run build" in run
-    assert "npm audit --audit-level=high" in run
+    audit_step = workflow["jobs"]["frontend"]["steps"][-1]
+    assert audit_step.get("run", "").strip() == (
+        "node scripts/security/audit-gate.test.mjs && "
+        "node scripts/security/audit-gate.mjs"
+    )
+    assert "if" not in audit_step
+    assert audit_step.get("continue-on-error") is not True
     assert workflow["jobs"]["ops"]["runs-on"] == "windows-latest"  # real Job Objects, never a Linux mock
     assert workflow["concurrency"]["cancel-in-progress"] is True
 
